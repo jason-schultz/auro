@@ -1,0 +1,25 @@
+# Rust
+auro_be/target/
+
+# Node/Bun
+auro_fe/node_modules/
+auro_fe/dist/
+auro_fe/.vite/
+auro_fe/bun.lockb
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Scripts output
+scripts/*.log
