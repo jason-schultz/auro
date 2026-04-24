@@ -323,6 +323,17 @@ async fn evaluate_entry(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let params = &strategy.parameters;
 
+    let already_open = open_positions.values().any(|pos| pos.instrument == strategy.instrument);
+
+    if already_open {
+        tracing::debug!(
+            "[SKIP ENTRY] {} {} - position already open on this instrument",
+            strategy.instrument,
+            strategy.granularity
+        );
+        return Ok(());
+    }
+
     match strategy.strategy_type.as_str() {
         "mean_reversion" => {
             let mr_params = MeanReversionParams {
