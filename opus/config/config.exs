@@ -29,7 +29,7 @@ config :opus, Oban,
      timezone: "Etc/UTC",
      crontab: [
        {"0 * * * *", Opus.Trading.EvaluationWorker, args: %{granularity: "H1"}},
-       {"*/15 * * * *", Opus.Trading.EvaluationWorker, args: %{granularity: "H15"}}
+       {"*/15 * * * *", Opus.Trading.EvaluationWorker, args: %{granularity: "M15"}}
      ]}
   ],
   queues: [evaluations: 2]
