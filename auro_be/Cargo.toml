@@ -45,6 +45,9 @@ dotenvy = "0.15"
 thiserror = "2"
 anyhow = "1"
 
+# Cache
+lru = "0.12"
+
 [[bin]]
 name = "run_backtests"
 path = "src/bin/run_backtests.rs"

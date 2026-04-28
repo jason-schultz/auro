@@ -48,7 +48,7 @@ impl CandleAccumulator {
                 self.open = mid;
                 self.high = mid;
                 self.low = mid;
-                self.close= mid;
+                self.close = mid;
                 self.tick_count = 1;
 
                 Some(ohlc)
@@ -61,7 +61,7 @@ impl CandleAccumulator {
                 self.close = mid;
                 self.tick_count = 1;
                 None
-            },
+            }
             _ => {
                 // Same slot, just update high/low/close
                 self.high = self.high.max(mid);
@@ -69,7 +69,7 @@ impl CandleAccumulator {
                 self.close = mid;
                 self.tick_count += 1;
                 None
-            },
+            }
         };
 
         self.current_slot = Some(slot);

@@ -6,7 +6,8 @@ mod error;
 mod oanda;
 mod state;
 
-use std::sync::Arc;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
 use crate::engine::live::spawn_live_evaluator;
@@ -17,6 +18,7 @@ use crate::oanda::is_forex_market_open;
 use crate::oanda::stream::spawn_price_stream;
 use crate::state::{AppState, LiveState};
 
+use lru::LruCache;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
@@ -145,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
         oanda: oanda.clone(),
         live: Arc::new(LiveState::new()),
         price_tx: price_tx.clone(),
+        eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
     };
 
     // Spawn the tick aggregator (subscribes to price stream, writes M1 candles to DB)

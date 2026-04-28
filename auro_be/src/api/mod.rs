@@ -1,7 +1,7 @@
 mod account;
 mod backtest;
 mod candles;
-mod evaluator;
+pub mod evaluator;
 mod health;
 mod live_strategies;
 mod strategies;
