@@ -111,17 +111,17 @@ pub async fn get_strategy(
     .map_err(crate::error::AppError::Database)?;
 
     match row {
-        Some((id, name, instrument, granularity, enabled, config)) => {
-            Ok(Json(json!({
-                "id": id,
-                "name": name,
-                "instrument": instrument,
-                "granularity": granularity,
-                "enabled": enabled,
-                "config": config,
-            })))
-        }
-        None => Err(crate::error::AppError::NotFound("Strategy not found".into())),
+        Some((id, name, instrument, granularity, enabled, config)) => Ok(Json(json!({
+            "id": id,
+            "name": name,
+            "instrument": instrument,
+            "granularity": granularity,
+            "enabled": enabled,
+            "config": config,
+        }))),
+        None => Err(crate::error::AppError::NotFound(
+            "Strategy not found".into(),
+        )),
     }
 }
 
@@ -146,7 +146,9 @@ pub async fn update_strategy(
     .map_err(crate::error::AppError::Database)?;
 
     if result.rows_affected() == 0 {
-        return Err(crate::error::AppError::NotFound("Strategy not found".into()));
+        return Err(crate::error::AppError::NotFound(
+            "Strategy not found".into(),
+        ));
     }
 
     Ok(Json(json!({
@@ -172,7 +174,9 @@ pub async fn toggle_strategy(
 
     match row {
         Some((enabled,)) => Ok(Json(json!({ "id": id, "enabled": enabled }))),
-        None => Err(crate::error::AppError::NotFound("Strategy not found".into())),
+        None => Err(crate::error::AppError::NotFound(
+            "Strategy not found".into(),
+        )),
     }
 }
 
@@ -187,7 +191,9 @@ pub async fn delete_strategy(
         .map_err(crate::error::AppError::Database)?;
 
     if result.rows_affected() == 0 {
-        return Err(crate::error::AppError::NotFound("Strategy not found".into()));
+        return Err(crate::error::AppError::NotFound(
+            "Strategy not found".into(),
+        ));
     }
 
     Ok(Json(json!({ "deleted": true })))

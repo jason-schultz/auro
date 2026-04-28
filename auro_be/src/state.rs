@@ -23,7 +23,7 @@ pub struct AppState {
 pub struct LiveState {
     pub buffers: RwLock<HashMap<BufferKey, CandleBuffer>>,
     pub accumulators: RwLock<HashMap<BufferKey, CandleAccumulator>>,
-    pub open_positions: RwLock<HashMap<Uuid, OpenPosition>>,
+    pub open_positions: RwLock<HashMap<String, OpenPosition>>,
     pub last_eval_minute: RwLock<HashMap<String, u32>>,
     pub last_quotes: RwLock<HashMap<String, LastQuote>>,
 }

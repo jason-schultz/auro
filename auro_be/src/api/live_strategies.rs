@@ -22,6 +22,23 @@ pub struct ListParams {
     pub enabled: Option<bool>,
 }
 
+pub async fn debug_positions(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    let positions = state.live.open_positions.read().await;
+    let dump: Vec<_> = positions
+        .values()
+        .map(|p| {
+            json!({
+                "strategy_id": p.strategy_id,
+                "trade_id": p.trade_id,
+                "instrument": p.instrument,
+                "direction": p.direction,
+                "entry_price": p.entry_price,
+            })
+        })
+        .collect();
+    Ok(Json(json!({"count": dump.len(), "positions": dump})))
+}
+
 pub async fn list_live_strategies(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,

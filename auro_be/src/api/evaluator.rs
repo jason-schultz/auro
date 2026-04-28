@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use axum::extract::{Path, State};
 use axum::Json;
 use chrono::{DateTime, Utc};
@@ -7,25 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
-
-pub enum Granularity {
-    H1,
-    M15,
-}
-
-impl FromStr for Granularity {
-    type Err = AppError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "H1" => Ok(Self::H1),
-            "M15" => Ok(Self::M15),
-            _ => Err(AppError::BadRequest(format!(
-                "unsupported granularity: {}",
-                s
-            ))),
-        }
-    }
-}
 
 #[derive(Deserialize)]
 pub struct EvaluateRequest {
