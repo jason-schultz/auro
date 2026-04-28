@@ -59,6 +59,7 @@ pub struct CandleBuffer {
     pub closes: Vec<f64>,
     pub max_size: usize,
     pub current_mid: f64,
+    pub last_close_time: Option<DateTime<Utc>>,
 }
 
 impl CandleBuffer {
@@ -67,11 +68,13 @@ impl CandleBuffer {
             closes: Vec::new(),
             max_size,
             current_mid: 0.0,
+            last_close_time: None,
         }
     }
 
-    pub fn push(&mut self, close: f64) {
+    pub fn push(&mut self, close: f64, close_time: DateTime<Utc>) {
         self.closes.push(close);
+        self.last_close_time = Some(close_time);
         if self.closes.len() > self.max_size {
             self.closes.remove(0);
         }
