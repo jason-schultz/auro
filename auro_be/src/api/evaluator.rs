@@ -14,7 +14,7 @@ pub struct EvaluateRequest {
     pub idempotency_key: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct EvaluateResponse {
     pub evaluated: bool,
     pub target_slot: DateTime<Utc>,
@@ -36,11 +36,34 @@ pub async fn evaluate(
         .parse()
         .map_err(|e| AppError::BadRequest(format!("invalid granularity: {}", e)))?;
 
-    // TODO (1d): check idempotency cache, return cached if hit
+    {
+        let mut cache = state.eval_cache.lock().unwrap();
+        if let Some(cached) = cache.get(&body.idempotency_key) {
+            tracing::info!("Cache hit for idempotency key {}", body.idempotency_key);
+            let mut response = cached.clone();
+            response.duplicate = true;
+            return Ok(Json(response));
+        }
+    }
 
     // Check trading enabled
+    let response = run_evaluation(&state, granularity, &body).await?;
+
+    {
+        let mut cache = state.eval_cache.lock().unwrap();
+        cache.put(body.idempotency_key.clone(), response.clone());
+    }
+
+    Ok(Json(response))
+}
+
+async fn run_evaluation(
+    state: &AppState,
+    granularity: Granularity,
+    body: &EvaluateRequest,
+) -> Result<EvaluateResponse, AppError> {
     if !is_trading_enabled(&state.db).await {
-        return Ok(Json(EvaluateResponse {
+        return Ok(EvaluateResponse {
             evaluated: false,
             target_slot: body.target_slot,
             data_slot: None,
@@ -48,9 +71,9 @@ pub async fn evaluate(
             duplicate: false,
             signals: vec![],
             reason: Some("trading_disabled".to_string()),
-        }));
+        });
     }
-
+    // Perform evaluation
     // Find instruments with enabled strategies at this granularity
     let instruments: Vec<(String,)> = sqlx::query_as(
         "SELECT DISTINCT instrument FROM live_strategies WHERE granularity = $1 AND enabled = true",
@@ -61,7 +84,7 @@ pub async fn evaluate(
     .map_err(AppError::from)?;
 
     if instruments.is_empty() {
-        return Ok(Json(EvaluateResponse {
+        return Ok(EvaluateResponse {
             evaluated: true,
             target_slot: body.target_slot,
             data_slot: None,
@@ -69,7 +92,7 @@ pub async fn evaluate(
             duplicate: false,
             signals: vec![],
             reason: Some("no_active_strategies".to_string()),
-        }));
+        });
     }
 
     // Evaluate each instrument
@@ -155,7 +178,7 @@ pub async fn evaluate(
         _ => 0,
     };
 
-    Ok(Json(EvaluateResponse {
+    Ok(EvaluateResponse {
         evaluated: any_evaluated,
         target_slot: body.target_slot,
         data_slot: oldest_data_slot,
@@ -163,5 +186,5 @@ pub async fn evaluate(
         duplicate: false,
         signals: all_signals,
         reason: None,
-    }))
+    })
 }

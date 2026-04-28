@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, RwLock};
 
 use chrono::{DateTime, Utc};
+use lru::LruCache;
 use sqlx::PgPool;
-use uuid::Uuid;
 
+use crate::api::evaluator::EvaluateResponse;
 use crate::config::Config;
 use crate::engine::types::{BufferKey, CandleAccumulator, CandleBuffer, OpenPosition};
 use crate::oanda::client::OandaClient;
@@ -18,6 +19,7 @@ pub struct AppState {
     pub oanda: OandaClient,
     pub live: Arc<LiveState>,
     pub price_tx: broadcast::Sender<StreamMessage>,
+    pub eval_cache: Arc<Mutex<LruCache<String, EvaluateResponse>>>,
 }
 
 pub struct LiveState {

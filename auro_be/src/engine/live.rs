@@ -101,7 +101,9 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 accumulator.on_minute_close(slot, mid)
                             };
 
-                            let Some((candle_open, candle_high, candle_low, candle_close)) = maybe_close else {
+                            let Some((candle_open, candle_high, candle_low, candle_close)) =
+                                maybe_close
+                            else {
                                 continue;
                             };
 
@@ -1110,11 +1112,17 @@ mod tests {
         acc.on_minute_close(0, 1.1000);
         acc.on_minute_close(0, 1.1050);
 
-        assert_eq!(acc.on_minute_close(1, 1.2000), Some((1.1000, 1.1050, 1.1000, 1.1050)));
+        assert_eq!(
+            acc.on_minute_close(1, 1.2000),
+            Some((1.1000, 1.1050, 1.1000, 1.1050))
+        );
 
         acc.on_minute_close(1, 1.2200);
 
-        assert_eq!(acc.on_minute_close(2, 1.3000), Some((1.2000, 1.2200, 1.2000, 1.2200)));
+        assert_eq!(
+            acc.on_minute_close(2, 1.3000),
+            Some((1.2000, 1.2200, 1.2000, 1.2200))
+        );
     }
 
     // --- CandleBuffer tests ---
