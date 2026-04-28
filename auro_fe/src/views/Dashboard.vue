@@ -418,8 +418,8 @@ async function loadPositions() {
                 : getLastKnownPrice(t.instrument);
 
             const entryPrice = parseFloat(t.price || "0");
-            const pl = parseFloat(t.unrealizedPL || "0");
             const units = parseFloat(t.currentUnits || t.initialUnits || "0");
+            const pl = parseFloat(t.unrealizedPL || "0");
             const isLong = units > 0;
             return {
                 id: t.id,

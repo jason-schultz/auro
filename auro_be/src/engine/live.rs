@@ -101,7 +101,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 accumulator.on_minute_close(slot, mid)
                             };
 
-                            let Some(candle_close) = maybe_close else {
+                            let Some((candle_open, candle_high, candle_low, candle_close)) = maybe_close else {
                                 continue;
                             };
 
@@ -115,28 +115,30 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 buffer.current_mid = mid;
 
                                 tracing::debug!(
-                                    "{} candle closed for {}: close={:.5}, buffer_len={}",
+                                    "{} candle closed for {}: Open={:.5} High={:.5} Low={:.5} Close={:.5}, buffer_len={}",
                                     granularity,
                                     instrument,
+                                    candle_open,
+                                    candle_high,
+                                    candle_low,
                                     candle_close,
                                     buffer.closes.len()
                                 );
                                 buffer.clone()
                             };
 
-                            // Persist the closed candle to DB so prefill on restart sees it
-                            // NOTE: open/high/low are stubbed as close because CandleAccumulator
-                            // only tracks close price. Prefill only reads close, so this works.
-                            // If you need real OHLC for live-aggregated candles, enhance
-                            // CandleAccumulator to track high/low across the slot.
+                            // OHLC is ready, persist the candle
                             if let Err(e) = sqlx::query(
                                 r#"INSERT INTO candles (instrument, granularity, timestamp, open, high, low, close, volume, complete)
-                                VALUES ($1, $2, $3, $4, $4, $4, $4, 0, true)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, 0, true)
                                 ON CONFLICT (instrument, granularity, timestamp) DO NOTHING"#
                             )
                             .bind(instrument)
                             .bind(granularity.as_str())
                             .bind(slot_time)
+                            .bind(candle_open)
+                            .bind(candle_high)
+                            .bind(candle_low)
                             .bind(candle_close)
                             .execute(&state.db)
                             .await
@@ -1099,7 +1101,7 @@ mod tests {
         acc.on_minute_close(10, 1.2360); // last_mid = 1.2360
 
         let result = acc.on_minute_close(11, 1.2365);
-        assert_eq!(result, Some(1.2360));
+        assert_eq!(result, Some((1.2345, 1.2360, 1.2345, 1.2360)));
     }
 
     #[test]
@@ -1108,11 +1110,11 @@ mod tests {
         acc.on_minute_close(0, 1.1000);
         acc.on_minute_close(0, 1.1050);
 
-        assert_eq!(acc.on_minute_close(1, 1.2000), Some(1.1050));
+        assert_eq!(acc.on_minute_close(1, 1.2000), Some((1.1000, 1.1050, 1.1000, 1.1050)));
 
         acc.on_minute_close(1, 1.2200);
 
-        assert_eq!(acc.on_minute_close(2, 1.3000), Some(1.2200));
+        assert_eq!(acc.on_minute_close(2, 1.3000), Some((1.2000, 1.2200, 1.2000, 1.2200)));
     }
 
     // --- CandleBuffer tests ---

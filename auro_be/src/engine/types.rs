@@ -17,8 +17,11 @@ pub struct CandleAccumulator {
     /// The time slot we're currently accumulating for
     /// For H1: the hour (0-23). For M15: minutes / 15 combined with hour (0-95 per day).
     pub current_slot: Option<u32>,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
     /// Last mid price seen in the current slot
-    pub last_mid: f64,
+    pub close: f64,
     /// How many M1 closes we've seen this slot
     pub tick_count: u32,
 }
@@ -27,26 +30,49 @@ impl CandleAccumulator {
     pub fn new() -> Self {
         Self {
             current_slot: None,
-            last_mid: 0.0,
+            open: 0.0,
+            high: 0.0,
+            low: 0.0,
+            close: 0.0,
             tick_count: 0,
         }
     }
 
     /// Feed a new M1 close. Returns Some(close_price) if a candle boundary was crossed.
-    pub fn on_minute_close(&mut self, slot: u32, mid: f64) -> Option<f64> {
+    pub fn on_minute_close(&mut self, slot: u32, mid: f64) -> Option<(f64, f64, f64, f64)> {
         let result = match self.current_slot {
             Some(prev_slot) if prev_slot != slot => {
-                let close = self.last_mid;
-                self.tick_count = 0;
-                Some(close)
+                let ohlc = (self.open, self.high, self.low, self.close);
+
+                // Reset for new slot, this tick is the open of the new slot
+                self.open = mid;
+                self.high = mid;
+                self.low = mid;
+                self.close= mid;
+                self.tick_count = 1;
+
+                Some(ohlc)
             }
-            None => None,
-            _ => None,
+            None => {
+                // First tick ever — initialize the slot
+                self.open = mid;
+                self.high = mid;
+                self.low = mid;
+                self.close = mid;
+                self.tick_count = 1;
+                None
+            },
+            _ => {
+                // Same slot, just update high/low/close
+                self.high = self.high.max(mid);
+                self.low = self.low.min(mid);
+                self.close = mid;
+                self.tick_count += 1;
+                None
+            },
         };
 
         self.current_slot = Some(slot);
-        self.last_mid = mid;
-        self.tick_count += 1;
 
         result
     }
