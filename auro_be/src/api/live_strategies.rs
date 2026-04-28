@@ -39,6 +39,23 @@ pub async fn debug_positions(State(state): State<AppState>) -> AppResult<Json<Va
     Ok(Json(json!({"count": dump.len(), "positions": dump})))
 }
 
+pub async fn debug_buffers(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    let buffers = state.live.buffers.read().await;
+    let dump: Vec<_> = buffers
+        .iter()
+        .map(|((instrument, granularity), buffer)| {
+            json!({
+                "instrument": instrument,
+                "granularity": granularity,
+                "closes": buffer.closes,
+                "current_mid": buffer.current_mid,
+                "last_close_time": buffer.last_close_time,
+            })
+        })
+        .collect();
+    Ok(Json(json!({"count": dump.len(), "buffers": dump})))
+}
+
 pub async fn list_live_strategies(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,

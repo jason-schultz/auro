@@ -1,4 +1,4 @@
-use chrono::{Timelike, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::sync::broadcast;
@@ -91,6 +91,8 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
 
                             let slot = time_slot(*granularity, current_hour, current_minute);
 
+                            let slot_time = compute_slot_time(*granularity, tick_time);
+
                             let maybe_close = {
                                 let mut accumulators = state.live.accumulators.write().await;
                                 let accumulator = accumulators
@@ -109,7 +111,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 let buffer = buffers
                                     .entry(key.clone())
                                     .or_insert_with(|| CandleBuffer::new(200));
-                                buffer.push(candle_close);
+                                buffer.push(candle_close, slot_time);
                                 buffer.current_mid = mid;
 
                                 tracing::debug!(
@@ -121,6 +123,31 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 );
                                 buffer.clone()
                             };
+
+                            // Persist the closed candle to DB so prefill on restart sees it
+                            // NOTE: open/high/low are stubbed as close because CandleAccumulator
+                            // only tracks close price. Prefill only reads close, so this works.
+                            // If you need real OHLC for live-aggregated candles, enhance
+                            // CandleAccumulator to track high/low across the slot.
+                            if let Err(e) = sqlx::query(
+                                r#"INSERT INTO candles (instrument, granularity, timestamp, open, high, low, close, volume, complete)
+                                VALUES ($1, $2, $3, $4, $4, $4, $4, 0, true)
+                                ON CONFLICT (instrument, granularity, timestamp) DO NOTHING"#
+                            )
+                            .bind(instrument)
+                            .bind(granularity.as_str())
+                            .bind(slot_time)
+                            .bind(candle_close)
+                            .execute(&state.db)
+                            .await
+                            {
+                                tracing::error!(
+                                    "Failed to persist {} candle for {}: {}",
+                                    granularity,
+                                    instrument,
+                                    e
+                                );
+                            }
 
                             {
                                 let mut open_positions = state.live.open_positions.write().await;
@@ -223,9 +250,9 @@ async fn prefill_buffers(
     let mut count = 0;
 
     for (instrument, granularity) in &pairs {
-        let rows: Vec<(f64,)> = sqlx::query_as(
+        let rows: Vec<(f64, DateTime<Utc>)> = sqlx::query_as(
             r#"
-            SELECT close
+            SELECT close, timestamp
             FROM candles
             WHERE instrument = $1 AND granularity = $2
             ORDER BY timestamp DESC
@@ -250,8 +277,8 @@ async fn prefill_buffers(
         let buffer = buffers.entry(key).or_insert_with(|| CandleBuffer::new(200));
 
         // Rows come in DESC order (newest first), reverse to get chronological order
-        for (close,) in rows.iter().rev() {
-            buffer.push(*close);
+        for (close, timestamp) in rows.iter().rev() {
+            buffer.push(*close, *timestamp);
         }
 
         tracing::info!(
@@ -267,7 +294,7 @@ async fn prefill_buffers(
     Ok(count)
 }
 
-async fn is_trading_enabled(pool: &PgPool) -> bool {
+pub(crate) async fn is_trading_enabled(pool: &PgPool) -> bool {
     let result: Option<(serde_json::Value,)> =
         sqlx::query_as("SELECT value FROM trading_config WHERE key = 'trading_enabled'")
             .fetch_optional(pool)
@@ -335,7 +362,7 @@ async fn prefill_open_positions(
     Ok(count)
 }
 
-async fn evaluate_strategies(
+pub(crate) async fn evaluate_strategies(
     pool: &PgPool,
     oanda: &OandaClient,
     instrument: &str,
@@ -893,6 +920,35 @@ pub fn format_price(instrument: &str, price: f64) -> String {
     format!("{:.*}", price_precision(instrument), price)
 }
 
+fn compute_slot_time(granularity: Granularity, tick_time: DateTime<Utc>) -> DateTime<Utc> {
+    match granularity {
+        Granularity::H1 => {
+            tick_time
+                .with_minute(0)
+                .unwrap()
+                .with_second(0)
+                .unwrap()
+                .with_nanosecond(0)
+                .unwrap()
+                - chrono::Duration::hours(1)
+        }
+        Granularity::M15 => {
+            let m = (tick_time.minute() / 15) * 15;
+            tick_time
+                .with_minute(m)
+                .unwrap()
+                .with_second(0)
+                .unwrap()
+                .with_nanosecond(0)
+                .unwrap()
+                - chrono::Duration::minutes(15)
+        }
+        Granularity::D | Granularity::H4 | Granularity::M5 | Granularity::M1 => {
+            unimplemented!("compute_slot_time not implemented for {:?}", granularity)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1070,19 +1126,19 @@ mod tests {
     #[test]
     fn candle_buffer_accumulates_closes() {
         let mut buf = CandleBuffer::new(10);
-        buf.push(1.0);
-        buf.push(2.0);
-        buf.push(3.0);
+        buf.push(1.0, Utc::now());
+        buf.push(2.0, Utc::now());
+        buf.push(3.0, Utc::now());
         assert_eq!(buf.closes, vec![1.0, 2.0, 3.0]);
     }
 
     #[test]
     fn candle_buffer_respects_max_size() {
         let mut buf = CandleBuffer::new(3);
-        buf.push(1.0);
-        buf.push(2.0);
-        buf.push(3.0);
-        buf.push(4.0);
+        buf.push(1.0, Utc::now());
+        buf.push(2.0, Utc::now());
+        buf.push(3.0, Utc::now());
+        buf.push(4.0, Utc::now());
         assert_eq!(buf.closes, vec![2.0, 3.0, 4.0]);
     }
 
@@ -1090,7 +1146,7 @@ mod tests {
     fn candle_buffer_evicts_oldest_first() {
         let mut buf = CandleBuffer::new(3);
         for i in 0..10 {
-            buf.push(i as f64);
+            buf.push(i as f64, Utc::now());
         }
         assert_eq!(buf.closes, vec![7.0, 8.0, 9.0]);
     }
