@@ -21,6 +21,8 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
+use tracing_appender::rolling::{Builder, Rotation};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::EnvFilter;
 
 /// Default instruments to stream on startup.
@@ -79,12 +81,23 @@ async fn main() -> anyhow::Result<()> {
     // Load .env file
     dotenvy::dotenv().ok();
 
+    let file_appender = Builder::new()
+        .filename_prefix("auro")
+        .filename_suffix("log")
+        .rotation(Rotation::DAILY)
+        .max_log_files(7)
+        .build("logs")
+        .expect("failed to create log file appender");
+
+    let (file_writer, _file_guard) = tracing_appender::non_blocking(file_appender);
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("auro=debug,tower_http=debug")),
         )
+        .with_writer(std::io::stdout.and(file_writer))
         .init();
 
     // Load config

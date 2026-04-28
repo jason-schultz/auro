@@ -1,3 +1,4 @@
+use std::sync::Arc;
 /// Auro Backtest Runner CLI
 ///
 /// A standalone CLI that drives grid search backtests via the Auro API.
@@ -26,21 +27,53 @@
 ///   cargo run --bin run_backtests -- -p 3 -c
 use std::time::Instant;
 use tokio::sync::Semaphore;
-use std::sync::Arc;
 
 const BASE_URL: &str = "http://127.0.0.1:3000/api";
 const TIMEFRAME: &str = "H1";
 
 const INSTRUMENTS: &[&str] = &[
-    "AU200_AUD", "AUD_CAD", "AUD_JPY", "AUD_NZD", "AUD_USD",
-    "BCO_USD", "CAD_CHF", "CAD_JPY", "CHF_JPY", "CORN_USD",
-    "DE30_EUR", "EU50_EUR", "EUR_AUD", "EUR_CAD", "EUR_CHF",
-    "EUR_GBP", "EUR_JPY", "EUR_USD", "GBP_AUD", "GBP_CAD",
-    "GBP_JPY", "GBP_USD", "JP225_USD", "NAS100_USD", "NATGAS_USD",
-    "NZD_CAD", "NZD_JPY", "NZD_USD", "SOYBN_USD", "SPX500_USD",
-    "SUGAR_USD", "UK100_GBP", "US30_USD", "USD_CAD", "USD_JPY",
-    "WHEAT_USD", "WTICO_USD", "XAG_USD", "XAU_USD", "XCU_USD",
-    "XPD_USD", "XPT_USD",
+    "AU200_AUD",
+    "AUD_CAD",
+    "AUD_JPY",
+    "AUD_NZD",
+    "AUD_USD",
+    "BCO_USD",
+    "CAD_CHF",
+    "CAD_JPY",
+    "CHF_JPY",
+    "CORN_USD",
+    "DE30_EUR",
+    "EU50_EUR",
+    "EUR_AUD",
+    "EUR_CAD",
+    "EUR_CHF",
+    "EUR_GBP",
+    "EUR_JPY",
+    "EUR_USD",
+    "GBP_AUD",
+    "GBP_CAD",
+    "GBP_JPY",
+    "GBP_USD",
+    "JP225_USD",
+    "NAS100_USD",
+    "NATGAS_USD",
+    "NZD_CAD",
+    "NZD_JPY",
+    "NZD_USD",
+    "SOYBN_USD",
+    "SPX500_USD",
+    "SUGAR_USD",
+    "UK100_GBP",
+    "US30_USD",
+    "USD_CAD",
+    "USD_JPY",
+    "WHEAT_USD",
+    "WTICO_USD",
+    "XAG_USD",
+    "XAU_USD",
+    "XCU_USD",
+    "XPD_USD",
+    "XPT_USD",
 ];
 
 #[derive(Debug, serde::Deserialize)]
@@ -106,7 +139,9 @@ fn parse_args() -> Args {
                 println!("Options:");
                 println!("  -s, --strategy <mean_reversion|trend_following|both>  (default: both)");
                 println!("  -p, --parallel <N>                                    (default: 2)");
-                println!("  -i, --instrument <INSTRUMENT>                         (single instrument)");
+                println!(
+                    "  -i, --instrument <INSTRUMENT>                         (single instrument)"
+                );
                 println!("  -c, --clear                                           (clear old results first)");
                 std::process::exit(0);
             }
@@ -120,7 +155,10 @@ fn parse_args() -> Args {
 
     // Validate strategy
     if !["mean_reversion", "trend_following", "both"].contains(&args.strategy.as_str()) {
-        eprintln!("Invalid strategy: {}. Must be mean_reversion, trend_following, or both.", args.strategy);
+        eprintln!(
+            "Invalid strategy: {}. Must be mean_reversion, trend_following, or both.",
+            args.strategy
+        );
         std::process::exit(1);
     }
 
@@ -171,7 +209,11 @@ async fn main() {
     // Clear old results if requested
     if args.clear {
         println!("\nClearing old backtest results...");
-        match client.delete(&format!("{}/backtest/results", BASE_URL)).send().await {
+        match client
+            .delete(&format!("{}/backtest/results", BASE_URL))
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => println!("  Cleared."),
             _ => {
                 println!("  API delete not available. Clear manually:");
@@ -195,7 +237,11 @@ async fn main() {
             let _permit = sem.acquire().await.unwrap();
 
             let job_start = Instant::now();
-            let strat_short = if strategy == "trend_following" { "TF" } else { "MR" };
+            let strat_short = if strategy == "trend_following" {
+                "TF"
+            } else {
+                "MR"
+            };
 
             let url = format!(
                 "{}/backtest/run?instrument={}&timeframe={}&strategy={}",
@@ -219,12 +265,19 @@ async fn main() {
                 Some(resp) if resp.error.is_some() => {
                     println!(
                         "[{}/{}] {}  {:<12} — SKIP: {}",
-                        idx, total, strat_short, instrument,
+                        idx,
+                        total,
+                        strat_short,
+                        instrument,
                         resp.error.unwrap()
                     );
                 }
                 Some(resp) => {
-                    let counts = resp.results.unwrap_or(ResultCounts { valid: 0, verify: 0, failed: 0 });
+                    let counts = resp.results.unwrap_or(ResultCounts {
+                        valid: 0,
+                        verify: 0,
+                        failed: 0,
+                    });
                     let timing = resp.timing.as_ref();
 
                     println!(
@@ -259,7 +312,12 @@ async fn main() {
     println!("==============================================");
     println!("  Complete");
     println!("==============================================");
-    println!("  Total time: {}s ({}m {}s)", total_elapsed, total_elapsed / 60, total_elapsed % 60);
+    println!(
+        "  Total time: {}s ({}m {}s)",
+        total_elapsed,
+        total_elapsed / 60,
+        total_elapsed % 60
+    );
     if total > 0 {
         println!("  Avg per job: {}s", total_elapsed / total as u64);
     }

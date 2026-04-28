@@ -23,3 +23,6 @@ Thumbs.db
 
 # Scripts output
 scripts/*.log
+
+# Logs
+logs/

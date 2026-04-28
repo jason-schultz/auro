@@ -14,6 +14,7 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/api/debug", get(live_strategies::debug_positions))
         .route("/api/health", get(health::health))
         .route("/api/account", get(account::get_account))
         .route("/api/instruments", get(account::get_instruments))

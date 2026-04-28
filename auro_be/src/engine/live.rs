@@ -6,8 +6,10 @@ use tokio::sync::broadcast;
 use crate::engine::mean_reversion::{self, MRSignal, MeanReversionParams};
 use crate::engine::trend_following::{self, TFSignal, TrendFollowingParams};
 use crate::engine::types::{
-    BufferKey, CandleAccumulator, CandleBuffer, LiveStrategy, OpenPosition,
+    BufferKey, CandleAccumulator, CandleBuffer, Direction, Granularity, LiveStrategy, OpenPosition,
+    SignalAction, SignalReport,
 };
+use crate::oanda;
 use crate::oanda::client::OandaClient;
 use crate::oanda::models::StreamMessage;
 use crate::state::{AppState, LastQuote};
@@ -16,24 +18,24 @@ use crate::state::{AppState, LastQuote};
 /// H1: just the hour (0-23), changes every 60 minutes
 /// M15: hour * 4 + (minute / 15), changes every 15 minutes (0-95)
 /// M5: hour * 12 + (minute / 5), changes every 5 minutes (0-287)
-fn time_slot(granularity: &str, hour: u32, minute: u32) -> u32 {
+fn time_slot(granularity: Granularity, hour: u32, minute: u32) -> u32 {
     match granularity {
-        "M5" => hour * 12 + minute / 5,
-        "M15" => hour * 4 + minute / 15,
-        "H4" => hour / 4,
-        "D" => 0,  // daily — only changes on day boundary (handled separately)
-        _ => hour, // H1 default
+        Granularity::M1 => hour * 60 + minute,
+        Granularity::M5 => hour * 12 + minute / 5,
+        Granularity::M15 => hour * 4 + minute / 15,
+        Granularity::H1 => hour,
+        Granularity::H4 => hour / 4,
+        Granularity::D => 0,
     }
 }
 
 pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: AppState) {
-    // let pool = state.db.clone();
-    // let oanda = state.oanda.clone();
     tokio::spawn(async move {
         tracing::info!("Live strategy evaluator started (multi-granularity mode)");
 
         // Pre-fill buffers from the database for all enabled strategies
         run_prefill_buffers(&state).await;
+        run_prefill_open_positions(&state).await;
 
         loop {
             match rx.recv().await {
@@ -84,10 +86,10 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
 
                     if current_minute != prev_minute {
                         // M1 boundary crossed — check each granularity
-                        for granularity in &["M15", "H1"] {
-                            let key = (instrument.clone(), granularity.to_string());
+                        for granularity in &[Granularity::M15, Granularity::H1] {
+                            let key = (instrument.clone(), *granularity);
 
-                            let slot = time_slot(granularity, current_hour, current_minute);
+                            let slot = time_slot(*granularity, current_hour, current_minute);
 
                             let maybe_close = {
                                 let mut accumulators = state.live.accumulators.write().await;
@@ -123,7 +125,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                             {
                                 let mut open_positions = state.live.open_positions.write().await;
                                 // Evaluate strategies matching this instrument AND granularity
-                                if let Err(e) = evaluate_strategies(
+                                match evaluate_strategies(
                                     &state.db,
                                     &state.oanda,
                                     instrument,
@@ -136,12 +138,27 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 )
                                 .await
                                 {
-                                    tracing::error!(
-                                        "Strategy evaluation error for {} {}: {}",
-                                        instrument,
-                                        granularity,
-                                        e
-                                    );
+                                    Ok(reports) => {
+                                        if !reports.is_empty() {
+                                            tracing::info!(
+                                                "Strategy evaluation produced {} signals for {} {}",
+                                                reports.len(),
+                                                instrument,
+                                                granularity
+                                            );
+                                            for report in &reports {
+                                                tracing::debug!("[REPORT] {:?}", report);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Strategy evaluation error for {} {}: {}",
+                                            instrument,
+                                            granularity,
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -150,8 +167,8 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                     {
                         // Update current_mid on all buffers for this instrument
                         let mut buffers = state.live.buffers.write().await;
-                        for granularity in &["M15", "H1"] {
-                            let key = (instrument.clone(), granularity.to_string());
+                        for granularity in &[Granularity::M15, Granularity::H1] {
+                            let key = (instrument.clone(), *granularity);
                             if let Some(buffer) = buffers.get_mut(&key) {
                                 buffer.current_mid = mid;
                             }
@@ -198,12 +215,11 @@ async fn prefill_buffers(
     buffers: &mut HashMap<BufferKey, CandleBuffer>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     // Get distinct (instrument, granularity) pairs from enabled strategies
-    let pairs: Vec<(String, String)> = sqlx::query_as(
+    let pairs: Vec<(String, Granularity)> = sqlx::query_as(
         "SELECT DISTINCT instrument, granularity FROM live_strategies WHERE enabled = true",
     )
     .fetch_all(pool)
     .await?;
-
     let mut count = 0;
 
     for (instrument, granularity) in &pairs {
@@ -217,7 +233,7 @@ async fn prefill_buffers(
             "#,
         )
         .bind(instrument)
-        .bind(granularity)
+        .bind(granularity.as_str())
         .fetch_all(pool)
         .await?;
 
@@ -230,7 +246,7 @@ async fn prefill_buffers(
             continue;
         }
 
-        let key = (instrument.clone(), granularity.clone());
+        let key = (instrument.clone(), *granularity);
         let buffer = buffers.entry(key).or_insert_with(|| CandleBuffer::new(200));
 
         // Rows come in DESC order (newest first), reverse to get chronological order
@@ -263,38 +279,99 @@ async fn is_trading_enabled(pool: &PgPool) -> bool {
         .unwrap_or(false)
 }
 
+async fn run_prefill_open_positions(state: &AppState) {
+    let mut positions = state.live.open_positions.write().await;
+    match prefill_open_positions(&state.db, &state.oanda, &mut *positions).await {
+        Ok(count) => tracing::info!("Pre-filled {} open positions from OANDA", count),
+        Err(e) => tracing::error!("Failed to pre-fill open positions: {}", e),
+    }
+}
+
+async fn prefill_open_positions(
+    pool: &PgPool,
+    oanda: &OandaClient,
+    open_positions: &mut HashMap<String, OpenPosition>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let oanda_trades = oanda.get_open_trades().await?;
+    let trades = oanda_trades["trades"]
+        .as_array()
+        .ok_or("OANDA get_open_trades did not return a JSON array")?;
+
+    let mut count = 0;
+    for trade in trades {
+        let trade_id = trade["id"].as_str().ok_or("trade missing id")?;
+        let units = trade["currentUnits"].as_str().unwrap_or("0").to_string();
+
+        let row: Option<(uuid::Uuid, String, Direction, f64, String)> = sqlx::query_as(
+            "SELECT live_strategy_id, instrument, direction, entry_price, oanda_trade_id \
+            FROM live_trades WHERE oanda_trade_id = $1 AND status = 'open'",
+        )
+        .bind(trade_id)
+        .fetch_optional(pool)
+        .await?;
+
+        let Some((strategy_id, instrument, direction, entry_price, db_trade_id)) = row else {
+            tracing::warn!(
+                "OANDA has open trade {} but no matching live_trades row — skipping",
+                trade_id
+            );
+            continue;
+        };
+
+        open_positions.insert(
+            trade_id.to_string(),
+            OpenPosition {
+                strategy_id,
+                trade_id: db_trade_id,
+                instrument,
+                direction,
+                entry_price,
+                units,
+            },
+        );
+        count += 1;
+    }
+
+    Ok(count)
+}
+
 async fn evaluate_strategies(
     pool: &PgPool,
     oanda: &OandaClient,
     instrument: &str,
-    granularity: &str,
+    granularity: &Granularity,
     buffer: &CandleBuffer,
     current_price: f64,
     bid: f64,
     ask: f64,
-    open_positions: &mut HashMap<uuid::Uuid, OpenPosition>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    open_positions: &mut HashMap<String, OpenPosition>,
+) -> Result<Vec<SignalReport>, Box<dyn std::error::Error>> {
     if !is_trading_enabled(pool).await {
-        return Ok(());
+        return Ok(vec![]);
     }
 
-    // Only fetch strategies matching BOTH instrument and granularity
     let strategies: Vec<LiveStrategy> = sqlx::query_as(
         "SELECT id, strategy_type, instrument, granularity, parameters, enabled, max_position_size \
          FROM live_strategies WHERE instrument = $1 AND granularity = $2 AND enabled = true"
     )
     .bind(instrument)
-    .bind(granularity)
+    .bind(granularity.as_str())
     .fetch_all(pool)
     .await?;
 
+    let mut reports: Vec<SignalReport> = Vec::new();
+
     for strategy in &strategies {
-        let has_position = open_positions.contains_key(&strategy.id);
+        let has_position = open_positions
+            .values()
+            .any(|p| p.strategy_id == strategy.id);
 
         if has_position {
-            evaluate_exit(pool, oanda, strategy, current_price, buffer, open_positions).await?;
+            let exit_reports =
+                evaluate_exit(pool, oanda, strategy, current_price, buffer, open_positions).await?;
+            reports.extend(exit_reports);
         } else {
-            evaluate_entry(
+            if let Some(entry_report) = evaluate_entry(
                 pool,
                 oanda,
                 strategy,
@@ -304,11 +381,14 @@ async fn evaluate_strategies(
                 buffer,
                 open_positions,
             )
-            .await?;
+            .await?
+            {
+                reports.push(entry_report);
+            }
         }
     }
 
-    Ok(())
+    Ok(reports)
 }
 
 async fn evaluate_entry(
@@ -319,11 +399,13 @@ async fn evaluate_entry(
     bid: f64,
     ask: f64,
     buffer: &CandleBuffer,
-    open_positions: &mut HashMap<uuid::Uuid, OpenPosition>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    open_positions: &mut HashMap<String, OpenPosition>,
+) -> Result<Option<SignalReport>, Box<dyn std::error::Error>> {
     let params = &strategy.parameters;
 
-    let already_open = open_positions.values().any(|pos| pos.instrument == strategy.instrument);
+    let already_open = open_positions
+        .values()
+        .any(|pos| pos.instrument == strategy.instrument);
 
     if already_open {
         tracing::debug!(
@@ -331,7 +413,16 @@ async fn evaluate_entry(
             strategy.instrument,
             strategy.granularity
         );
-        return Ok(());
+        return Ok(Some(SignalReport {
+            strategy_id: strategy.id,
+            strategy_type: strategy.strategy_type.clone(),
+            instrument: strategy.instrument.clone(),
+            granularity: strategy.granularity,
+            action: SignalAction::EntryRejected,
+            price: current_price,
+            reason: "position_already_open".to_string(),
+            oanda_trade_id: None,
+        }));
     }
 
     match strategy.strategy_type.as_str() {
@@ -384,11 +475,11 @@ async fn evaluate_entry(
                     let sl_price = current_price * (1.0 + mr_params.stop_loss);
                     let tp_price = current_price * (1.0 + mr_params.exit_threshold);
 
-                    execute_entry(
+                    return execute_entry(
                         pool,
                         oanda,
                         strategy,
-                        "Long",
+                        &Direction::Long,
                         &strategy.max_position_size,
                         current_price,
                         sl_price,
@@ -401,7 +492,7 @@ async fn evaluate_entry(
                         ),
                         open_positions,
                     )
-                    .await?;
+                    .await;
                 }
                 _ => {}
             }
@@ -461,11 +552,11 @@ async fn evaluate_entry(
                     let sl_price = current_price * (1.0 + tf_params.stop_loss);
                     let tp_price = tf_params.take_profit.map(|tp| current_price * (1.0 + tp));
 
-                    execute_entry(
+                    return execute_entry(
                         pool,
                         oanda,
                         strategy,
-                        "Long",
+                        &Direction::Long,
                         &strategy.max_position_size,
                         current_price,
                         sl_price,
@@ -473,7 +564,7 @@ async fn evaluate_entry(
                         &format!("CrossAbove: fast_ma={:.5}, slow_ma={:.5}", fast_ma, slow_ma),
                         open_positions,
                     )
-                    .await?;
+                    .await;
                 }
                 TFSignal::EnterShort { fast_ma, slow_ma } => {
                     tracing::info!(
@@ -488,11 +579,11 @@ async fn evaluate_entry(
                     let tp_price = tf_params.take_profit.map(|tp| current_price * (1.0 - tp));
                     let short_units = format!("-{}", strategy.max_position_size);
 
-                    execute_entry(
+                    return execute_entry(
                         pool,
                         oanda,
                         strategy,
-                        "Short",
+                        &Direction::Short,
                         &short_units,
                         current_price,
                         sl_price,
@@ -500,29 +591,28 @@ async fn evaluate_entry(
                         &format!("CrossBelow: fast_ma={:.5}, slow_ma={:.5}", fast_ma, slow_ma),
                         open_positions,
                     )
-                    .await?;
+                    .await;
                 }
                 _ => {}
             }
         }
         _ => {}
     }
-
-    Ok(())
+    Ok(None)
 }
 
 async fn execute_entry(
     pool: &PgPool,
     oanda: &OandaClient,
     strategy: &LiveStrategy,
-    direction: &str,
+    direction: &Direction,
     units: &str,
     current_price: f64,
     sl_price: f64,
     tp_price: Option<f64>,
     entry_reason: &str,
-    open_positions: &mut HashMap<uuid::Uuid, OpenPosition>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    open_positions: &mut HashMap<String, OpenPosition>,
+) -> Result<Option<SignalReport>, Box<dyn std::error::Error>> {
     let sl_str = format_price(&strategy.instrument, sl_price);
     let tp_str = tp_price.map(|p| format_price(&strategy.instrument, p));
 
@@ -575,17 +665,35 @@ async fn execute_entry(
             .execute(pool)
             .await?;
 
+            let action = match direction {
+                Direction::Long => SignalAction::OpenedLong,
+                Direction::Short => SignalAction::OpenedShort,
+            };
+
+            let report = SignalReport {
+                strategy_id: strategy.id,
+                strategy_type: strategy.strategy_type.clone(),
+                instrument: strategy.instrument.clone(),
+                granularity: strategy.granularity,
+                action,
+                price: current_price,
+                reason: entry_reason.to_string(),
+                oanda_trade_id: Some(trade_id.clone()),
+            };
+
             open_positions.insert(
-                strategy.id,
+                trade_id.to_string(),
                 OpenPosition {
                     strategy_id: strategy.id,
                     trade_id,
                     instrument: strategy.instrument.clone(),
-                    direction: direction.to_string(),
+                    direction: *direction,
                     entry_price: fill_price,
                     units: units.to_string(),
                 },
             );
+
+            Ok(Some(report))
         }
         Err(e) => {
             tracing::error!(
@@ -595,10 +703,9 @@ async fn execute_entry(
                 strategy.granularity,
                 e
             );
+            Ok(None)
         }
     }
-
-    Ok(())
 }
 
 async fn evaluate_exit(
@@ -607,19 +714,28 @@ async fn evaluate_exit(
     strategy: &LiveStrategy,
     current_price: f64,
     buffer: &CandleBuffer,
-    open_positions: &mut HashMap<uuid::Uuid, OpenPosition>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let pos = match open_positions.get(&strategy.id) {
-        Some(p) => p,
-        None => return Ok(()),
-    };
+    open_positions: &mut HashMap<String, OpenPosition>,
+) -> Result<Vec<SignalReport>, Box<dyn std::error::Error>> {
+    let positions_for_strategy: Vec<OpenPosition> = open_positions
+        .values()
+        .filter(|p| p.strategy_id == strategy.id)
+        .cloned()
+        .collect();
+
+    if positions_for_strategy.is_empty() {
+        return Ok(vec![]);
+    }
 
     let params = &strategy.parameters;
     let mut should_exit = false;
     let mut exit_reason = String::new();
 
     match strategy.strategy_type.as_str() {
-        "mean_reversion" => {}
+        "mean_reversion" => {
+            // Exits are managed OANDA-side SL/TP orders; reconciler syncs DB.
+            // No rust exit checks needed on this arm
+            return Ok(vec![]);
+        }
         "trend_following" => {
             let tf_params = TrendFollowingParams {
                 fast_period: params["fast_period"].as_u64().unwrap_or(10) as usize,
@@ -628,7 +744,7 @@ async fn evaluate_exit(
                 take_profit: params["take_profit"].as_f64(),
             };
 
-            let is_long = pos.direction == "Long";
+            let is_long = positions_for_strategy[0].direction == Direction::Long;
 
             match trend_following::check_exit(&buffer.closes, &tf_params, is_long) {
                 TFSignal::ExitTrendReversal { fast_ma, slow_ma } => {
@@ -644,65 +760,84 @@ async fn evaluate_exit(
         _ => {}
     }
 
+    let mut reports = Vec::<SignalReport>::new();
+
     if should_exit {
-        let trade_id = pos.trade_id.clone();
-        let direction = pos.direction.clone();
-        let entry_price = pos.entry_price;
-        let instrument = pos.instrument.clone();
+        for pos in &positions_for_strategy {
+            let trade_id = pos.trade_id.clone();
+            let direction = pos.direction;
+            let entry_price = pos.entry_price;
+            let instrument = pos.instrument.clone();
 
-        tracing::info!(
-            "[EXIT SIGNAL] {} on {} ({}): {}",
-            direction,
-            instrument,
-            strategy.granularity,
-            exit_reason
-        );
+            tracing::info!(
+                "[EXIT SIGNAL] {} on {} ({}): {}",
+                direction,
+                instrument,
+                strategy.granularity,
+                exit_reason
+            );
 
-        match oanda.close_trade(&trade_id, None).await {
-            Ok(resp) => {
-                let fill_price = resp["orderFillTransaction"]["price"]
-                    .as_str()
-                    .and_then(|p| p.parse::<f64>().ok())
-                    .unwrap_or(current_price);
+            match oanda.close_trade(&trade_id, None).await {
+                Ok(resp) => {
+                    let fill_price = resp["orderFillTransaction"]["price"]
+                        .as_str()
+                        .and_then(|p| p.parse::<f64>().ok())
+                        .unwrap_or(current_price);
 
-                let pnl = match direction.as_str() {
-                    "Long" => (fill_price - entry_price) / entry_price,
-                    "Short" => (entry_price - fill_price) / entry_price,
-                    _ => 0.0,
-                };
+                    let pnl = match direction {
+                        Direction::Long => (fill_price - entry_price) / entry_price,
+                        Direction::Short => (entry_price - fill_price) / entry_price,
+                    };
 
-                tracing::info!(
-                    "[TRADE CLOSED] {} {} ({}) @ {:.5}, PnL={:.4}%, reason={}",
-                    direction,
-                    instrument,
-                    strategy.granularity,
-                    fill_price,
-                    pnl * 100.0,
-                    exit_reason
-                );
+                    tracing::info!(
+                        "[TRADE CLOSED] {} {} ({}) @ {:.5}, PnL={:.4}%, reason={}",
+                        direction,
+                        instrument,
+                        strategy.granularity,
+                        fill_price,
+                        pnl * 100.0,
+                        exit_reason
+                    );
 
-                sqlx::query(
-                    r#"UPDATE live_trades
-                       SET exit_price = $1, exit_time = NOW(), pnl_percent = $2,
-                           exit_reason = $3, status = 'closed', updated_at = NOW()
-                       WHERE oanda_trade_id = $4"#,
-                )
-                .bind(fill_price)
-                .bind(pnl)
-                .bind(&exit_reason)
-                .bind(&trade_id)
-                .execute(pool)
-                .await?;
+                    sqlx::query(
+                        r#"UPDATE live_trades
+                        SET exit_price = $1, exit_time = NOW(), pnl_percent = $2,
+                            exit_reason = $3, status = 'closed', updated_at = NOW()
+                        WHERE oanda_trade_id = $4"#,
+                    )
+                    .bind(fill_price)
+                    .bind(pnl)
+                    .bind(&exit_reason)
+                    .bind(&trade_id)
+                    .execute(pool)
+                    .await?;
 
-                open_positions.remove(&strategy.id);
-            }
-            Err(e) => {
-                tracing::error!("[CLOSE FAILED] {} {}: {}", direction, instrument, e);
+                    open_positions.remove(&trade_id);
+
+                    let action = match direction {
+                        Direction::Long => SignalAction::ClosedLong,
+                        Direction::Short => SignalAction::ClosedShort,
+                    };
+
+                    reports.push(SignalReport {
+                        strategy_id: strategy.id,
+                        strategy_type: strategy.strategy_type.clone(),
+                        instrument: instrument.clone(),
+                        granularity: strategy.granularity,
+                        action,
+                        price: fill_price,
+                        reason: exit_reason.clone(),
+                        oanda_trade_id: Some(trade_id.clone()),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("[CLOSE FAILED] {} {}: {}", direction, instrument, e);
+                }
             }
         }
     }
 
-    Ok(())
+    Ok(reports)
 }
 
 /// Returns the number of decimal places OANDA expects for price strings on a given instrument.
@@ -854,35 +989,35 @@ mod tests {
 
     #[test]
     fn time_slot_h1_returns_hour() {
-        assert_eq!(time_slot("H1", 0, 0), 0);
-        assert_eq!(time_slot("H1", 14, 30), 14);
-        assert_eq!(time_slot("H1", 23, 59), 23);
+        assert_eq!(time_slot(Granularity::H1, 0, 0), 0);
+        assert_eq!(time_slot(Granularity::H1, 14, 30), 14);
+        assert_eq!(time_slot(Granularity::H1, 23, 59), 23);
     }
 
     #[test]
     fn time_slot_m15_changes_every_15_minutes() {
         // Hour 0
-        assert_eq!(time_slot("M15", 0, 0), 0);
-        assert_eq!(time_slot("M15", 0, 14), 0); // still in first 15-min block
-        assert_eq!(time_slot("M15", 0, 15), 1); // new block
-        assert_eq!(time_slot("M15", 0, 30), 2);
-        assert_eq!(time_slot("M15", 0, 45), 3);
+        assert_eq!(time_slot(Granularity::M15, 0, 0), 0);
+        assert_eq!(time_slot(Granularity::M15, 0, 14), 0); // still in first 15-min block
+        assert_eq!(time_slot(Granularity::M15, 0, 15), 1); // new block
+        assert_eq!(time_slot(Granularity::M15, 0, 30), 2);
+        assert_eq!(time_slot(Granularity::M15, 0, 45), 3);
         // Hour 1
-        assert_eq!(time_slot("M15", 1, 0), 4);
-        assert_eq!(time_slot("M15", 1, 15), 5);
+        assert_eq!(time_slot(Granularity::M15, 1, 0), 4);
+        assert_eq!(time_slot(Granularity::M15, 1, 15), 5);
         // Hour 23
-        assert_eq!(time_slot("M15", 23, 45), 95);
+        assert_eq!(time_slot(Granularity::M15, 23, 45), 95);
     }
 
     #[test]
     fn time_slot_m15_consecutive_minutes_same_slot() {
         // Minutes 0-14 should all be the same slot
-        let slot = time_slot("M15", 10, 0);
+        let slot = time_slot(Granularity::M15, 10, 0);
         for m in 0..15 {
-            assert_eq!(time_slot("M15", 10, m), slot);
+            assert_eq!(time_slot(Granularity::M15, 10, m), slot);
         }
         // Minute 15 should be different
-        assert_ne!(time_slot("M15", 10, 15), slot);
+        assert_ne!(time_slot(Granularity::M15, 10, 15), slot);
     }
 
     // --- CandleAccumulator tests ---
