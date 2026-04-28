@@ -12,6 +12,7 @@ defmodule Opus.Application do
       Opus.Repo,
       {DNSCluster, query: Application.get_env(:opus, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Opus.PubSub},
+      {Oban, Application.fetch_env!(:opus, Oban)},
 
       # Trading services
       # Opus.Trading.EvaluationWorker,
