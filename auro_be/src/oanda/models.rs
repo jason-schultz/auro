@@ -129,3 +129,9 @@ pub struct CandleRecord {
     pub volume: i32,
     pub complete: bool,
 }
+
+// pub enum TradeOrderUpdate {
+//     Set {price: String},
+//     SetTrailing {distance: String},
+//     Cancel,
+// }

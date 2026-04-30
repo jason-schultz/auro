@@ -6,7 +6,7 @@ use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone)]
 pub struct OandaClient {
-    http: Client,
+    http_client: Client,
     base_url: String,
     stream_url: String,
     api_key: String,
@@ -16,7 +16,7 @@ pub struct OandaClient {
 impl OandaClient {
     pub fn new(base_url: &str, stream_url: &str, api_key: &str, account_id: &str) -> Self {
         Self {
-            http: Client::new(),
+            http_client: Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
             stream_url: stream_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
@@ -34,7 +34,7 @@ impl OandaClient {
         let url = format!("{}/v3/accounts/{}", self.base_url, self.account_id);
 
         let resp = self
-            .http
+            .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
             .send()
@@ -72,7 +72,7 @@ impl OandaClient {
         );
 
         let resp = self
-            .http
+            .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
             .send()
@@ -101,7 +101,7 @@ impl OandaClient {
         let instruments_param = instruments.join(",");
 
         let resp = self
-            .http
+            .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
             .query(&[("instruments", &instruments_param)])
@@ -151,7 +151,7 @@ impl OandaClient {
         }
 
         let resp = self
-            .http
+            .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
             .query(&query)
@@ -187,7 +187,7 @@ impl OandaClient {
         let instruments_param = instruments.join(",");
 
         let resp = self
-            .http
+            .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
             .query(&[("instruments", &instruments_param)])
@@ -233,7 +233,7 @@ impl OandaClient {
         let body = json!({"order": order});
 
         let resp = self
-            .http
+            .http_client
             .post(&url)
             .bearer_auth(&self.api_key)
             .json(&body)
@@ -261,6 +261,93 @@ impl OandaClient {
     }
 
     // --- Trades ---
+    pub async fn modify_trade_stop_loss(
+        &self,
+        trade_id: &str,
+        sl_price: &str,
+    ) -> AppResult<serde_json::Value> {
+        let url = format!(
+            "{}/v3/accounts/{}/trades/{}/orders",
+            self.base_url, self.account_id, trade_id
+        );
+
+        let body = json!({"stopLoss": {"price": sl_price, "timeInForce": "GTC"}});
+
+        let resp = self
+            .http_client
+            .put(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AppError::Oanda(e.to_string()))?;
+
+        let status = resp.status();
+        let resp_body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Oanda(format!("Failed to parse modify SL response: {}", e)))?;
+
+        if !status.is_success() {
+            let error_msg = resp_body["errorMessage"]
+                .as_str()
+                .unwrap_or("Unknown error");
+            return Err(AppError::Oanda(format!(
+                "Modify SL failed ({}): {}",
+                status, error_msg
+            )));
+        }
+
+        Ok(resp_body)
+    }
+
+    pub async fn replace_with_trailing_stop(
+        &self,
+        trade_id: &str,
+        distance: &str,
+    ) -> AppResult<serde_json::Value> {
+        let url = format!(
+            "{}/v3/accounts/{}/trades/{}/orders",
+            self.base_url, self.account_id, trade_id
+        );
+
+        // Atomic: cancel SL+TP, create trailing SL, all in one call
+        let body = serde_json::json!({
+            "stopLoss": null,
+            "takeProfit": null,
+            "trailingStopLoss": { "distance": distance, "timeInForce": "GTC" }
+        });
+
+        let response = self
+            .http_client
+            .put(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AppError::Oanda(e.to_string()))?;
+
+        let status = response.status();
+        let resp_body: serde_json::Value = response.json().await.map_err(|e| {
+            AppError::Oanda(format!(
+                "Failed to parse replace with trailing response: {}",
+                e
+            ))
+        })?;
+
+        if !status.is_success() {
+            let error_msg = resp_body["errorMessage"]
+                .as_str()
+                .unwrap_or("Unknown error");
+            return Err(AppError::Oanda(format!(
+                "OANDA replace with trailing failed ({}): {}",
+                status, error_msg
+            )));
+        }
+
+        Ok(resp_body)
+    }
+
     pub async fn get_open_trades(&self) -> AppResult<serde_json::Value> {
         let url = format!(
             "{}/v3/accounts/{}/openTrades",
@@ -268,7 +355,7 @@ impl OandaClient {
         );
 
         let resp = self
-            .http
+            .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
             .send()
@@ -305,7 +392,7 @@ impl OandaClient {
         };
 
         let resp = self
-            .http
+            .http_client
             .put(&url)
             .bearer_auth(&self.api_key)
             .json(&body)
@@ -341,7 +428,7 @@ impl OandaClient {
         );
 
         let resp = self
-            .http
+            .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
             .send()
