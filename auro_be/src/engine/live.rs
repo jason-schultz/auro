@@ -7,12 +7,15 @@ use crate::engine::mean_reversion::{self, MRSignal, MeanReversionParams};
 use crate::engine::trend_following::{self, TFSignal, TrendFollowingParams};
 use crate::engine::types::{
     BufferKey, CandleAccumulator, CandleBuffer, Direction, Granularity, LiveStrategy, OpenPosition,
-    SignalAction, SignalReport,
+    SignalAction, SignalReport, StopLossState,
 };
 use crate::oanda;
 use crate::oanda::client::OandaClient;
 use crate::oanda::models::StreamMessage;
 use crate::state::{AppState, LastQuote};
+
+const MOVE_TO_BREAKEVEN_PCT: f64 = 0.015;
+const TRAILING_DISTANCE_PCT: f64 = 0.025;
 
 /// Calculate the time slot for a given granularity.
 /// H1: just the hour (0-23), changes every 60 minutes
@@ -56,7 +59,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                     };
                     let mid = (bid + ask) / 2.0;
 
-                    let tick_time = match chrono::DateTime::parse_from_rfc3339(&price.time) {
+                    let tick_time = match DateTime::parse_from_rfc3339(&price.time) {
                         Ok(t) => t.with_timezone(&Utc),
                         Err(_) => continue,
                     };
@@ -72,6 +75,29 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 at: tick_time,
                             },
                         );
+                    }
+
+                    // Trade management - check open positions on this instrument
+                    {
+                        let positions_snapshot: Vec<OpenPosition> = {
+                            let positions = state.live.open_positions.read().await;
+                            positions
+                                .values()
+                                .filter(|p| p.instrument == price.instrument)
+                                .cloned()
+                                .collect()
+                        };
+
+                        for pos in &positions_snapshot {
+                            if let Err(e) = evaluate_trade_management(&state, pos, mid).await {
+                                tracing::error!(
+                                    "Trade management error for {} {}: {}",
+                                    pos.instrument,
+                                    pos.trade_id,
+                                    e
+                                );
+                            }
+                        }
                     }
 
                     let current_minute = tick_time.minute();
@@ -333,15 +359,20 @@ async fn prefill_open_positions(
         let trade_id = trade["id"].as_str().ok_or("trade missing id")?;
         let units = trade["currentUnits"].as_str().unwrap_or("0").to_string();
 
-        let row: Option<(uuid::Uuid, String, Direction, f64, String)> = sqlx::query_as(
-            "SELECT live_strategy_id, instrument, direction, entry_price, oanda_trade_id \
-            FROM live_trades WHERE oanda_trade_id = $1 AND status = 'open'",
+        let row: Option<(uuid::Uuid, String, Direction, f64, String, String)> = sqlx::query_as(
+            "SELECT lt.live_strategy_id, lt.instrument, lt.direction, lt.entry_price, \
+            lt.oanda_trade_id, ls.strategy_type \
+            FROM live_trades lt \
+            JOIN live_strategies ls ON ls.id = lt.live_strategy_id \
+            WHERE lt.oanda_trade_id = $1 AND lt.status = 'open'",
         )
         .bind(trade_id)
         .fetch_optional(pool)
         .await?;
 
-        let Some((strategy_id, instrument, direction, entry_price, db_trade_id)) = row else {
+        let Some((strategy_id, instrument, direction, entry_price, db_trade_id, strategy_type)) =
+            row
+        else {
             tracing::warn!(
                 "OANDA has open trade {} but no matching live_trades row — skipping",
                 trade_id
@@ -358,6 +389,11 @@ async fn prefill_open_positions(
                 direction,
                 entry_price,
                 units,
+                stop_loss_state: determine_stop_loss_state(
+                    trade,
+                    strategy_type.as_str(),
+                    entry_price,
+                ),
             },
         );
         count += 1;
@@ -721,6 +757,9 @@ async fn execute_entry(
                     direction: *direction,
                     entry_price: fill_price,
                     units: units.to_string(),
+                    stop_loss_state: StopLossState::initial_for_strategy_type(
+                        &strategy.strategy_type,
+                    ),
                 },
             );
 
@@ -951,6 +990,122 @@ fn compute_slot_time(granularity: Granularity, tick_time: DateTime<Utc>) -> Date
             unimplemented!("compute_slot_time not implemented for {:?}", granularity)
         }
     }
+}
+
+async fn evaluate_trade_management(
+    state: &AppState,
+    position: &OpenPosition,
+    current_price: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Skip if not eligible for management or already at terminal state
+    if matches!(
+        position.stop_loss_state,
+        StopLossState::NotApplicable | StopLossState::Trailing
+    ) {
+        return Ok(());
+    }
+
+    // Compute % move from entry, direction-aware
+    // Long: profit when price > entry. Short: profit when price < entry.
+    let pct_in_profit = match position.direction {
+        Direction::Long => (current_price - position.entry_price) / position.entry_price,
+        Direction::Short => (position.entry_price - current_price) / position.entry_price,
+    };
+
+    match position.stop_loss_state {
+        StopLossState::Initial => {
+            // Move SL to breakeven (entry price) once trade is up X%
+            if pct_in_profit >= MOVE_TO_BREAKEVEN_PCT {
+                let sl_str = format_price(&position.instrument, position.entry_price);
+
+                tracing::info!(
+                    "[MGMT] {} {} ({}) up {:.2}% — moving SL to breakeven @ {}",
+                    position.direction,
+                    position.instrument,
+                    position.trade_id,
+                    pct_in_profit * 100.0,
+                    sl_str
+                );
+
+                state
+                    .oanda
+                    .modify_trade_stop_loss(&position.trade_id, &sl_str)
+                    .await?;
+
+                // Update in-memory state
+                let mut positions = state.live.open_positions.write().await;
+                if let Some(p) = positions.get_mut(&position.trade_id) {
+                    p.stop_loss_state = StopLossState::Breakeven;
+                }
+            }
+        }
+        StopLossState::Breakeven => {
+            // Transition to trailing stop once trade is up the trailing distance + breakeven buffer
+            // We require pct_in_profit >= MOVE_TO_BREAKEVEN_PCT + TRAILING_DISTANCE_PCT so that
+            // the trailing stop, when first attached, sits above the breakeven SL.
+            // Otherwise the trailing stop would immediately trigger below entry.
+            let trailing_threshold = MOVE_TO_BREAKEVEN_PCT + TRAILING_DISTANCE_PCT;
+
+            if pct_in_profit >= trailing_threshold {
+                let distance_price = current_price * TRAILING_DISTANCE_PCT;
+                let distance_str = format_price(&position.instrument, distance_price);
+
+                tracing::info!(
+                    "[MGMT] {} {} ({}) up {:.2}% — replacing SL with trailing @ distance {}",
+                    position.direction,
+                    position.instrument,
+                    position.trade_id,
+                    pct_in_profit * 100.0,
+                    distance_str
+                );
+
+                state
+                    .oanda
+                    .replace_with_trailing_stop(&position.trade_id, &distance_str)
+                    .await?;
+
+                let mut positions = state.live.open_positions.write().await;
+                if let Some(p) = positions.get_mut(&position.trade_id) {
+                    p.stop_loss_state = StopLossState::Trailing;
+                }
+            }
+        }
+        StopLossState::Trailing | StopLossState::NotApplicable => {
+            // Already handled by early return above; this arm is unreachable but
+            // keeps the match exhaustive for future enum additions.
+        }
+    }
+
+    Ok(())
+}
+
+fn determine_stop_loss_state(
+    trade: &serde_json::Value,
+    strategy_type: &str,
+    entry_price: f64,
+) -> StopLossState {
+    match strategy_type {
+        "mean_reversion" => return StopLossState::NotApplicable,
+        "trend_following" => {}
+        _ => return StopLossState::NotApplicable,
+    }
+
+    // Trailing stop present -> already in trailing state
+    if trade.get("trailingStopLossOrder").is_some() {
+        return StopLossState::Trailing;
+    }
+
+    // Fixed SL present, check if it's at entry price (within precision tolerance)
+    if let Some(sl) = trade.get("stopLossOrder") {
+        if let Some(sl_price) = sl["price"].as_str().and_then(|s| s.parse::<f64>().ok()) {
+            // Use a small tolerance because of price formatting precision
+            if (sl_price - entry_price).abs() / entry_price < 0.0001 {
+                return StopLossState::Breakeven;
+            }
+        }
+    }
+
+    StopLossState::Initial
 }
 
 #[cfg(test)]
