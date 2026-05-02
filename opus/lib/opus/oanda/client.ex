@@ -4,6 +4,8 @@ defmodule Opus.Oanda.Client do
   Used by the trade reconciler and other services that need to query OANDA directly.
   """
 
+  require Logger
+
   @base_url Application.compile_env(:opus, :oanda_base_url, "https://api-fxpractice.oanda.com")
 
   def base_url, do: Application.get_env(:opus, :oanda_base_url, @base_url)
@@ -12,9 +14,11 @@ defmodule Opus.Oanda.Client do
 
   @doc "Fetch all currently open trades from OANDA."
   def get_open_trades do
-    url = "#{base_url()}/v3/accounts/#{account_id()}/openTrades"
+    Logger.info("[OandaClient] Fetching open trades from OANDA")
 
-    case http_get(url) do
+    case client()
+         |> Req.get(url: "/v3/accounts/#{account_id()}/openTrades")
+         |> handle_response() do
       {:ok, %{"trades" => trades}} -> {:ok, trades}
       {:ok, body} -> {:ok, body["trades"] || []}
       {:error, reason} -> {:error, reason}
@@ -23,9 +27,11 @@ defmodule Opus.Oanda.Client do
 
   @doc "Fetch details for a single trade (open or closed) by OANDA trade ID."
   def get_trade(trade_id) do
-    url = "#{base_url()}/v3/accounts/#{account_id()}/trades/#{trade_id}"
+    Logger.info("[OandaClient] Fetching details for trade #{trade_id} from OANDA")
 
-    case http_get(url) do
+    case client()
+         |> Req.get(url: "/v3/accounts/#{account_id()}/trades/#{trade_id}")
+         |> handle_response() do
       {:ok, %{"trade" => trade}} -> {:ok, trade}
       {:error, reason} -> {:error, reason}
     end
@@ -33,7 +39,7 @@ defmodule Opus.Oanda.Client do
 
   @doc "Close a trade. Pass units to partially close, or nil to close all."
   def close_trade(trade_id, units \\ nil) do
-    url = "#{base_url()}/v3/accounts/#{account_id()}/trades/#{trade_id}/close"
+    Logger.info("[OandaClient] Closing trade #{trade_id} on OANDA with units=#{units || "ALL"}")
 
     body =
       case units do
@@ -41,47 +47,36 @@ defmodule Opus.Oanda.Client do
         u -> %{"units" => to_string(u)}
       end
 
-    case http_put(url, body) do
-      {:ok, resp} -> {:ok, resp}
-      {:error, reason} -> {:error, reason}
-    end
+    client()
+    |> Req.put(url: "/v3/accounts/#{account_id()}/trades/#{trade_id}/close", json: body)
+    |> handle_response()
   end
 
-  # -- Private HTTP helpers --
+  # -- Private --
 
-  defp http_get(url) do
-    headers = [
-      {"Authorization", "Bearer #{api_key()}"},
-      {"Content-Type", "application/json"}
-    ]
-
-    case Req.get(url, headers: headers) do
-      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-        {:ok, body}
-
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error, "HTTP #{status}: #{inspect(body)}"}
-
-      {:error, reason} ->
-        {:error, "Request failed: #{inspect(reason)}"}
-    end
+  defp client do
+    Req.new(
+      base_url: base_url(),
+      headers: [
+        {"Authorization", "Bearer #{api_key()}"},
+        {"Content-Type", "application/json"}
+      ]
+    )
   end
 
-  defp http_put(url, body) do
-    headers = [
-      {"Authorization", "Bearer #{api_key()}"},
-      {"Content-Type", "application/json"}
-    ]
+  defp handle_response({:ok, %Req.Response{status: status, body: body}})
+       when status in 200..299 do
+    Logger.info("[OandaClient] Request succeeded with status #{status}: #{inspect(body)}")
+    {:ok, body}
+  end
 
-    case Req.put(url, headers: headers, json: body) do
-      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-        {:ok, body}
+  defp handle_response({:ok, %Req.Response{status: status, body: body}}) do
+    Logger.error("[OandaClient] Request failed with status #{status}: #{inspect(body)}")
+    {:error, {:http_error, status, body}}
+  end
 
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error, "HTTP #{status}: #{inspect(body)}"}
-
-      {:error, reason} ->
-        {:error, "Request failed: #{inspect(reason)}"}
-    end
+  defp handle_response({:error, reason}) do
+    Logger.error("[OandaClient] Request failed: #{inspect(reason)}")
+    {:error, reason}
   end
 end

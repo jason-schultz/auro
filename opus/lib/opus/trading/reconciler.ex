@@ -10,8 +10,10 @@ defmodule Opus.Trading.Reconciler do
   use GenServer
   require Logger
 
+  alias Opus.Auro.Client, as: Auro
   alias Opus.Oanda.Client, as: Oanda
   alias Opus.Repo
+  alias Opus.Utils.Number, as: Number
 
   import Ecto.Query
 
@@ -120,32 +122,37 @@ defmodule Opus.Trading.Reconciler do
 
     now = DateTime.utc_now()
 
-    from(t in "live_trades",
-      where: t.oanda_trade_id == ^trade.oanda_trade_id and t.status == "open"
-    )
-    |> Repo.update_all(
-      set: [
-        exit_price: exit_price,
-        exit_time: now,
-        pnl_percent: pnl,
-        exit_reason: exit_reason,
-        status: "closed",
-        updated_at: now
-      ]
-    )
+    case from(t in "live_trades",
+           where: t.oanda_trade_id == ^trade.oanda_trade_id and t.status == "open"
+         )
+         |> Repo.update_all(
+           set: [
+             exit_price: exit_price,
+             exit_time: now,
+             pnl_percent: pnl,
+             exit_reason: exit_reason,
+             status: "closed",
+             updated_at: now
+           ]
+         ) do
+      {1, _} ->
+        Logger.info(
+          "[Reconciler] Closed #{trade.direction} #{trade.instrument} @ #{Float.round(exit_price, 5)}, " <>
+            "PnL=#{Float.round(pnl * 100, 4)}%, reason=#{exit_reason}"
+        )
 
-    Logger.info(
-      "[Reconciler] Closed #{trade.direction} #{trade.instrument} @ #{Float.round(exit_price, 5)}, " <>
-        "PnL=#{Float.round(pnl * 100, 4)}%, reason=#{exit_reason}"
-    )
+        Auro.delete_position(trade.oanda_trade_id)
+
+      {0, _} ->
+        Logger.warning("[Reconciler] No open trade found for #{trade.oanda_trade_id} to update")
+    end
   end
 
   defp fetch_close_details(trade) do
     case Oanda.get_trade(trade.oanda_trade_id) do
       {:ok, trade_data} ->
-        exit_price = parse_float(trade_data["averageClosePrice"], 0.0)
-        realized_pl = parse_float(trade_data["realizedPL"], 0.0)
-
+        exit_price = Number.parse_float(trade_data["averageClosePrice"], 0.0)
+        realized_pl = Number.parse_float(trade_data["realizedPL"], 0.0)
         exit_reason = determine_exit_reason(trade_data)
 
         pnl =
@@ -153,10 +160,10 @@ defmodule Opus.Trading.Reconciler do
             case trade.direction do
               "Long" -> (exit_price - trade.entry_price) / trade.entry_price
               "Short" -> (trade.entry_price - exit_price) / trade.entry_price
-              _ -> safe_divide(realized_pl, trade.entry_price)
+              _ -> Number.safe_divide(realized_pl, trade.entry_price)
             end
           else
-            safe_divide(realized_pl, trade.entry_price)
+            Number.safe_divide(realized_pl, trade.entry_price)
           end
 
         {exit_price, exit_reason, pnl}
@@ -179,26 +186,11 @@ defmodule Opus.Trading.Reconciler do
       get_in(trade_data, ["takeProfitOrder", "state"]) == "FILLED" ->
         "TakeProfit"
 
+      get_in(trade_data, ["trailingStopLossOrder", "state"]) == "FILLED" ->
+        "TrailingStop"
+
       true ->
         "ClosedByBroker"
     end
   end
-
-  defp parse_float(nil, default), do: default
-
-  defp parse_float(value, default) when is_binary(value) do
-    case Float.parse(value) do
-      {f, _} -> f
-      :error -> default
-    end
-  end
-
-  defp parse_float(value, _default) when is_float(value), do: value
-  defp parse_float(value, _default) when is_integer(value), do: value / 1
-  defp parse_float(_, default), do: default
-
-  defp safe_divide(_, +0.0), do: 0.0
-  defp safe_divide(_, -0.0), do: 0.0
-  defp safe_divide(_, 0), do: 0.0
-  defp safe_divide(a, b), do: a / b
 end
