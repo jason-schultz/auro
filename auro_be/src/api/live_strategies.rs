@@ -47,9 +47,9 @@ pub async fn debug_buffers(State(state): State<AppState>) -> AppResult<Json<Valu
             json!({
                 "instrument": instrument,
                 "granularity": granularity,
-                "closes": buffer.closes,
+                "closes": buffer.closes(),
                 "current_mid": buffer.current_mid,
-                "last_close_time": buffer.last_close_time,
+                "last_close_time": buffer.candles.last().map(|c| c.time),
             })
         })
         .collect();

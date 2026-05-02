@@ -26,3 +26,6 @@ scripts/*.log
 
 # Logs
 logs/
+
+# Agents
+.claude/
