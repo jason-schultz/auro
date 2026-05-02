@@ -135,6 +135,21 @@
                                 Current
                             </th>
                             <th
+                                class="text-center pb-2 text-[10px] font-medium uppercase tracking-wider"
+                            >
+                                State
+                            </th>
+                            <th
+                                class="text-right pb-2 text-[10px] font-medium uppercase tracking-wider"
+                            >
+                                Stop
+                            </th>
+                            <th
+                                class="text-right pb-2 text-[10px] font-medium uppercase tracking-wider"
+                            >
+                                Target
+                            </th>
+                            <th
                                 class="text-right pb-2 text-[10px] font-medium uppercase tracking-wider"
                             >
                                 P&L
@@ -175,6 +190,41 @@
                                 class="py-2 text-right font-mono text-foreground"
                             >
                                 ${{ pos.current }}
+                            </td>
+                            <td class="py-2 text-center">
+                                <span
+                                    class="text-[10px] px-1.5 py-0.5 rounded font-medium"
+                                    :class="stateColor(pos.stopLossState)"
+                                    >{{ pos.stopLossState }}</span
+                                >
+                            </td>
+                            <td
+                                class="py-2 text-right font-mono text-muted-foreground"
+                            >
+                                <template v-if="pos.stopDisplay">
+                                    <div>{{ pos.stopDisplay.priceLabel }}</div>
+                                    <div
+                                        class="text-[10px]"
+                                        :class="pos.stopDisplay.distanceClass"
+                                    >
+                                        {{ pos.stopDisplay.distanceLabel }}
+                                    </div>
+                                </template>
+                                <template v-else>—</template>
+                            </td>
+                            <td
+                                class="py-2 text-right font-mono text-muted-foreground"
+                            >
+                                <template v-if="pos.targetDisplay">
+                                    <div>${{ pos.targetDisplay.price }}</div>
+                                    <div
+                                        class="text-[10px]"
+                                        :class="pos.targetDisplay.distanceClass"
+                                    >
+                                        {{ pos.targetDisplay.distanceLabel }}
+                                    </div>
+                                </template>
+                                <template v-else>—</template>
                             </td>
                             <td
                                 class="py-2 text-right font-mono font-medium"
@@ -312,6 +362,18 @@ interface AccountData {
     margin_available: string;
 }
 
+interface StopDisplay {
+    priceLabel: string;
+    distanceLabel: string;
+    distanceClass: string;
+}
+
+interface TargetDisplay {
+    price: string;
+    distanceLabel: string;
+    distanceClass: string;
+}
+
 interface Position {
     id: string;
     instrument: string;
@@ -320,6 +382,9 @@ interface Position {
     entry: string;
     current: string;
     pl: number;
+    stopLossState: string;
+    stopDisplay: StopDisplay | null;
+    targetDisplay: TargetDisplay | null;
 }
 
 interface AlgoEntry {
@@ -342,7 +407,7 @@ const positions = ref<Position[]>([]);
 const positionsLoading = ref(true);
 const algoActivity = ref<AlgoEntry[]>([]);
 const algoLoading = ref(true);
-const lastKnownPrices = ref<string, number>({});
+const lastKnownPrices = ref<Record<string, number>>({});
 
 let refreshInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -384,6 +449,105 @@ function actionColor(action: string): string {
     return "bg-secondary text-muted-foreground";
 }
 
+function stateColor(state: string): string {
+    switch (state) {
+        case "Trailing":
+            return "bg-emerald-500/10 text-emerald-400";
+        case "Breakeven":
+            return "bg-blue-500/10 text-blue-400";
+        case "Initial":
+            return "bg-muted text-muted-foreground";
+        default:
+            return "bg-secondary text-muted-foreground";
+    }
+}
+
+function determineStopLossState(trade: any): string {
+    if (trade.trailingStopLossOrder) return "Trailing";
+    if (trade.stopLossOrder) {
+        const slPrice = parseFloat(trade.stopLossOrder.price);
+        const entry = parseFloat(trade.price);
+        if (entry > 0 && Math.abs(slPrice - entry) / entry < 0.0001) {
+            return "Breakeven";
+        }
+        return "Initial";
+    }
+    return "None";
+}
+
+function buildStopDisplay(
+    trade: any,
+    currentPrice: number | null,
+    isLong: boolean,
+): StopDisplay | null {
+    if (!currentPrice) return null;
+
+    if (trade.trailingStopLossOrder) {
+        const distance = parseFloat(trade.trailingStopLossOrder.distance);
+        const stopPrice = isLong
+            ? currentPrice - distance
+            : currentPrice + distance;
+        const distancePct = (distance / currentPrice) * 100;
+        return {
+            priceLabel: `$${stopPrice.toFixed(getDecimals(trade.instrument))}`,
+            distanceLabel: `${distancePct.toFixed(2)}% trail`,
+            distanceClass: "text-emerald-400",
+        };
+    }
+
+    if (trade.stopLossOrder) {
+        const slPrice = parseFloat(trade.stopLossOrder.price);
+        const distancePct = ((slPrice - currentPrice) / currentPrice) * 100;
+        const isFavorable = isLong ? slPrice > 0 : slPrice > 0; // SL exists
+        const distanceClass = "text-muted-foreground";
+        const sign = distancePct >= 0 ? "+" : "";
+        return {
+            priceLabel: `$${slPrice.toFixed(getDecimals(trade.instrument))}`,
+            distanceLabel: `${sign}${distancePct.toFixed(2)}%`,
+            distanceClass,
+        };
+    }
+
+    return null;
+}
+
+function buildTargetDisplay(
+    trade: any,
+    currentPrice: number | null,
+): TargetDisplay | null {
+    if (!trade.takeProfitOrder || !currentPrice) return null;
+    const tpPrice = parseFloat(trade.takeProfitOrder.price);
+    const distancePct = ((tpPrice - currentPrice) / currentPrice) * 100;
+    const sign = distancePct >= 0 ? "+" : "";
+    return {
+        price: tpPrice.toFixed(getDecimals(trade.instrument)),
+        distanceLabel: `${sign}${distancePct.toFixed(2)}%`,
+        distanceClass: "text-muted-foreground",
+    };
+}
+
+function getDecimals(instrument: string): number {
+    if (instrument.endsWith("_JPY")) return 3;
+    if (
+        [
+            "SPX500_USD",
+            "NAS100_USD",
+            "US30_USD",
+            "UK100_GBP",
+            "DE30_EUR",
+            "EU50_EUR",
+            "JP225_USD",
+            "AU200_AUD",
+        ].includes(instrument)
+    )
+        return 1;
+    if (["XAU_USD", "XPT_USD", "XPD_USD"].includes(instrument)) return 2;
+    if (instrument.startsWith("XAG_")) return 4;
+    if (["BCO_USD", "WTICO_USD"].includes(instrument)) return 3;
+    if (instrument === "NATGAS_USD" || instrument === "XCU_USD") return 4;
+    return 5;
+}
+
 function timeAgo(dateStr: string): string {
     const now = new Date();
     const then = new Date(dateStr);
@@ -421,14 +585,18 @@ async function loadPositions() {
             const units = parseFloat(t.currentUnits || t.initialUnits || "0");
             const pl = parseFloat(t.unrealizedPL || "0");
             const isLong = units > 0;
+
             return {
                 id: t.id,
                 instrument: t.instrument,
                 side: isLong ? "Long" : "Short",
                 units: Math.abs(units).toString(),
-                entry: entryPrice || "—",
-                current: currentPrice ? currentPrice.toFixed(2) : "-",
+                entry: entryPrice ? entryPrice.toString() : "—",
+                current: currentPrice ? currentPrice.toFixed(getDecimals(t.instrument)) : "-",
                 pl: pl,
+                stopLossState: determineStopLossState(t),
+                stopDisplay: buildStopDisplay(t, currentPrice, isLong),
+                targetDisplay: buildTargetDisplay(t, currentPrice),
             };
         });
     } catch (e) {
