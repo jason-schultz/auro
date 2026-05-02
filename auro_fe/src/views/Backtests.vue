@@ -679,6 +679,7 @@ const instruments = [
     "USD_CAD",
     "XAU_USD",
     "SPX500_USD",
+    "WTICO_USD",
 ];
 
 const statusFilters = [
