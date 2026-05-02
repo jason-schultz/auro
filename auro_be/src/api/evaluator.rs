@@ -119,7 +119,7 @@ async fn run_evaluation(
         };
 
         // Track oldest data_slot across instruments
-        if let Some(close_time) = buffer.last_close_time {
+        if let Some(close_time) = buffer.candles.last().map(|c| c.time) {
             oldest_data_slot = Some(match oldest_data_slot {
                 Some(existing) => existing.min(close_time),
                 None => close_time,

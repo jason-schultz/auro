@@ -6,8 +6,8 @@ use tokio::sync::broadcast;
 use crate::engine::mean_reversion::{self, MRSignal, MeanReversionParams};
 use crate::engine::trend_following::{self, TFSignal, TrendFollowingParams};
 use crate::engine::types::{
-    BufferKey, CandleAccumulator, CandleBuffer, Direction, Granularity, LiveStrategy, OpenPosition,
-    SignalAction, SignalReport, StopLossState,
+    BufferKey, Candle, CandleAccumulator, CandleBuffer, Direction, Granularity, LiveStrategy,
+    OpenPosition, SignalAction, SignalReport, StopLossState,
 };
 use crate::oanda;
 use crate::oanda::client::OandaClient;
@@ -124,12 +124,10 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 let accumulator = accumulators
                                     .entry(key.clone())
                                     .or_insert_with(CandleAccumulator::new);
-                                accumulator.on_minute_close(slot, mid)
+                                accumulator.on_minute_close(slot, slot_time, mid)
                             };
 
-                            let Some((candle_open, candle_high, candle_low, candle_close)) =
-                                maybe_close
-                            else {
+                            let Some(closed_candle) = maybe_close else {
                                 continue;
                             };
 
@@ -139,35 +137,35 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 let buffer = buffers
                                     .entry(key.clone())
                                     .or_insert_with(|| CandleBuffer::new(200));
-                                buffer.push(candle_close, slot_time);
+                                buffer.push(closed_candle.clone());
                                 buffer.current_mid = mid;
 
                                 tracing::debug!(
                                     "{} candle closed for {}: Open={:.5} High={:.5} Low={:.5} Close={:.5}, buffer_len={}",
                                     granularity,
                                     instrument,
-                                    candle_open,
-                                    candle_high,
-                                    candle_low,
-                                    candle_close,
-                                    buffer.closes.len()
+                                    closed_candle.open,
+                                    closed_candle.high,
+                                    closed_candle.low,
+                                    closed_candle.close,
+                                    buffer.candles.len()
                                 );
                                 buffer.clone()
                             };
 
-                            // OHLC is ready, persist the candle
                             if let Err(e) = sqlx::query(
                                 r#"INSERT INTO candles (instrument, granularity, timestamp, open, high, low, close, volume, complete)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7, 0, true)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
                                 ON CONFLICT (instrument, granularity, timestamp) DO NOTHING"#
                             )
                             .bind(instrument)
                             .bind(granularity.as_str())
-                            .bind(slot_time)
-                            .bind(candle_open)
-                            .bind(candle_high)
-                            .bind(candle_low)
-                            .bind(candle_close)
+                            .bind(closed_candle.time)
+                            .bind(closed_candle.open)
+                            .bind(closed_candle.high)
+                            .bind(closed_candle.low)
+                            .bind(closed_candle.close)
+                            .bind(closed_candle.volume as i32)
                             .execute(&state.db)
                             .await
                             {
@@ -280,9 +278,9 @@ async fn prefill_buffers(
     let mut count = 0;
 
     for (instrument, granularity) in &pairs {
-        let rows: Vec<(f64, DateTime<Utc>)> = sqlx::query_as(
+        let rows: Vec<(DateTime<Utc>, f64, f64, f64, f64, i32)> = sqlx::query_as(
             r#"
-            SELECT close, timestamp
+            SELECT timestamp, open, high, low, close, volume
             FROM candles
             WHERE instrument = $1 AND granularity = $2
             ORDER BY timestamp DESC
@@ -307,13 +305,20 @@ async fn prefill_buffers(
         let buffer = buffers.entry(key).or_insert_with(|| CandleBuffer::new(200));
 
         // Rows come in DESC order (newest first), reverse to get chronological order
-        for (close, timestamp) in rows.iter().rev() {
-            buffer.push(*close, *timestamp);
+        for (time, open, high, low, close, volume) in rows.iter().rev() {
+            buffer.push(Candle {
+                time: *time,
+                open: *open,
+                high: *high,
+                low: *low,
+                close: *close,
+                volume: *volume as u32,
+            });
         }
 
         tracing::info!(
             "Pre-filled {} {} candles for {}",
-            buffer.closes.len(),
+            buffer.candles.len(),
             granularity,
             instrument
         );
@@ -501,9 +506,11 @@ async fn evaluate_entry(
                 stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.005),
             };
 
+            let closes = buffer.closes();
+
             // Diagnostic: compute MA and deviation for logging
-            if buffer.closes.len() >= mr_params.ma_period {
-                let ma: f64 = buffer.closes[buffer.closes.len() - mr_params.ma_period..]
+            if closes.len() >= mr_params.ma_period {
+                let ma: f64 = closes[closes.len() - mr_params.ma_period..]
                     .iter()
                     .sum::<f64>()
                     / mr_params.ma_period as f64;
@@ -517,19 +524,19 @@ async fn evaluate_entry(
                     ma,
                     deviation * 100.0,
                     mr_params.entry_threshold * 100.0,
-                    buffer.closes.len(),
+                    closes.len(),
                 );
             } else {
                 tracing::info!(
                     "[STATUS] MR {} {} | buffer {}/{} — waiting for data",
                     strategy.instrument,
                     strategy.granularity,
-                    buffer.closes.len(),
+                    closes.len(),
                     mr_params.ma_period,
                 );
             }
 
-            match mean_reversion::check_entry(&buffer.closes, &mr_params) {
+            match mean_reversion::check_entry(&closes, &mr_params) {
                 MRSignal::Enter {
                     ma_value,
                     deviation_pct,
@@ -572,13 +579,15 @@ async fn evaluate_entry(
                 take_profit: params["take_profit"].as_f64(),
             };
 
+            let closes = buffer.closes();
+
             // Diagnostic: compute fast/slow MAs for logging
-            if buffer.closes.len() >= tf_params.slow_period {
-                let fast_ma: f64 = buffer.closes[buffer.closes.len() - tf_params.fast_period..]
+            if closes.len() >= tf_params.slow_period {
+                let fast_ma: f64 = closes[closes.len() - tf_params.fast_period..]
                     .iter()
                     .sum::<f64>()
                     / tf_params.fast_period as f64;
-                let slow_ma: f64 = buffer.closes[buffer.closes.len() - tf_params.slow_period..]
+                let slow_ma: f64 = closes[closes.len() - tf_params.slow_period..]
                     .iter()
                     .sum::<f64>()
                     / tf_params.slow_period as f64;
@@ -594,19 +603,19 @@ async fn evaluate_entry(
                     slow_ma,
                     gap_pct,
                     side,
-                    buffer.closes.len(),
+                    closes.len(),
                 );
             } else {
                 tracing::info!(
                     "[STATUS] TF {} {} | buffer {}/{} — waiting for data",
                     strategy.instrument,
                     strategy.granularity,
-                    buffer.closes.len(),
+                    closes.len(),
                     tf_params.slow_period,
                 );
             }
 
-            match trend_following::check_entry(&buffer.closes, &tf_params) {
+            match trend_following::check_entry(&closes, &tf_params) {
                 TFSignal::EnterLong { fast_ma, slow_ma } => {
                     tracing::info!(
                         "[SIGNAL] Trend following LONG on {} ({}): fast_ma={:.5}, slow_ma={:.5}",
@@ -815,8 +824,9 @@ async fn evaluate_exit(
             };
 
             let is_long = positions_for_strategy[0].direction == Direction::Long;
+            let closes = buffer.closes();
 
-            match trend_following::check_exit(&buffer.closes, &tf_params, is_long) {
+            match trend_following::check_exit(&closes, &tf_params, is_long) {
                 TFSignal::ExitTrendReversal { fast_ma, slow_ma } => {
                     should_exit = true;
                     exit_reason = format!(
@@ -963,18 +973,16 @@ pub fn format_price(instrument: &str, price: f64) -> String {
     format!("{:.*}", price_precision(instrument), price)
 }
 
+/// Returns the canonical start time of the slot containing `tick_time`.
 fn compute_slot_time(granularity: Granularity, tick_time: DateTime<Utc>) -> DateTime<Utc> {
     match granularity {
-        Granularity::H1 => {
-            tick_time
-                .with_minute(0)
-                .unwrap()
-                .with_second(0)
-                .unwrap()
-                .with_nanosecond(0)
-                .unwrap()
-                - chrono::Duration::hours(1)
-        }
+        Granularity::H1 => tick_time
+            .with_minute(0)
+            .unwrap()
+            .with_second(0)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap(),
         Granularity::M15 => {
             let m = (tick_time.minute() / 15) * 15;
             tick_time
@@ -984,7 +992,6 @@ fn compute_slot_time(granularity: Granularity, tick_time: DateTime<Utc>) -> Date
                 .unwrap()
                 .with_nanosecond(0)
                 .unwrap()
-                - chrono::Duration::minutes(15)
         }
         Granularity::D | Granularity::H4 | Granularity::M5 | Granularity::M1 => {
             unimplemented!("compute_slot_time not implemented for {:?}", granularity)
@@ -1237,47 +1244,92 @@ mod tests {
 
     // --- CandleAccumulator tests ---
 
+    use chrono::TimeZone;
+
+    fn slot_time(h: u32, m: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 1, h, m, 0).unwrap()
+    }
+
+    fn candle(time: DateTime<Utc>, close: f64) -> Candle {
+        Candle {
+            time,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1,
+        }
+    }
+
     #[test]
     fn accumulator_returns_none_on_first_tick() {
         let mut acc = CandleAccumulator::new();
-        assert_eq!(acc.on_minute_close(10, 1.2345), None);
+        assert!(acc.on_minute_close(10, slot_time(10, 0), 1.2345).is_none());
     }
 
     #[test]
     fn accumulator_returns_none_within_same_slot() {
         let mut acc = CandleAccumulator::new();
-        acc.on_minute_close(10, 1.2345);
-        assert_eq!(acc.on_minute_close(10, 1.2350), None);
-        assert_eq!(acc.on_minute_close(10, 1.2355), None);
+        let t = slot_time(10, 0);
+        acc.on_minute_close(10, t, 1.2345);
+        assert!(acc.on_minute_close(10, t, 1.2350).is_none());
+        assert!(acc.on_minute_close(10, t, 1.2355).is_none());
     }
 
     #[test]
-    fn accumulator_emits_close_on_slot_change() {
+    fn accumulator_emits_completed_candle_on_slot_change() {
         let mut acc = CandleAccumulator::new();
-        acc.on_minute_close(10, 1.2345);
-        acc.on_minute_close(10, 1.2360); // last_mid = 1.2360
+        let t10 = slot_time(10, 0);
+        acc.on_minute_close(10, t10, 1.2345);
+        acc.on_minute_close(10, t10, 1.2360);
 
-        let result = acc.on_minute_close(11, 1.2365);
-        assert_eq!(result, Some((1.2345, 1.2360, 1.2345, 1.2360)));
+        let result = acc.on_minute_close(11, slot_time(11, 0), 1.2365).unwrap();
+        assert_eq!(result.time, t10);
+        assert_eq!(result.open, 1.2345);
+        assert_eq!(result.high, 1.2360);
+        assert_eq!(result.low, 1.2345);
+        assert_eq!(result.close, 1.2360);
+        assert_eq!(result.volume, 2);
+    }
+
+    #[test]
+    fn accumulator_tracks_high_and_low_across_ticks() {
+        let mut acc = CandleAccumulator::new();
+        let t = slot_time(10, 0);
+        acc.on_minute_close(10, t, 1.2345); // open
+        acc.on_minute_close(10, t, 1.2400); // new high
+        acc.on_minute_close(10, t, 1.2300); // new low
+        acc.on_minute_close(10, t, 1.2350); // close
+
+        let result = acc.on_minute_close(11, slot_time(11, 0), 1.2360).unwrap();
+        assert_eq!(result.open, 1.2345);
+        assert_eq!(result.high, 1.2400);
+        assert_eq!(result.low, 1.2300);
+        assert_eq!(result.close, 1.2350);
+        assert_eq!(result.volume, 4);
     }
 
     #[test]
     fn accumulator_tracks_multiple_slots() {
         let mut acc = CandleAccumulator::new();
-        acc.on_minute_close(0, 1.1000);
-        acc.on_minute_close(0, 1.1050);
+        let t0 = slot_time(0, 0);
+        let t1 = slot_time(1, 0);
+        let t2 = slot_time(2, 0);
 
-        assert_eq!(
-            acc.on_minute_close(1, 1.2000),
-            Some((1.1000, 1.1050, 1.1000, 1.1050))
-        );
+        acc.on_minute_close(0, t0, 1.1000);
+        acc.on_minute_close(0, t0, 1.1050);
 
-        acc.on_minute_close(1, 1.2200);
+        let first = acc.on_minute_close(1, t1, 1.2000).unwrap();
+        assert_eq!(first.time, t0);
+        assert_eq!(first.open, 1.1000);
+        assert_eq!(first.close, 1.1050);
 
-        assert_eq!(
-            acc.on_minute_close(2, 1.3000),
-            Some((1.2000, 1.2200, 1.2000, 1.2200))
-        );
+        acc.on_minute_close(1, t1, 1.2200);
+
+        let second = acc.on_minute_close(2, t2, 1.3000).unwrap();
+        assert_eq!(second.time, t1);
+        assert_eq!(second.open, 1.2000);
+        assert_eq!(second.close, 1.2200);
     }
 
     // --- CandleBuffer tests ---
@@ -1285,34 +1337,57 @@ mod tests {
     #[test]
     fn candle_buffer_starts_empty() {
         let buf = CandleBuffer::new(10);
-        assert_eq!(buf.closes.len(), 0);
+        assert_eq!(buf.candles.len(), 0);
     }
 
     #[test]
-    fn candle_buffer_accumulates_closes() {
+    fn candle_buffer_accumulates_candles() {
         let mut buf = CandleBuffer::new(10);
-        buf.push(1.0, Utc::now());
-        buf.push(2.0, Utc::now());
-        buf.push(3.0, Utc::now());
-        assert_eq!(buf.closes, vec![1.0, 2.0, 3.0]);
+        buf.push(candle(slot_time(0, 0), 1.0));
+        buf.push(candle(slot_time(1, 0), 2.0));
+        buf.push(candle(slot_time(2, 0), 3.0));
+        assert_eq!(buf.closes(), vec![1.0, 2.0, 3.0]);
     }
 
     #[test]
     fn candle_buffer_respects_max_size() {
         let mut buf = CandleBuffer::new(3);
-        buf.push(1.0, Utc::now());
-        buf.push(2.0, Utc::now());
-        buf.push(3.0, Utc::now());
-        buf.push(4.0, Utc::now());
-        assert_eq!(buf.closes, vec![2.0, 3.0, 4.0]);
+        buf.push(candle(slot_time(0, 0), 1.0));
+        buf.push(candle(slot_time(1, 0), 2.0));
+        buf.push(candle(slot_time(2, 0), 3.0));
+        buf.push(candle(slot_time(3, 0), 4.0));
+        assert_eq!(buf.closes(), vec![2.0, 3.0, 4.0]);
     }
 
     #[test]
     fn candle_buffer_evicts_oldest_first() {
         let mut buf = CandleBuffer::new(3);
         for i in 0..10 {
-            buf.push(i as f64, Utc::now());
+            buf.push(candle(slot_time(i, 0), i as f64));
         }
-        assert_eq!(buf.closes, vec![7.0, 8.0, 9.0]);
+        assert_eq!(buf.closes(), vec![7.0, 8.0, 9.0]);
+    }
+
+    // --- compute_slot_time tests ---
+
+    #[test]
+    fn compute_slot_time_h1_returns_start_of_current_hour() {
+        let tick = Utc.with_ymd_and_hms(2026, 5, 1, 14, 30, 27).unwrap();
+        let expected = Utc.with_ymd_and_hms(2026, 5, 1, 14, 0, 0).unwrap();
+        assert_eq!(compute_slot_time(Granularity::H1, tick), expected);
+    }
+
+    #[test]
+    fn compute_slot_time_m15_returns_start_of_current_15min_block() {
+        let tick = Utc.with_ymd_and_hms(2026, 5, 1, 14, 47, 5).unwrap();
+        let expected = Utc.with_ymd_and_hms(2026, 5, 1, 14, 45, 0).unwrap();
+        assert_eq!(compute_slot_time(Granularity::M15, tick), expected);
+    }
+
+    #[test]
+    fn compute_slot_time_m15_at_block_boundary() {
+        let tick = Utc.with_ymd_and_hms(2026, 5, 1, 14, 0, 0).unwrap();
+        let expected = Utc.with_ymd_and_hms(2026, 5, 1, 14, 0, 0).unwrap();
+        assert_eq!(compute_slot_time(Granularity::M15, tick), expected);
     }
 }

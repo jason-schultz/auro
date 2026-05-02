@@ -7,9 +7,27 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub struct BollingerBands {
+    pub upper: f64,
+    pub middle: f64,
+    pub lower: f64,
+    pub bandwith_pct: f64,  // (upper - lower) / middle * 100
+    pub position: f64       // (close - lower) / (upper -lower)
+}
+
 /// Buffer key: (instrument, granularity)
 pub type BufferKey = (String, Granularity);
 
+
+#[derive(Debug, Clone)]
+pub struct Candle {
+    pub time: DateTime<Utc>,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: u32,
+}
 /// Generic candle accumulator that works for any timeframe.
 /// Tracks time slot boundaries and emits a close when the slot changes.
 #[derive(Debug, Clone)]
@@ -17,64 +35,57 @@ pub struct CandleAccumulator {
     /// The time slot we're currently accumulating for
     /// For H1: the hour (0-23). For M15: minutes / 15 combined with hour (0-95 per day).
     pub current_slot: Option<u32>,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    /// Last mid price seen in the current slot
-    pub close: f64,
-    /// How many M1 closes we've seen this slot
-    pub tick_count: u32,
+    pub current_candle: Option<Candle>,
 }
 
 impl CandleAccumulator {
     pub fn new() -> Self {
         Self {
             current_slot: None,
-            open: 0.0,
-            high: 0.0,
-            low: 0.0,
-            close: 0.0,
-            tick_count: 0,
+            current_candle: None,
         }
     }
 
     /// Feed a new M1 close. Returns Some(close_price) if a candle boundary was crossed.
-    pub fn on_minute_close(&mut self, slot: u32, mid: f64) -> Option<(f64, f64, f64, f64)> {
-        let result = match self.current_slot {
-            Some(prev_slot) if prev_slot != slot => {
-                let ohlc = (self.open, self.high, self.low, self.close);
-
-                // Reset for new slot, this tick is the open of the new slot
-                self.open = mid;
-                self.high = mid;
-                self.low = mid;
-                self.close = mid;
-                self.tick_count = 1;
-
-                Some(ohlc)
+    pub fn on_minute_close(&mut self, slot: u32, slot_time: DateTime<Utc>,mid: f64) -> Option<Candle> {
+        match(self.current_slot, &mut self.current_candle) {
+            (Some(prev_slot), Some(_)) if prev_slot != slot => {
+                let completed = self.current_candle.take();
+                self.current_candle = Some(Candle {
+                    time: slot_time,
+                    open: mid,
+                    high: mid,
+                    low: mid,
+                    close: mid,
+                    volume: 1,
+                });
+                self.current_slot = Some(slot);
+                completed
             }
-            None => {
-                // First tick ever — initialize the slot
-                self.open = mid;
-                self.high = mid;
-                self.low = mid;
-                self.close = mid;
-                self.tick_count = 1;
+            // First tick ever: Initialize, emit nothing
+            (None, _) => {
+                self.current_candle = Some(Candle {
+                    time: slot_time,
+                    open: mid,
+                    high: mid,
+                    low: mid,
+                    close: mid,
+                    volume: 1,
+                });
+                self.current_slot = Some(slot);
                 None
             }
-            _ => {
-                // Same slot, just update high/low/close
-                self.high = self.high.max(mid);
-                self.low = self.low.min(mid);
-                self.close = mid;
-                self.tick_count += 1;
-                None
+            (Some(_), Some(candle)) => {
+                    // Same slot, update current candle
+                    candle.high = candle.high.max(mid);
+                    candle.low = candle.low.min(mid);
+                    candle.close = mid;
+                    candle.volume += 1;
+                    None
             }
-        };
-
-        self.current_slot = Some(slot);
-
-        result
+            // Shouldn't happen but compile time exhaustive
+            (Some(_), None) => None,
+        }
     }
 }
 
@@ -82,28 +93,29 @@ impl CandleAccumulator {
 /// One buffer per (instrument, granularity) pair.
 #[derive(Debug, Clone)]
 pub struct CandleBuffer {
-    pub closes: Vec<f64>,
+    pub candles: Vec<Candle>,
     pub max_size: usize,
     pub current_mid: f64,
-    pub last_close_time: Option<DateTime<Utc>>,
 }
 
 impl CandleBuffer {
     pub fn new(max_size: usize) -> Self {
         Self {
-            closes: Vec::new(),
+            candles: Vec::new(),
             max_size,
             current_mid: 0.0,
-            last_close_time: None,
         }
     }
 
-    pub fn push(&mut self, close: f64, close_time: DateTime<Utc>) {
-        self.closes.push(close);
-        self.last_close_time = Some(close_time);
-        if self.closes.len() > self.max_size {
-            self.closes.remove(0);
+    pub fn push(&mut self, candle: Candle) {
+        self.candles.push(candle);
+        if self.candles.len() > self.max_size {
+            self.candles.remove(0);
         }
+    }
+
+    pub fn closes(&self) -> Vec<f64> {
+        self.candles.iter().map(|c| c.close).collect()
     }
 }
 
