@@ -1,9 +1,4 @@
-use chrono::{DateTime, Utc};
-
-use crate::{
-    engine::types::{Direction, EntryReason, ExitReason, Trade},
-    oanda::models::CandleRecord,
-};
+use crate::engine::types::{Candle, Direction, EntryReason, ExitReason, Trade};
 
 pub enum MRSignal {
     Enter { ma_value: f64, deviation_pct: f64 },
@@ -23,13 +18,13 @@ pub struct MeanReversionParams {
 ///
 /// # Arguments
 ///
-/// * `candles` - A slice of `CandleRecord` structs representing the price data.
+/// * `candles` - A slice of `Candle` structs representing the price data.
 /// * `params` - A `MeanReversionParams` struct containing the strategy parameters.
 ///
 /// # Returns
 ///
 /// A vector of `Trade` structs representing the trades executed by the strategy.
-pub fn run(candles: &[CandleRecord], params: &MeanReversionParams) -> Vec<Trade> {
+pub fn run(candles: &[Candle], params: &MeanReversionParams) -> Vec<Trade> {
     let mut trades: Vec<Trade> = Vec::new();
     let mut i = params.ma_period;
     while i < candles.len() {
@@ -40,12 +35,12 @@ pub fn run(candles: &[CandleRecord], params: &MeanReversionParams) -> Vec<Trade>
         let close = candles[i].close;
         let pct_below = (close - ma) / ma;
         if pct_below < params.entry_threshold {
-            let entry_time = candles[i].timestamp;
+            let entry_time = candles[i].time;
             let entry_price = close;
             let mut in_trade = true;
             for j in i + 1..candles.len() {
                 let exit_price = candles[j].close;
-                let exit_time = candles[j].timestamp;
+                let exit_time = candles[j].time;
                 let pnl = (exit_price - entry_price) / entry_price;
                 if pnl > params.exit_threshold || pnl < params.stop_loss {
                     in_trade = false;
@@ -76,7 +71,7 @@ pub fn run(candles: &[CandleRecord], params: &MeanReversionParams) -> Vec<Trade>
                     entry_price,
                     exit_price: candles.last().unwrap().close,
                     entry_time,
-                    exit_time: candles.last().unwrap().timestamp,
+                    exit_time: candles.last().unwrap().time,
                     pnl_percent: (candles.last().unwrap().close - entry_price) / entry_price,
                     entry_reason: EntryReason::BelowMA {
                         ma_value: ma,
@@ -119,19 +114,16 @@ pub fn check_entry(closes: &[f64], params: &MeanReversionParams) -> MRSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, Utc};
 
-    fn make_candle(price: f64, minutes_offset: i64) -> CandleRecord {
-        CandleRecord {
-            instrument: String::from("EUR_USD"),
-            granularity: String::from("M1"),
-            timestamp: Utc::now() - Duration::minutes(minutes_offset),
+    fn make_candle(price: f64, minutes_offset: i64) -> Candle {
+        Candle {
+            time: Utc::now() - Duration::minutes(minutes_offset),
             open: price,
             high: price,
             low: price,
             close: price,
             volume: 0,
-            complete: true,
         }
     }
 

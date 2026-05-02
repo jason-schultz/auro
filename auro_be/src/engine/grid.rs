@@ -6,8 +6,7 @@ use uuid::Uuid;
 use crate::engine::mean_reversion::{run as run_mean_reversion, MeanReversionParams};
 use crate::engine::stats::{self, BacktestStats};
 use crate::engine::trend_following::{run as run_trend_following, TrendFollowingParams};
-use crate::engine::types::{EntryReason, ExitReason, Trade};
-use crate::oanda::models::CandleRecord;
+use crate::engine::types::{Candle, EntryReason, ExitReason, Trade};
 
 #[derive(Debug, Clone)]
 pub struct GridSearchConfig {
@@ -131,28 +130,15 @@ fn flag_result(
 /// - `instrument`: The instrument symbol (e.g., "BTC/USD").
 /// - `granularity`: The granularity of the candles (e.g., "1h", "1d").
 ///
-/// Returns a vector of [`CandleRecord`] structs.
+/// Returns a vector of [`Candle`] structs.
 pub async fn load_candles(
     pool: &PgPool,
     instrument: &str,
     granularity: &str,
-) -> Result<Vec<CandleRecord>, sqlx::Error> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            chrono::DateTime<Utc>,
-            f64,
-            f64,
-            f64,
-            f64,
-            i32,
-            bool,
-        ),
-    >(
+) -> Result<Vec<Candle>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, f64, f64, f64, f64, i32)>(
         r#"
-        SELECT instrument, granularity, timestamp, open, high, low, close, volume, complete
+        SELECT timestamp, open, high, low, close, volume
         FROM candles
         WHERE instrument = $1 AND granularity = $2 AND complete = true
         ORDER BY timestamp ASC
@@ -165,21 +151,14 @@ pub async fn load_candles(
 
     let candles = rows
         .into_iter()
-        .map(
-            |(instrument, granularity, timestamp, open, high, low, close, volume, complete)| {
-                CandleRecord {
-                    instrument,
-                    granularity,
-                    timestamp,
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume,
-                    complete,
-                }
-            },
-        )
+        .map(|(time, open, high, low, close, volume)| Candle {
+            time,
+            open,
+            high,
+            low,
+            close,
+            volume,
+        })
         .collect();
 
     Ok(candles)
@@ -188,11 +167,11 @@ pub async fn load_candles(
 /// Runs a grid search over the given candles using the provided configuration.
 ///
 /// Parameters:
-/// - `candles`: A slice of [`CandleRecord`] structs.
+/// - `candles`: A slice of [`Candle`] structs.
 /// - `config`: A reference to the [`GridSearchConfig`] struct.
 ///
 /// Returns a vector of [`GridSearchResult`] structs.
-pub fn run_mean_grid(candles: &[CandleRecord], config: &GridSearchConfig) -> Vec<GridSearchResult> {
+pub fn run_mean_grid(candles: &[Candle], config: &GridSearchConfig) -> Vec<GridSearchResult> {
     let mut results = Vec::new();
 
     for &ma_period in &config.ma_periods {
@@ -240,7 +219,7 @@ pub fn run_mean_grid(candles: &[CandleRecord], config: &GridSearchConfig) -> Vec
     results
 }
 
-pub fn run_trend_grid(candles: &[CandleRecord], config: &TrendGridConfig) -> Vec<GridSearchResult> {
+pub fn run_trend_grid(candles: &[Candle], config: &TrendGridConfig) -> Vec<GridSearchResult> {
     let mut results = Vec::new();
 
     for &fast in &config.fast_periods {

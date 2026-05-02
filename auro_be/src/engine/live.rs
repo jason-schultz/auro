@@ -165,7 +165,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                             .bind(closed_candle.high)
                             .bind(closed_candle.low)
                             .bind(closed_candle.close)
-                            .bind(closed_candle.volume as i32)
+                            .bind(closed_candle.volume)
                             .execute(&state.db)
                             .await
                             {
@@ -312,7 +312,7 @@ async fn prefill_buffers(
                 high: *high,
                 low: *low,
                 close: *close,
-                volume: *volume as u32,
+                volume: *volume,
             });
         }
 

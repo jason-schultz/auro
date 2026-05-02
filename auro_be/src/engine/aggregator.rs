@@ -2,22 +2,20 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Timelike, Utc};
 
-use crate::oanda::models::CandleRecord;
+use crate::engine::types::Candle;
 
-pub fn aggregate_candles(candles: &[CandleRecord], minutes: usize) -> Vec<CandleRecord> {
+pub fn aggregate_candles(candles: &[Candle], minutes: usize) -> Vec<Candle> {
     let mut aggregated = Vec::new();
-    let mut buckets: HashMap<DateTime<Utc>, Vec<CandleRecord>> = HashMap::new();
+    let mut buckets: HashMap<DateTime<Utc>, Vec<Candle>> = HashMap::new();
     for candle in candles {
-        let bucket = snap_to_minutes(candle.timestamp, minutes);
+        let bucket = snap_to_minutes(candle.time, minutes);
         buckets.entry(bucket).or_default().push(candle.clone());
     }
-    for (timestamp, chunk) in buckets {
+    for (time, chunk) in buckets {
         let first = chunk.first().unwrap();
         let last = chunk.last().unwrap();
-        aggregated.push(CandleRecord {
-            instrument: first.instrument.clone(),
-            granularity: format_granularity(minutes),
-            timestamp,
+        aggregated.push(Candle {
+            time,
             open: first.open,
             high: chunk
                 .iter()
@@ -26,10 +24,9 @@ pub fn aggregate_candles(candles: &[CandleRecord], minutes: usize) -> Vec<Candle
             low: chunk.iter().map(|c| c.low).fold(f64::INFINITY, f64::min),
             close: last.close,
             volume: chunk.iter().map(|c| c.volume).sum(),
-            complete: last.complete,
         });
     }
-    aggregated.sort_by_key(|c| c.timestamp);
+    aggregated.sort_by_key(|c| c.time);
     aggregated
 }
 

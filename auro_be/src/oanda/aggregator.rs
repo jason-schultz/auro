@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use tokio::sync::broadcast;
 
 use crate::db;
-use crate::oanda::models::{CandleRecord, StreamMessage};
+use crate::engine::types::{Candle, CandleRow, Granularity};
+use crate::oanda::models::StreamMessage;
 
 struct BarBuilder {
     instrument: String,
@@ -36,17 +37,19 @@ impl BarBuilder {
         self.tick_count += 1;
     }
 
-    fn to_record(&self) -> CandleRecord {
-        CandleRecord {
+    fn to_row(&self) -> CandleRow {
+        CandleRow {
             instrument: self.instrument.clone(),
-            granularity: "M1".to_string(),
-            timestamp: self.timestamp,
-            open: self.open,
-            high: self.high,
-            low: self.low,
-            close: self.close,
-            volume: self.tick_count,
+            granularity: Granularity::M1,
             complete: true,
+            candle: Candle {
+                time: self.timestamp,
+                open: self.open,
+                high: self.high,
+                low: self.low,
+                close: self.close,
+                volume: self.tick_count,
+            },
         }
     }
 }
@@ -94,18 +97,18 @@ pub fn spawn_aggregator(mut rx: broadcast::Receiver<StreamMessage>, pool: PgPool
                         }
                         Some(bar) => {
                             // Minute rolled over — save the completed bar
-                            let record = bar.to_record();
-                            if let Err(e) = db::upsert_candle(&pool, &record).await {
+                            let row = bar.to_row();
+                            if let Err(e) = db::upsert_candle(&pool, &row).await {
                                 tracing::error!(
                                     "Failed to save candle for {}: {}",
-                                    record.instrument,
+                                    row.instrument,
                                     e
                                 );
                             } else {
                                 tracing::debug!(
                                     "Saved M1 candle for {} at {}",
-                                    record.instrument,
-                                    record.timestamp
+                                    row.instrument,
+                                    row.candle.time
                                 );
                             }
 
