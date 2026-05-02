@@ -26,7 +26,7 @@ pub struct Candle {
     pub high: f64,
     pub low: f64,
     pub close: f64,
-    pub volume: u32,
+    pub volume: i32,
 }
 /// Generic candle accumulator that works for any timeframe.
 /// Tracks time slot boundaries and emits a close when the slot changes.
@@ -117,6 +117,16 @@ impl CandleBuffer {
     pub fn closes(&self) -> Vec<f64> {
         self.candles.iter().map(|c| c.close).collect()
     }
+}
+
+/// A `Candle` plus the row metadata needed to persist it to the `candles` table.
+/// Used at the DB write boundary; in-memory candle flow uses `Candle` directly.
+#[derive(Debug, Clone)]
+pub struct CandleRow {
+    pub instrument: String,
+    pub granularity: Granularity,
+    pub complete: bool,
+    pub candle: Candle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]

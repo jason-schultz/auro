@@ -1,7 +1,7 @@
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
-use crate::oanda::models::CandleRecord;
+use crate::engine::types::CandleRow;
 
 pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let pool = PgPoolOptions::new()
@@ -18,7 +18,7 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     Ok(pool)
 }
 
-pub async fn upsert_candle(pool: &PgPool, candle: &CandleRecord) -> Result<(), sqlx::Error> {
+pub async fn upsert_candle(pool: &PgPool, row: &CandleRow) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO candles (instrument, granularity, timestamp, open, high, low, close, volume, complete)
@@ -33,25 +33,25 @@ pub async fn upsert_candle(pool: &PgPool, candle: &CandleRecord) -> Result<(), s
             complete = EXCLUDED.complete
         "#,
     )
-    .bind(&candle.instrument)
-    .bind(&candle.granularity)
-    .bind(candle.timestamp)
-    .bind(candle.open)
-    .bind(candle.high)
-    .bind(candle.low)
-    .bind(candle.close)
-    .bind(candle.volume)
-    .bind(candle.complete)
+    .bind(&row.instrument)
+    .bind(row.granularity.as_str())
+    .bind(row.candle.time)
+    .bind(row.candle.open)
+    .bind(row.candle.high)
+    .bind(row.candle.low)
+    .bind(row.candle.close)
+    .bind(row.candle.volume)
+    .bind(row.complete)
     .execute(pool)
     .await?;
 
     Ok(())
 }
 
-pub async fn upsert_candles(pool: &PgPool, candles: &[CandleRecord]) -> Result<usize, sqlx::Error> {
+pub async fn upsert_candles(pool: &PgPool, rows: &[CandleRow]) -> Result<usize, sqlx::Error> {
     let mut count = 0;
-    for candle in candles {
-        upsert_candle(pool, candle).await?;
+    for row in rows {
+        upsert_candle(pool, row).await?;
         count += 1;
     }
     Ok(count)

@@ -2,8 +2,8 @@ use chrono::{Duration, Utc};
 use sqlx::PgPool;
 
 use crate::db;
+use crate::engine::types::{Candle, CandleRow, Granularity};
 use crate::oanda::client::OandaClient;
-use crate::oanda::models::CandleRecord;
 
 const BACKFILL_INSTRUMENTS: &[&str] = &[
     "EUR_USD", "USD_CAD", "GBP_USD", "USD_JPY", "AUD_USD", "XAU_USD",
@@ -53,30 +53,32 @@ async fn backfill_instrument(
             break;
         }
 
-        let records: Vec<CandleRecord> = response
+        let rows: Vec<CandleRow> = response
             .candles
             .iter()
             .filter_map(|c| {
                 let mid = c.mid.as_ref()?;
-                let timestamp = chrono::DateTime::parse_from_rfc3339(&c.time)
+                let time = chrono::DateTime::parse_from_rfc3339(&c.time)
                     .ok()?
                     .with_timezone(&Utc);
 
-                Some(CandleRecord {
+                Some(CandleRow {
                     instrument: instrument.to_string(),
-                    granularity: "M1".to_string(),
-                    timestamp,
-                    open: mid.o.parse().ok()?,
-                    high: mid.h.parse().ok()?,
-                    low: mid.l.parse().ok()?,
-                    close: mid.c.parse().ok()?,
-                    volume: c.volume,
+                    granularity: Granularity::M1,
                     complete: c.complete,
+                    candle: Candle {
+                        time,
+                        open: mid.o.parse().ok()?,
+                        high: mid.h.parse().ok()?,
+                        low: mid.l.parse().ok()?,
+                        close: mid.c.parse().ok()?,
+                        volume: c.volume,
+                    },
                 })
             })
             .collect();
 
-        let count = db::upsert_candles(pool, &records).await?;
+        let count = db::upsert_candles(pool, &rows).await?;
         total_count += count;
 
         // If we got less than 5000, we've caught up
@@ -85,8 +87,8 @@ async fn backfill_instrument(
         }
 
         // Move the window forward
-        if let Some(last) = records.last() {
-            current_from = (last.timestamp + Duration::minutes(1))
+        if let Some(last) = rows.last() {
+            current_from = (last.candle.time + Duration::minutes(1))
                 .format("%Y-%m-%dT%H:%M:%SZ")
                 .to_string();
         } else {

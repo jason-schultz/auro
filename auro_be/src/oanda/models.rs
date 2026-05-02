@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // --- Account ---
@@ -113,21 +112,6 @@ pub struct Instrument {
     pub pip_location: Option<i32>,
     pub display_precision: Option<i32>,
     pub minimum_trade_size: Option<String>,
-}
-
-// --- Internal candle model for DB storage ---
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CandleRecord {
-    pub instrument: String,
-    pub granularity: String,
-    pub timestamp: DateTime<Utc>,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub volume: i32,
-    pub complete: bool,
 }
 
 // pub enum TradeOrderUpdate {

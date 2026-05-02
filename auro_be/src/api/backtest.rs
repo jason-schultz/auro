@@ -6,7 +6,8 @@ use serde_json::{json, Value};
 
 use crate::engine::aggregator::granularity_to_minutes;
 use crate::engine::grid::{self};
-use crate::error::AppResult;
+use crate::engine::types::{Candle, CandleRow, Granularity};
+use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -220,7 +221,10 @@ pub async fn backfill_historical(
     Query(params): Query<BackfillParams>,
 ) -> AppResult<Json<Value>> {
     let instrument = params.instrument;
-    let granularity = params.granularity.unwrap_or_else(|| "H1".to_string());
+    let granularity_str = params.granularity.unwrap_or_else(|| "H1".to_string());
+    let granularity: Granularity = granularity_str
+        .parse()
+        .map_err(|e| AppError::BadRequest(format!("invalid granularity: {}", e)))?;
     let days = params.days.unwrap_or(365);
 
     tracing::info!(
@@ -239,7 +243,7 @@ pub async fn backfill_historical(
             .oanda
             .get_candles(
                 &instrument,
-                &granularity,
+                granularity.as_str(),
                 Some(5000),
                 Some(&current_from),
                 None,
@@ -250,30 +254,32 @@ pub async fn backfill_historical(
             break;
         }
 
-        let records: Vec<crate::oanda::models::CandleRecord> = response
+        let rows: Vec<CandleRow> = response
             .candles
             .iter()
             .filter_map(|c| {
                 let mid = c.mid.as_ref()?;
-                let timestamp = chrono::DateTime::parse_from_rfc3339(&c.time)
+                let time = chrono::DateTime::parse_from_rfc3339(&c.time)
                     .ok()?
                     .with_timezone(&chrono::Utc);
 
-                Some(crate::oanda::models::CandleRecord {
+                Some(CandleRow {
                     instrument: instrument.clone(),
-                    granularity: granularity.clone(),
-                    timestamp,
-                    open: mid.o.parse().ok()?,
-                    high: mid.h.parse().ok()?,
-                    low: mid.l.parse().ok()?,
-                    close: mid.c.parse().ok()?,
-                    volume: c.volume,
+                    granularity,
                     complete: c.complete,
+                    candle: Candle {
+                        time,
+                        open: mid.o.parse().ok()?,
+                        high: mid.h.parse().ok()?,
+                        low: mid.l.parse().ok()?,
+                        close: mid.c.parse().ok()?,
+                        volume: c.volume,
+                    },
                 })
             })
             .collect();
 
-        let count = crate::db::upsert_candles(&state.db, &records)
+        let count = crate::db::upsert_candles(&state.db, &rows)
             .await
             .map_err(crate::error::AppError::Database)?;
         total_count += count;
@@ -290,9 +296,9 @@ pub async fn backfill_historical(
             break;
         }
 
-        if let Some(last) = records.last() {
-            current_from = (last.timestamp
-                + Duration::minutes(granularity_to_minutes(granularity.clone()) as i64))
+        if let Some(last) = rows.last() {
+            current_from = (last.candle.time
+                + Duration::minutes(granularity_to_minutes(granularity.to_string()) as i64))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
         } else {

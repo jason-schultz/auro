@@ -1,7 +1,4 @@
-use crate::{
-    engine::types::{Direction, EntryReason, ExitReason, Trade},
-    oanda::models::CandleRecord,
-};
+use crate::engine::types::{Candle, Direction, EntryReason, ExitReason, Trade};
 
 pub enum TFSignal {
     EnterLong { fast_ma: f64, slow_ma: f64 },
@@ -17,7 +14,7 @@ pub struct TrendFollowingParams {
     pub take_profit: Option<f64>, // e.g., Some(0.05) or None to ride the trend
 }
 
-pub fn run(candles: &[CandleRecord], params: &TrendFollowingParams) -> Vec<Trade> {
+pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
     let mut trades: Vec<Trade> = Vec::new();
     // We need at least slow_period + 1 candles to detect a crossover
     // (we compare current vs previous candles MA relationship)
@@ -50,7 +47,7 @@ pub fn run(candles: &[CandleRecord], params: &TrendFollowingParams) -> Vec<Trade
                 Direction::Short
             };
             let entry_price = candles[i].close;
-            let entry_time = candles[i].timestamp;
+            let entry_time = candles[i].time;
             let entry_reason = if bullish_cross {
                 EntryReason::CrossAbove {
                     fast_ma: fast,
@@ -70,7 +67,7 @@ pub fn run(candles: &[CandleRecord], params: &TrendFollowingParams) -> Vec<Trade
                 let j_fast = ma(candles, j, params.fast_period);
                 let j_slow = ma(candles, j, params.slow_period);
                 let exit_price = candles[j].close;
-                let exit_time = candles[j].timestamp;
+                let exit_time = candles[j].time;
 
                 let pnl = match direction {
                     Direction::Long => (exit_price - entry_price) / entry_price,
@@ -121,7 +118,7 @@ pub fn run(candles: &[CandleRecord], params: &TrendFollowingParams) -> Vec<Trade
 
             if !exited {
                 let exit_price = candles[candles.len() - 1].close;
-                let exit_time = candles[candles.len() - 1].timestamp;
+                let exit_time = candles[candles.len() - 1].time;
                 let exit_reason = ExitReason::EndOfData;
                 let pnl = match direction {
                     Direction::Long => (exit_price - entry_price) / entry_price,
@@ -211,7 +208,7 @@ pub fn check_exit(closes: &[f64], params: &TrendFollowingParams, is_long: bool) 
     }
 }
 
-fn ma(candles: &[CandleRecord], end: usize, period: usize) -> f64 {
+fn ma(candles: &[Candle], end: usize, period: usize) -> f64 {
     candles[end - period..end]
         .iter()
         .map(|c| c.close)
@@ -224,18 +221,15 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
 
-    fn make_candle(price: f64, hours_offset: i64) -> CandleRecord {
+    fn make_candle(price: f64, hours_offset: i64) -> Candle {
         let base = Utc::now();
-        CandleRecord {
-            instrument: "TEST".to_string(),
-            granularity: "H1".to_string(),
-            timestamp: base + Duration::hours(hours_offset),
+        Candle {
+            time: base + Duration::hours(hours_offset),
             open: price,
             high: price,
             low: price,
             close: price,
             volume: 100,
-            complete: true,
         }
     }
 
