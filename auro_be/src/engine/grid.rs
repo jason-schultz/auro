@@ -282,7 +282,6 @@ fn entry_reason_to_string(reason: &EntryReason) -> String {
         EntryReason::BelowMA { .. } => "BelowMA".to_string(),
         EntryReason::CrossAbove { .. } => "CrossAbove".to_string(),
         EntryReason::CrossBelow { .. } => "CrossBelow".to_string(),
-        _ => "Unknown".to_string(),
     }
 }
 
@@ -331,7 +330,6 @@ fn entry_reason_to_json(reason: &EntryReason) -> serde_json::Value {
                 "slow_ma": slow_ma,
             })
         }
-        _ => serde_json::json!({}),
     }
 }
 
