@@ -45,6 +45,25 @@ defmodule Opus.Auro.Client do
     |> handle_response()
   end
 
+  @doc """
+  Fetch indicator scalars (ADX, ATR%, MA deviation, Bollinger Bands) for an
+  (instrument, granularity) pair from Rust's in-memory candle buffer.
+
+  Periods default to standard values (ADX 14, Bollinger 20/2.0, ATR 14, MA 20)
+  unless overridden via `opts`.
+  """
+  @spec get_indicators(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, any()}
+  def get_indicators(instrument, granularity, opts \\ []) when granularity in ["M15", "H1"] do
+    params =
+      opts
+      |> Keyword.take([:adx_period, :bollinger_period, :bollinger_std, :atr_period, :ma_period])
+      |> Enum.into(%{})
+
+    client()
+    |> Req.get(url: "/api/indicators/#{instrument}/#{granularity}", params: params)
+    |> handle_response()
+  end
+
   # -- Private --
 
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}) do

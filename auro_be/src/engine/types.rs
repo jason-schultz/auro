@@ -7,12 +7,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct BollingerBands {
     pub upper: f64,
     pub middle: f64,
     pub lower: f64,
-    pub bandwith_pct: f64,  // (upper - lower) / middle * 100
-    pub position: f64       // (close - lower) / (upper -lower)
+    pub bandwidth_pct: f64, // (upper - lower) / middle * 100
+    pub position: f64,      // (close - lower) / (upper - lower)
 }
 
 /// Buffer key: (instrument, granularity)
