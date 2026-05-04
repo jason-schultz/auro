@@ -115,11 +115,22 @@ defmodule Opus.Trading.Reconciler do
   defp close_stale_trade(trade) do
     Logger.info(
       "[Reconciler] Trade #{trade.oanda_trade_id} (#{trade.direction} #{trade.instrument}) " <>
-        "was closed by OANDA. Updating database."
+        "was closed by OANDA. Fetching close details."
     )
 
-    {exit_price, exit_reason, pnl} = fetch_close_details(trade)
+    case fetch_close_details(trade) do
+      {:ok, details} ->
+        apply_close(trade, details)
 
+      {:error, reason} ->
+        Logger.warning(
+          "[Reconciler] Skipping DB update for trade #{trade.oanda_trade_id} — " <>
+            "will retry next tick. Reason: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp apply_close(trade, %{exit_price: exit_price, exit_reason: exit_reason, pnl: pnl}) do
     now = DateTime.utc_now()
 
     case from(t in "live_trades",
@@ -149,34 +160,52 @@ defmodule Opus.Trading.Reconciler do
   end
 
   defp fetch_close_details(trade) do
-    case Oanda.get_trade(trade.oanda_trade_id) do
-      {:ok, trade_data} ->
-        exit_price = Number.parse_float(trade_data["averageClosePrice"], 0.0)
-        realized_pl = Number.parse_float(trade_data["realizedPL"], 0.0)
-        exit_reason = determine_exit_reason(trade_data)
-
-        pnl =
-          if exit_price > 0.0 do
-            case trade.direction do
-              "Long" -> (exit_price - trade.entry_price) / trade.entry_price
-              "Short" -> (trade.entry_price - exit_price) / trade.entry_price
-              _ -> Number.safe_divide(realized_pl, trade.entry_price)
-            end
-          else
-            Number.safe_divide(realized_pl, trade.entry_price)
-          end
-
-        {exit_price, exit_reason, pnl}
-
-      {:error, reason} ->
-        Logger.warning(
-          "[Reconciler] Could not fetch trade #{trade.oanda_trade_id} details: #{inspect(reason)}. " <>
-            "Marking as closed with unknown exit."
-        )
-
-        {0.0, "ClosedByBroker", 0.0}
+    with {:ok, trade_data} <- Oanda.get_trade(trade.oanda_trade_id),
+         {:ok, details} <- extract_close_details(trade, trade_data) do
+      {:ok, details}
     end
   end
+
+  defp extract_close_details(trade, %{"state" => "CLOSED"} = trade_data) do
+    exit_price = Number.parse_float(trade_data["averageClosePrice"], 0.0)
+    realized_pl = Number.parse_float(trade_data["realizedPL"], 0.0)
+    exit_reason = determine_exit_reason(trade_data)
+
+    cond do
+      exit_price <= 0.0 ->
+        Logger.warning(
+          "[Reconciler] Trade #{trade.oanda_trade_id}: state=CLOSED but " <>
+            "averageClosePrice=#{inspect(trade_data["averageClosePrice"])}, " <>
+            "realizedPL=#{inspect(trade_data["realizedPL"])}, exit_reason=#{exit_reason}. " <>
+            "Full response: #{inspect(trade_data)}"
+        )
+
+        {:error, :zero_exit_price}
+
+      true ->
+        pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl)
+
+        Logger.info(
+          "[Reconciler] Trade #{trade.oanda_trade_id}: extracted close details — " <>
+            "exit_price=#{exit_price}, pnl=#{Float.round(pnl, 6)}, exit_reason=#{exit_reason}"
+        )
+
+        {:ok, %{exit_price: exit_price, exit_reason: exit_reason, pnl: pnl}}
+    end
+  end
+
+  defp extract_close_details(trade, trade_data) do
+    Logger.warning(
+      "[Reconciler] Trade #{trade.oanda_trade_id}: expected state=CLOSED but got " <>
+        "state=#{inspect(trade_data["state"])}. Full response: #{inspect(trade_data)}"
+    )
+
+    {:error, :not_closed}
+  end
+
+  defp compute_pnl("Long", entry, exit_price, _realized), do: (exit_price - entry) / entry
+  defp compute_pnl("Short", entry, exit_price, _realized), do: (entry - exit_price) / entry
+  defp compute_pnl(_, entry, _exit_price, realized), do: Number.safe_divide(realized, entry)
 
   defp determine_exit_reason(trade_data) do
     cond do
