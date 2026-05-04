@@ -7,6 +7,8 @@ defmodule OpusWeb.Router do
 
   scope "/api", OpusWeb do
     pipe_through :api
+
+    get "/regimes", RegimeController, :index
   end
 
   # Enable LiveDashboard and Swoosh mailbox preview in development
@@ -26,3 +28,4 @@ defmodule OpusWeb.Router do
     end
   end
 end
+
