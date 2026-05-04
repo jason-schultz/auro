@@ -3,6 +3,7 @@ mod backtest;
 mod candles;
 pub mod evaluator;
 mod health;
+mod indicators;
 mod live_strategies;
 mod positions;
 mod strategies;
@@ -27,6 +28,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/candles", get(candles::get_candles))
         .route("/api/open-trades", get(account::get_open_trades))
         .route("/api/evaluate/{granularity}", post(evaluator::evaluate))
+        .route(
+            "/api/indicators/{instrument}/{granularity}",
+            get(indicators::get_indicators),
+        )
         .route("/api/positions/{trade_id}", delete(positions::remove_in_memory_position))
         // Backtest
         .route("/api/backtest/run", post(backtest::run_grid_search))
