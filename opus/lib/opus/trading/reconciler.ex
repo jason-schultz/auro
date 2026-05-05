@@ -160,11 +160,63 @@ defmodule Opus.Trading.Reconciler do
   end
 
   defp fetch_close_details(trade) do
-    with {:ok, trade_data} <- Oanda.get_trade(trade.oanda_trade_id),
-         {:ok, details} <- extract_close_details(trade, trade_data) do
+    case Oanda.get_trade(trade.oanda_trade_id) do
+      {:ok, trade_data} ->
+        extract_close_details(trade, trade_data)
+
+      {:error, {:http_error, 404, _body}} ->
+        Logger.warning(
+          "[Reconciler] Trade #{trade.oanda_trade_id} aged out of OANDA's trade list — " <>
+            "falling back to transactions endpoint."
+        )
+
+        fetch_close_via_transactions(trade)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp fetch_close_via_transactions(trade) do
+    with {:ok, close_tx} <- Oanda.find_close_transaction(trade.oanda_trade_id),
+         {:ok, details} <- extract_close_from_transaction(trade, close_tx) do
       {:ok, details}
     end
   end
+
+  defp extract_close_from_transaction(trade, close_tx) do
+    exit_price = Number.parse_float(close_tx["exit_price"], 0.0)
+
+    cond do
+      exit_price <= 0.0 ->
+        Logger.warning(
+          "[Reconciler] Trade #{trade.oanda_trade_id}: transaction has " <>
+            "exit_price=#{inspect(close_tx["exit_price"])}. " <>
+            "Full data: #{inspect(close_tx)}"
+        )
+
+        {:error, :zero_exit_price}
+
+      true ->
+        realized_pl = Number.parse_float(close_tx["realized_pl"], 0.0)
+        exit_reason = transaction_reason_to_label(close_tx["reason"])
+        pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl)
+
+        Logger.info(
+          "[Reconciler] Trade #{trade.oanda_trade_id}: recovered close from transactions — " <>
+            "exit_price=#{exit_price}, pnl=#{Float.round(pnl, 6)}, exit_reason=#{exit_reason}"
+        )
+
+        {:ok, %{exit_price: exit_price, exit_reason: exit_reason, pnl: pnl}}
+    end
+  end
+
+  defp transaction_reason_to_label("STOP_LOSS_ORDER"), do: "StopLoss"
+  defp transaction_reason_to_label("TAKE_PROFIT_ORDER"), do: "TakeProfit"
+  defp transaction_reason_to_label("TRAILING_STOP_LOSS_ORDER"), do: "TrailingStop"
+  defp transaction_reason_to_label("MARKET_ORDER_TRADE_CLOSE"), do: "ClosedByBroker"
+  defp transaction_reason_to_label("MARKET_ORDER_POSITION_CLOSEOUT"), do: "ClosedByBroker"
+  defp transaction_reason_to_label(_), do: "ClosedByBroker"
 
   defp extract_close_details(trade, %{"state" => "CLOSED"} = trade_data) do
     exit_price = Number.parse_float(trade_data["averageClosePrice"], 0.0)
