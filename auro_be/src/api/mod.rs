@@ -74,6 +74,10 @@ pub fn router() -> Router<AppState> {
             post(live_strategies::deploy_from_backtest),
         )
         .route("/api/live/trades", get(live_strategies::get_live_trades))
+        .route(
+            "/api/live/trades/{id}",
+            get(live_strategies::get_live_trade_detail),
+        )
         .route("/api/live/config", get(live_strategies::get_trading_config))
         .route(
             "/api/live/config",

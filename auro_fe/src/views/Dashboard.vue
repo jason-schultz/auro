@@ -268,13 +268,15 @@
                 </div>
 
                 <div v-else class="space-y-2">
-                    <div
+                    <router-link
                         v-for="entry in algoActivity"
                         :key="entry.id"
-                        class="bg-background rounded-md p-3"
+                        :to="`/live-trades/${entry.id}`"
+                        class="block bg-background rounded-md p-3 hover:bg-muted/40 transition-colors cursor-pointer"
                     >
-                        <div class="flex items-center justify-between mb-1.5">
-                            <div class="flex items-center gap-2">
+                        <!-- Top row: action badge, instrument, strategy, units, time -->
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center gap-2 flex-wrap">
                                 <span
                                     class="text-[10px] px-1.5 py-0.5 rounded font-medium"
                                     :class="actionColor(entry.action)"
@@ -282,6 +284,12 @@
                                 >
                                 <span class="text-sm text-foreground">
                                     {{ entry.instrument.replace("_", "/") }}
+                                </span>
+                                <span
+                                    v-if="entry.strategyLabel"
+                                    class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-primary/8 text-primary/70"
+                                >
+                                    {{ entry.strategyLabel }}
                                 </span>
                                 <span
                                     class="font-mono text-xs text-muted-foreground"
@@ -295,21 +303,33 @@
                                 {{ entry.time }}
                             </span>
                         </div>
+
+                        <!-- Price + PnL + duration row -->
                         <div
-                            v-if="entry.reason"
-                            class="text-xs text-muted-foreground"
+                            class="flex items-center gap-2 mb-1.5 font-mono text-sm"
                         >
-                            {{ entry.reason }}
-                        </div>
-                        <div class="flex items-center gap-2 mt-1.5">
-                            <span
-                                class="text-[10px] text-primary/60 bg-primary/8 px-1.5 py-0.5 rounded"
-                            >
-                                {{ entry.direction }} · {{ entry.status }}
+                            <span class="text-foreground">
+                                ${{
+                                    formatPrice(
+                                        entry.entryPrice,
+                                        entry.instrument,
+                                    )
+                                }}
                             </span>
+                            <template v-if="entry.exitPrice != null">
+                                <span class="text-muted-foreground">→</span>
+                                <span class="text-foreground">
+                                    ${{
+                                        formatPrice(
+                                            entry.exitPrice,
+                                            entry.instrument,
+                                        )
+                                    }}
+                                </span>
+                            </template>
                             <span
                                 v-if="entry.pnl != null"
-                                class="text-[10px] font-mono font-medium"
+                                class="text-xs font-medium"
                                 :class="
                                     entry.pnl >= 0
                                         ? 'text-emerald-400'
@@ -319,8 +339,44 @@
                                 {{ entry.pnl >= 0 ? "+" : ""
                                 }}{{ (entry.pnl * 100).toFixed(2) }}%
                             </span>
+                            <span
+                                v-if="entry.duration"
+                                class="text-[10px] text-muted-foreground ml-auto"
+                            >
+                                {{ entry.duration }}
+                            </span>
                         </div>
-                    </div>
+
+                        <!-- Reason row: entry reason → exit reason -->
+                        <div
+                            v-if="entry.entryReason || entry.exitReason"
+                            class="flex items-center gap-1.5 text-xs"
+                        >
+                            <span
+                                v-if="entry.entryReason"
+                                class="text-muted-foreground"
+                                :title="entry.entryReason"
+                            >
+                                {{ reasonShort(entry.entryReason) }}
+                            </span>
+                            <template v-if="entry.exitReason">
+                                <span
+                                    v-if="entry.entryReason"
+                                    class="text-muted-foreground"
+                                    >→</span
+                                >
+                                <span
+                                    class="font-medium"
+                                    :class="
+                                        exitReasonColor(entry.exitReason)
+                                    "
+                                    :title="entry.exitReason"
+                                >
+                                    {{ reasonShort(entry.exitReason) }}
+                                </span>
+                            </template>
+                        </div>
+                    </router-link>
                 </div>
             </div>
 
@@ -393,10 +449,15 @@ interface AlgoEntry {
     direction: string;
     units: string;
     action: string;
-    reason: string;
+    entryReason: string;
+    exitReason: string;
+    entryPrice: number | null;
+    exitPrice: number | null;
+    duration: string | null;
     status: string;
     time: string;
     pnl: number | null;
+    strategyLabel: string | null;
 }
 
 const marketStore = useMarketStore();
@@ -548,6 +609,83 @@ function getDecimals(instrument: string): number {
     return 5;
 }
 
+function formatStrategyLabel(
+    strategyType: string | null | undefined,
+    params: Record<string, any> | null | undefined,
+    granularity: string | null | undefined,
+): string | null {
+    if (!strategyType) return null;
+    const gran = granularity ? ` ${granularity}` : "";
+
+    if (strategyType === "trend_following" && params) {
+        const fast = params.fast_period;
+        const slow = params.slow_period;
+        if (fast != null && slow != null) {
+            return `TF F${fast}/S${slow}${gran}`;
+        }
+        return `TF${gran}`;
+    }
+
+    if (strategyType === "mean_reversion" && params) {
+        const ma = params.ma_period;
+        const entry = params.entry_threshold;
+        if (ma != null && entry != null) {
+            const entryPct = (entry * 100).toFixed(1);
+            return `MR MA${ma} ${entryPct}%${gran}`;
+        }
+        return `MR${gran}`;
+    }
+
+    return `${strategyType}${gran}`;
+}
+
+function formatPrice(price: number | null, instrument: string): string {
+    if (price == null || price <= 0) return "—";
+    return price.toFixed(getDecimals(instrument));
+}
+
+function reasonShort(reason: string): string {
+    if (!reason) return "";
+    const colonIdx = reason.indexOf(":");
+    return colonIdx === -1 ? reason : reason.substring(0, colonIdx).trim();
+}
+
+function exitReasonColor(reason: string): string {
+    switch (reasonShort(reason)) {
+        case "TakeProfit":
+        case "TrailingStop":
+            return "text-emerald-400";
+        case "StopLoss":
+            return "text-red-400";
+        case "TrendReversal":
+            return "text-amber-400";
+        case "ClosedByBroker":
+            return "text-muted-foreground";
+        default:
+            return "text-foreground";
+    }
+}
+
+function formatDuration(
+    startStr: string | null | undefined,
+    endStr: string | null | undefined,
+): string | null {
+    if (!startStr || !endStr) return null;
+    const start = new Date(startStr).getTime();
+    const end = new Date(endStr).getTime();
+    if (isNaN(start) || isNaN(end) || end < start) return null;
+
+    const diffMin = Math.floor((end - start) / 60000);
+    if (diffMin < 60) return `${diffMin}m`;
+
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h`;
+
+    const diffDays = Math.floor(diffHr / 24);
+    const remainingHr = diffHr - diffDays * 24;
+    return remainingHr === 0 ? `${diffDays}d` : `${diffDays}d ${remainingHr}h`;
+}
+
 function timeAgo(dateStr: string): string {
     const now = new Date();
     const then = new Date(dateStr);
@@ -615,18 +753,37 @@ async function loadAlgoActivity() {
                 ? `Closed ${t.direction}`
                 : `Opened ${t.direction}`;
 
+            const entryPrice =
+                t.entry_price != null ? parseFloat(t.entry_price) : null;
+            const rawExitPrice =
+                t.exit_price != null ? parseFloat(t.exit_price) : null;
+            // Filter out the bogus zero-exit rows that pre-fix reconciler wrote
+            const exitPrice =
+                rawExitPrice != null && rawExitPrice > 0 ? rawExitPrice : null;
+
             return {
                 id: t.id,
                 instrument: t.instrument,
                 direction: t.direction,
                 units: t.units,
                 action,
-                reason: t.entry_reason || t.exit_reason || "",
+                entryReason: t.entry_reason || "",
+                exitReason: t.exit_reason || "",
+                entryPrice,
+                exitPrice,
+                duration: isClosed
+                    ? formatDuration(t.entry_time, t.exit_time)
+                    : null,
                 status: t.status,
                 time: timeAgo(
                     isClosed && t.exit_time ? t.exit_time : t.entry_time,
                 ),
                 pnl: t.pnl_percent != null ? t.pnl_percent : null,
+                strategyLabel: formatStrategyLabel(
+                    t.strategy_type,
+                    t.strategy_parameters,
+                    t.strategy_granularity,
+                ),
             };
         });
     } catch (e) {

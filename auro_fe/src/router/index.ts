@@ -27,6 +27,11 @@ const routes = [
     name: "backtests",
     component: () => import("@/views/Backtests.vue"),
   },
+  {
+    path: "/live-trades/:id",
+    name: "trade-detail",
+    component: () => import("@/views/TradeDetail.vue"),
+  },
 ];
 
 const router = createRouter({
