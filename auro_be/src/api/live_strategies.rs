@@ -2,10 +2,78 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+
+#[derive(sqlx::FromRow)]
+struct LiveAggregateRow {
+    strategy_id: Uuid,
+    num_trades: i64,
+    wins: i64,
+    losses: i64,
+    total_return: f64,
+    avg_win: f64,
+    avg_loss: f64,
+}
+
+/// Aggregate closed-trade stats for the given strategy ids. Returns a map keyed by
+/// strategy id; strategies with no closed trades are absent from the map.
+async fn fetch_live_aggregates(
+    pool: &PgPool,
+    strategy_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Value>, sqlx::Error> {
+    if strategy_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows: Vec<LiveAggregateRow> = sqlx::query_as(
+        r#"
+        SELECT
+            live_strategy_id AS strategy_id,
+            COUNT(*)::BIGINT AS num_trades,
+            COUNT(*) FILTER (WHERE pnl_percent > 0)::BIGINT AS wins,
+            COUNT(*) FILTER (WHERE pnl_percent <= 0)::BIGINT AS losses,
+            COALESCE(SUM(pnl_percent), 0)::FLOAT8 AS total_return,
+            COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent > 0), 0)::FLOAT8 AS avg_win,
+            COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent <= 0), 0)::FLOAT8 AS avg_loss
+        FROM live_trades
+        WHERE status = 'closed' AND live_strategy_id = ANY($1)
+        GROUP BY live_strategy_id
+        "#,
+    )
+    .bind(strategy_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let map = rows
+        .into_iter()
+        .map(|r| {
+            let win_rate = if r.num_trades > 0 {
+                r.wins as f64 / r.num_trades as f64
+            } else {
+                0.0
+            };
+            (
+                r.strategy_id,
+                json!({
+                    "num_trades": r.num_trades,
+                    "wins": r.wins,
+                    "losses": r.losses,
+                    "win_rate": win_rate,
+                    "total_return": r.total_return,
+                    "avg_win": r.avg_win,
+                    "avg_loss": r.avg_loss,
+                }),
+            )
+        })
+        .collect();
+
+    Ok(map)
+}
 
 #[derive(Deserialize)]
 pub struct CreateLiveStrategy {
@@ -90,8 +158,14 @@ pub async fn list_live_strategies(
     // Collect backtest_run_ids that need stats
     let backtest_ids: Vec<Uuid> = rows.iter().filter_map(|r| r.9).collect();
 
+    // Query 2a: batch-fetch live aggregate stats for the strategies we have
+    let strategy_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+    let live_stats_map = fetch_live_aggregates(&state.db, &strategy_ids)
+        .await
+        .map_err(AppError::Database)?;
+
     // Query 2: batch-fetch backtest stats for those IDs
-    let mut stats_map: std::collections::HashMap<Uuid, Value> = std::collections::HashMap::new();
+    let mut stats_map: HashMap<Uuid, Value> = HashMap::new();
     if !backtest_ids.is_empty() {
         let stat_rows = sqlx::query_as::<_, (Uuid, f64, f64, f64, f64, i32, f64, f64)>(
             r#"
@@ -156,6 +230,10 @@ pub async fn list_live_strategies(
                     if let Some(stats) = stats_map.get(bt_id) {
                         obj["backtest_stats"] = stats.clone();
                     }
+                }
+
+                if let Some(live) = live_stats_map.get(id) {
+                    obj["live_stats"] = live.clone();
                 }
 
                 obj
@@ -564,6 +642,27 @@ pub async fn update_trading_config(
 }
 
 // Live trades endpoint
+#[derive(sqlx::FromRow)]
+struct LiveTradeRow {
+    id: Uuid,
+    live_strategy_id: Option<Uuid>,
+    oanda_trade_id: Option<String>,
+    instrument: String,
+    direction: String,
+    units: String,
+    entry_price: Option<f64>,
+    exit_price: Option<f64>,
+    entry_time: chrono::DateTime<chrono::Utc>,
+    exit_time: Option<chrono::DateTime<chrono::Utc>>,
+    pnl_percent: Option<f64>,
+    entry_reason: Option<String>,
+    exit_reason: Option<String>,
+    status: String,
+    strategy_type: Option<String>,
+    parameters: Option<Value>,
+    granularity: Option<String>,
+}
+
 pub async fn get_live_trades(
     State(state): State<AppState>,
     Query(params): Query<LiveTradesParams>,
@@ -571,69 +670,29 @@ pub async fn get_live_trades(
     let status = params.status.unwrap_or_else(|| "all".to_string());
     let limit = params.limit.unwrap_or(50);
 
-    let rows = if status == "all" {
-        sqlx::query_as::<
-            _,
-            (
-                Uuid,
-                Option<Uuid>,
-                Option<String>,
-                String,
-                String,
-                String,
-                Option<f64>,
-                Option<f64>,
-                chrono::DateTime<chrono::Utc>,
-                Option<chrono::DateTime<chrono::Utc>>,
-                Option<f64>,
-                Option<String>,
-                Option<String>,
-                String,
-            ),
-        >(
-            r#"
-            SELECT id, live_strategy_id, oanda_trade_id, instrument, direction, units,
-                   entry_price, exit_price, entry_time, exit_time,
-                   pnl_percent, entry_reason, exit_reason, status
-            FROM live_trades
-            ORDER BY entry_time DESC
-            LIMIT $1
-            "#,
-        )
+    let select_cols = r#"
+        SELECT lt.id, lt.live_strategy_id, lt.oanda_trade_id, lt.instrument, lt.direction, lt.units,
+               lt.entry_price, lt.exit_price, lt.entry_time, lt.exit_time,
+               lt.pnl_percent, lt.entry_reason, lt.exit_reason, lt.status,
+               ls.strategy_type, ls.parameters, ls.granularity
+        FROM live_trades lt
+        LEFT JOIN live_strategies ls ON ls.id = lt.live_strategy_id
+    "#;
+
+    let rows: Vec<LiveTradeRow> = if status == "all" {
+        sqlx::query_as::<_, LiveTradeRow>(&format!(
+            "{} ORDER BY lt.entry_time DESC LIMIT $1",
+            select_cols
+        ))
         .bind(limit)
         .fetch_all(&state.db)
         .await
         .map_err(AppError::Database)?
     } else {
-        sqlx::query_as::<
-            _,
-            (
-                Uuid,
-                Option<Uuid>,
-                Option<String>,
-                String,
-                String,
-                String,
-                Option<f64>,
-                Option<f64>,
-                chrono::DateTime<chrono::Utc>,
-                Option<chrono::DateTime<chrono::Utc>>,
-                Option<f64>,
-                Option<String>,
-                Option<String>,
-                String,
-            ),
-        >(
-            r#"
-            SELECT id, live_strategy_id, oanda_trade_id, instrument, direction, units,
-                   entry_price, exit_price, entry_time, exit_time,
-                   pnl_percent, entry_reason, exit_reason, status
-            FROM live_trades
-            WHERE status = $1
-            ORDER BY entry_time DESC
-            LIMIT $2
-            "#,
-        )
+        sqlx::query_as::<_, LiveTradeRow>(&format!(
+            "{} WHERE lt.status = $1 ORDER BY lt.entry_time DESC LIMIT $2",
+            select_cols
+        ))
         .bind(&status)
         .bind(limit)
         .fetch_all(&state.db)
@@ -643,41 +702,27 @@ pub async fn get_live_trades(
 
     let trades: Vec<Value> = rows
         .iter()
-        .map(
-            |(
-                id,
-                strat_id,
-                oanda_id,
-                inst,
-                dir,
-                units,
-                entry_p,
-                exit_p,
-                entry_t,
-                exit_t,
-                pnl,
-                entry_r,
-                exit_r,
-                status,
-            )| {
-                json!({
-                    "id": id,
-                    "live_strategy_id": strat_id,
-                    "oanda_trade_id": oanda_id,
-                    "instrument": inst,
-                    "direction": dir,
-                    "units": units,
-                    "entry_price": entry_p,
-                    "exit_price": exit_p,
-                    "entry_time": entry_t,
-                    "exit_time": exit_t,
-                    "pnl_percent": pnl,
-                    "entry_reason": entry_r,
-                    "exit_reason": exit_r,
-                    "status": status,
-                })
-            },
-        )
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "live_strategy_id": row.live_strategy_id,
+                "oanda_trade_id": row.oanda_trade_id,
+                "instrument": row.instrument,
+                "direction": row.direction,
+                "units": row.units,
+                "entry_price": row.entry_price,
+                "exit_price": row.exit_price,
+                "entry_time": row.entry_time,
+                "exit_time": row.exit_time,
+                "pnl_percent": row.pnl_percent,
+                "entry_reason": row.entry_reason,
+                "exit_reason": row.exit_reason,
+                "status": row.status,
+                "strategy_type": row.strategy_type,
+                "strategy_parameters": row.parameters,
+                "strategy_granularity": row.granularity,
+            })
+        })
         .collect();
 
     Ok(Json(json!({
@@ -690,4 +735,131 @@ pub async fn get_live_trades(
 pub struct LiveTradesParams {
     pub status: Option<String>,
     pub limit: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct TradeDetailRow {
+    // Trade
+    id: Uuid,
+    live_strategy_id: Option<Uuid>,
+    oanda_trade_id: Option<String>,
+    instrument: String,
+    direction: String,
+    units: String,
+    entry_price: Option<f64>,
+    exit_price: Option<f64>,
+    entry_time: chrono::DateTime<chrono::Utc>,
+    exit_time: Option<chrono::DateTime<chrono::Utc>>,
+    pnl_percent: Option<f64>,
+    entry_reason: Option<String>,
+    exit_reason: Option<String>,
+    status: String,
+    // Strategy
+    strategy_type: Option<String>,
+    parameters: Option<Value>,
+    granularity: Option<String>,
+    enabled: Option<bool>,
+    max_position_size: Option<String>,
+    backtest_run_id: Option<Uuid>,
+    // Backtest run
+    bt_strategy_name: Option<String>,
+    bt_total_return: Option<f64>,
+    bt_win_rate: Option<f64>,
+    bt_sharpe_ratio: Option<f64>,
+    bt_max_drawdown: Option<f64>,
+    bt_num_trades: Option<i32>,
+    bt_avg_win: Option<f64>,
+    bt_avg_loss: Option<f64>,
+}
+
+pub async fn get_live_trade_detail(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let row: Option<TradeDetailRow> = sqlx::query_as(
+        r#"
+        SELECT lt.id, lt.live_strategy_id, lt.oanda_trade_id, lt.instrument, lt.direction, lt.units,
+               lt.entry_price, lt.exit_price, lt.entry_time, lt.exit_time,
+               lt.pnl_percent, lt.entry_reason, lt.exit_reason, lt.status,
+               ls.strategy_type, ls.parameters, ls.granularity, ls.enabled,
+               ls.max_position_size, ls.backtest_run_id,
+               br.strategy_name AS bt_strategy_name,
+               br.total_return AS bt_total_return,
+               br.win_rate AS bt_win_rate,
+               br.sharpe_ratio AS bt_sharpe_ratio,
+               br.max_drawdown AS bt_max_drawdown,
+               br.num_trades AS bt_num_trades,
+               br.avg_win AS bt_avg_win,
+               br.avg_loss AS bt_avg_loss
+        FROM live_trades lt
+        LEFT JOIN live_strategies ls ON ls.id = lt.live_strategy_id
+        LEFT JOIN backtest_runs br ON br.id = ls.backtest_run_id
+        WHERE lt.id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(AppError::Database)?;
+
+    let row = row.ok_or_else(|| AppError::NotFound(format!("Trade {} not found", id)))?;
+
+    let trade = json!({
+        "id": row.id,
+        "oanda_trade_id": row.oanda_trade_id,
+        "instrument": row.instrument,
+        "direction": row.direction,
+        "units": row.units,
+        "entry_price": row.entry_price,
+        "exit_price": row.exit_price,
+        "entry_time": row.entry_time,
+        "exit_time": row.exit_time,
+        "pnl_percent": row.pnl_percent,
+        "entry_reason": row.entry_reason,
+        "exit_reason": row.exit_reason,
+        "status": row.status,
+    });
+
+    let strategy = row.live_strategy_id.map(|sid| {
+        json!({
+            "id": sid,
+            "strategy_type": row.strategy_type,
+            "parameters": row.parameters,
+            "granularity": row.granularity,
+            "enabled": row.enabled,
+            "max_position_size": row.max_position_size,
+            "backtest_run_id": row.backtest_run_id,
+        })
+    });
+
+    let backtest = row.backtest_run_id.map(|bid| {
+        json!({
+            "id": bid,
+            "strategy_name": row.bt_strategy_name,
+            "total_return": row.bt_total_return,
+            "win_rate": row.bt_win_rate,
+            "sharpe_ratio": row.bt_sharpe_ratio,
+            "max_drawdown": row.bt_max_drawdown,
+            "num_trades": row.bt_num_trades,
+            "avg_win": row.bt_avg_win,
+            "avg_loss": row.bt_avg_loss,
+        })
+    });
+
+    let live_aggregate = match row.live_strategy_id {
+        Some(sid) => {
+            let mut map = fetch_live_aggregates(&state.db, &[sid])
+                .await
+                .map_err(AppError::Database)?;
+            map.remove(&sid)
+        }
+        None => None,
+    };
+
+    Ok(Json(json!({
+        "trade": trade,
+        "strategy": strategy,
+        "backtest": backtest,
+        "live_aggregate": live_aggregate,
+    })))
 }

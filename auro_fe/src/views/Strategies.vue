@@ -275,6 +275,52 @@
                                 >
                             </td>
 
+                            <!-- Live # trades -->
+                            <td
+                                class="px-3 py-2 whitespace-nowrap font-mono text-foreground text-right"
+                            >
+                                <template v-if="strategy.live_stats">
+                                    {{ strategy.live_stats.num_trades }}
+                                </template>
+                                <span v-else class="text-muted-foreground/30"
+                                    >—</span
+                                >
+                            </td>
+
+                            <!-- Live Win Rate -->
+                            <td
+                                class="px-3 py-2 whitespace-nowrap font-mono text-right"
+                            >
+                                <template v-if="strategy.live_stats">
+                                    <span class="text-foreground">{{
+                                        pct(strategy.live_stats.win_rate)
+                                    }}</span>
+                                    <span
+                                        v-if="
+                                            strategy.backtest_stats &&
+                                            strategy.live_stats.num_trades >= 5
+                                        "
+                                        class="text-[10px] ml-1"
+                                        :class="
+                                            winRateDeltaClass(strategy)
+                                        "
+                                        >{{ winRateDeltaLabel(strategy) }}</span
+                                    >
+                                </template>
+                                <span v-else class="text-muted-foreground/30"
+                                    >—</span
+                                >
+                            </td>
+
+                            <!-- Edge status -->
+                            <td class="px-3 py-2 whitespace-nowrap">
+                                <span
+                                    class="text-[10px] px-1.5 py-0.5 rounded font-medium"
+                                    :class="edgeStatus(strategy).color"
+                                    >{{ edgeStatus(strategy).label }}</span
+                                >
+                            </td>
+
                             <!-- Status toggle -->
                             <td class="px-3 py-2 whitespace-nowrap">
                                 <button
@@ -354,6 +400,16 @@ interface BacktestStats {
     avg_loss: number;
 }
 
+interface LiveStats {
+    num_trades: number;
+    wins: number;
+    losses: number;
+    win_rate: number;
+    total_return: number;
+    avg_win: number;
+    avg_loss: number;
+}
+
 interface LiveStrategy {
     id: string;
     strategy_type: string;
@@ -366,6 +422,7 @@ interface LiveStrategy {
     updated_at: string;
     backtest_run_id: string | null;
     backtest_stats: BacktestStats | null;
+    live_stats: LiveStats | null;
 }
 
 const instrumentCategories: Record<string, string> = {
@@ -514,11 +571,14 @@ const columns = [
     { key: "strategy_type", label: "Type", sortable: true },
     { key: "granularity", label: "TF", sortable: false },
     { key: "params", label: "Parameters", sortable: false },
-    { key: "total_return", label: "Return", sortable: true },
-    { key: "win_rate", label: "Win%", sortable: true },
+    { key: "total_return", label: "BT Return", sortable: true },
+    { key: "win_rate", label: "BT Win%", sortable: true },
     { key: "sharpe_ratio", label: "Sharpe", sortable: true },
     { key: "max_drawdown", label: "DD", sortable: true },
-    { key: "num_trades", label: "#", sortable: true },
+    { key: "num_trades", label: "BT #", sortable: true },
+    { key: "live_num_trades", label: "Live #", sortable: true },
+    { key: "live_win_rate", label: "Live Win%", sortable: true },
+    { key: "edge", label: "Edge", sortable: false },
     { key: "enabled", label: "Live", sortable: true },
 ];
 
@@ -580,6 +640,14 @@ const sortedStrategies = computed(() => {
                 aVal = a.backtest_stats?.num_trades ?? -999;
                 bVal = b.backtest_stats?.num_trades ?? -999;
                 break;
+            case "live_num_trades":
+                aVal = a.live_stats?.num_trades ?? -1;
+                bVal = b.live_stats?.num_trades ?? -1;
+                break;
+            case "live_win_rate":
+                aVal = a.live_stats?.win_rate ?? -1;
+                bVal = b.live_stats?.win_rate ?? -1;
+                break;
             default:
                 aVal = a.instrument;
                 bVal = b.instrument;
@@ -617,6 +685,71 @@ function toggleSort(key: string) {
 
 function pct(value: number): string {
     return (value * 100).toFixed(2) + "%";
+}
+
+function expectancy(
+    winRate: number,
+    avgWin: number,
+    avgLoss: number,
+): number {
+    return winRate * avgWin + (1 - winRate) * avgLoss;
+}
+
+function winRateDeltaLabel(strategy: LiveStrategy): string {
+    if (!strategy.live_stats || !strategy.backtest_stats) return "";
+    const delta = strategy.live_stats.win_rate - strategy.backtest_stats.win_rate;
+    const sign = delta >= 0 ? "+" : "";
+    return `${sign}${(delta * 100).toFixed(1)}`;
+}
+
+function winRateDeltaClass(strategy: LiveStrategy): string {
+    if (!strategy.live_stats || !strategy.backtest_stats)
+        return "text-muted-foreground";
+    const delta = strategy.live_stats.win_rate - strategy.backtest_stats.win_rate;
+    if (Math.abs(delta) < 0.02) return "text-muted-foreground";
+    return delta >= 0 ? "text-emerald-400" : "text-red-400";
+}
+
+function edgeStatus(strategy: LiveStrategy): {
+    label: string;
+    color: string;
+} {
+    const live = strategy.live_stats;
+    const bt = strategy.backtest_stats;
+    if (!live || !bt) {
+        return { label: "—", color: "bg-muted/40 text-muted-foreground/60" };
+    }
+    if (live.num_trades < 5) {
+        return {
+            label: `${live.num_trades}/5`,
+            color: "bg-muted text-muted-foreground",
+        };
+    }
+
+    const liveExp = expectancy(live.win_rate, live.avg_win, live.avg_loss);
+    const btExp = expectancy(bt.win_rate, bt.avg_win, bt.avg_loss);
+
+    if (liveExp <= 0 && btExp <= 0) {
+        return { label: "Neg E", color: "bg-red-500/10 text-red-400" };
+    }
+    if (btExp <= 0) {
+        return {
+            label: "Live > BT",
+            color: "bg-emerald-500/10 text-emerald-400",
+        };
+    }
+
+    const ratio = liveExp / btExp;
+    if (ratio >= 0.85) {
+        return {
+            label: "Holding",
+            color: "bg-emerald-500/10 text-emerald-400",
+        };
+    }
+    if (ratio >= 0.5) {
+        return { label: "Decay", color: "bg-amber-500/10 text-amber-400" };
+    }
+    return { label: "Broken", color: "bg-red-500/10 text-red-400" };
 }
 
 function showError(msg: string) {
