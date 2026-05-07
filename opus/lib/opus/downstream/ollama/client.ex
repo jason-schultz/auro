@@ -1,4 +1,7 @@
 defmodule Opus.Ollama.Client do
+  alias Opus.Contexts.Strategy
+  alias Ecto.Changeset
+
   @base_url Application.compile_env(:opus, :ollama_base_url, "http://localhost:11434")
 
   def base_url, do: Application.get_env(:opus, :ollama_base_url, @base_url)
@@ -6,11 +9,16 @@ defmodule Opus.Ollama.Client do
   @model "deepseek-r1:7b"
   # @model "qwen3.5"
 
+  def generate_trend_following_strategy(model_strategies) do
+  end
+
   def generate_trend_following_strategy do
     prompt = """
     Generate a trend-following trading strategy as JSON. Keep it simple.
 
     Return ONLY valid JSON, no other text, no ranges, just single numbers.
+    VALID JSON should be wrapped in {}. There should only be one of each name, type, description, entry,
+    exit and filters block. Use the following structure, with example values, and no extra fields:
 
     {
       "name": "strategy name",
@@ -34,15 +42,24 @@ defmodule Opus.Ollama.Client do
     Example values: ma_fast_period: 12, ma_slow_period: 35, atr_multiplier: 2.0, tp_ratio: 2.5, min_adx: 25
     """
 
-    generate_response(prompt)
+    case llm_request(prompt) do
+      {:ok, raw_map} ->
+        %Strategy{} |> Strategy.changeset(raw_map) |> Ecto.Changeset.apply_action(:insert)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
-  defp generate_response(prompt) do
+  defp llm_request(prompt) do
     body = %{
       model: @model,
       prompt: prompt,
-      max_tokens: 1000,
-      temperature: 0.7,
+      format: "json",
+      options: %{
+        temperature: 0.7,
+        num_predict: 1000
+      },
       stream: false
     }
 
@@ -60,7 +77,7 @@ defmodule Opus.Ollama.Client do
 
   # Pattern match: 200 status AND response field exists
   defp handle_response({:ok, %Req.Response{status: 200, body: %{"response" => response}}}) do
-    {:ok, String.trim(response)}
+    response |> String.trim() |> Jason.decode()
   end
 
   # Pattern match: 200 status but no response field (unexpected shape)

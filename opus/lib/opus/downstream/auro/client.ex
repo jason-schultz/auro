@@ -46,6 +46,23 @@ defmodule Opus.Auro.Client do
   end
 
   @doc """
+  Push the full rules payload to Rust. Replaces the in-memory rules cache
+  atomically. Per Decision #23, this is the activation channel; the DB
+  write is the persistence channel.
+
+  Payload shape:
+      %{
+        rules: %{"strategy-uuid" => %{enabled: true, reason: "..."}, ...},
+        computed_at: ~U[2026-05-06 ...]
+      }
+  """
+  @spec push_rules(map()) :: {:ok, map()} | {:error, any()}
+  def push_rules(payload) do
+    Logger.info("[AuroClient] Pushing rules payload with #{map_size(payload.rules)} strategies")
+    client() |> Req.post(url: "/api/rules", json: payload) |> handle_response()
+  end
+
+  @doc """
   Fetch indicator scalars (ADX, ATR%, MA deviation, Bollinger Bands) for an
   (instrument, granularity) pair from Rust's in-memory candle buffer.
 

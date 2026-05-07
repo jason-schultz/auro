@@ -18,6 +18,7 @@ defmodule Opus.Application do
       # Opus.Trading.EvaluationWorker,
       Opus.Trading.Reconciler,
       Opus.Trading.RegimeDetector,
+      Opus.Trading.RulesEngine,
 
       # Start the Finch HTTP client for sending emails (or other HTTP)
       {Finch, name: Opus.Finch},
