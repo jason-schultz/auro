@@ -6,6 +6,7 @@ mod health;
 mod indicators;
 mod live_strategies;
 mod positions;
+mod rules;
 mod strategies;
 mod ws;
 
@@ -32,6 +33,7 @@ pub fn router() -> Router<AppState> {
             "/api/indicators/{instrument}/{granularity}",
             get(indicators::get_indicators),
         )
+        .route("/api/rules", post(rules::push_rules))
         .route("/api/positions/{trade_id}", delete(positions::remove_in_memory_position))
         // Backtest
         .route("/api/backtest/run", post(backtest::run_grid_search))

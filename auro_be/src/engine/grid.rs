@@ -295,6 +295,7 @@ fn exit_reason_to_string(reason: &ExitReason) -> String {
     match reason {
         ExitReason::TakeProfit => "TakeProfit".to_string(),
         ExitReason::StopLoss => "StopLoss".to_string(),
+        ExitReason::TrailingStop => "TrailingStop".to_string(),
         ExitReason::TimeExit => "TimeExit".to_string(),
         ExitReason::EndOfData => "EndOfData".to_string(),
         ExitReason::TrendReversal => "TrendReversal".to_string(),
