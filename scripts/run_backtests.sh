@@ -65,9 +65,12 @@ if [[ "$STRATEGY" != "mean_reversion" && "$STRATEGY" != "trend_following" && "$S
     exit 1
 fi
 
-# Prevent macOS from sleeping
+# Prevent macOS from sleeping. Disown so it doesn't get included in the
+# script's `wait` calls (otherwise the script deadlocks: caffeinate is
+# waiting for $$ to exit, $$ is waiting for caffeinate via wait).
 if command -v caffeinate &> /dev/null; then
     caffeinate -i -w $$ &
+    disown
 fi
 
 # Instruments list
@@ -184,28 +187,7 @@ done < "$JOBS_FILE"
 for ((i=0; i<${#JOBS[@]}; i+=PARALLEL)); do
     for ((j=i; j<i+PARALLEL && j<${#JOBS[@]}; j++)); do
         read -r instrument strategy index total <<< "${JOBS[$j]}"
-        (
-            start_time=$(date +%s)
-            result=$(curl -s -X POST "$BASE_URL/backtest/run?instrument=$instrument&timeframe=$TIMEFRAME&strategy=$strategy" 2>&1)
-            end_time=$(date +%s)
-            elapsed=$((end_time - start_time))
-
-            valid=$(echo "$result" | grep -o '"valid":[0-9]*' | head -1 | cut -d: -f2)
-            verify=$(echo "$result" | grep -o '"verify":[0-9]*' | head -1 | cut -d: -f2)
-            failed=$(echo "$result" | grep -o '"failed":[0-9]*' | head -1 | cut -d: -f2)
-            error=$(echo "$result" | grep -o '"error":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-            strat_short="MR"
-            [[ "$strategy" == "trend_following" ]] && strat_short="TF"
-
-            if [[ -n "$error" ]]; then
-                echo "[$index/$total] SKIP $strat_short $instrument — $error"
-            else
-                printf "[%d/%d] %-4s %-12s — valid:%-3s verify:%-3s failed:%-4s (%ss)\n" \
-                    "$index" "$total" "$strat_short" "$instrument" \
-                    "${valid:-0}" "${verify:-0}" "${failed:-0}" "$elapsed"
-            fi
-        ) &
+        run_one ${JOBS[$j]} &
     done
     wait
 done

@@ -18,17 +18,17 @@ INSTRUMENTS=(
 "DE30_EUR" "JP225_USD" "AU200_AUD" "EU50_EUR"
 )
 
-echo "=== Backfilling H1 candles (21 days) ==="
+echo "=== Backfilling H1 candles (5 years) ==="
 for instrument in "${INSTRUMENTS[@]}"; do
     echo "--- ${instrument} H1 ---"
-    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=H1&days=21" > /dev/null
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=H1&days=1825" > /dev/null
 done
 
 echo ""
-echo "=== Backfilling M15 candles (21 days) ==="
+echo "=== Backfilling M15 candles (2 years) ==="
 for instrument in "${INSTRUMENTS[@]}"; do
     echo "--- ${instrument} M15 ---"
-    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=M15&days=21" > /dev/null
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=M15&days=730" > /dev/null
 done
 
 echo ""

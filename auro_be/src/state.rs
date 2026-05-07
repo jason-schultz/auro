@@ -8,6 +8,7 @@ use sqlx::PgPool;
 
 use crate::api::evaluator::EvaluateResponse;
 use crate::config::Config;
+use crate::engine::rules::Rules;
 use crate::engine::types::{BufferKey, CandleAccumulator, CandleBuffer, OpenPosition};
 use crate::oanda::client::OandaClient;
 use crate::oanda::models::StreamMessage;
@@ -28,6 +29,9 @@ pub struct LiveState {
     pub open_positions: RwLock<HashMap<String, OpenPosition>>,
     pub last_eval_minute: RwLock<HashMap<String, u32>>,
     pub last_quotes: RwLock<HashMap<String, LastQuote>>,
+    /// Per Decision #23, populated by Opus via POST /api/rules. Defaults to
+    /// empty (which means all strategies fire — see Rules::decision).
+    pub rules: RwLock<Rules>,
 }
 
 impl LiveState {
@@ -38,6 +42,7 @@ impl LiveState {
             open_positions: RwLock::new(HashMap::new()),
             last_eval_minute: RwLock::new(HashMap::new()),
             last_quotes: RwLock::new(HashMap::new()),
+            rules: RwLock::new(Rules::default()),
         }
     }
 }

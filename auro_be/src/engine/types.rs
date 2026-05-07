@@ -170,6 +170,7 @@ impl FromStr for Direction {
 pub enum ExitReason {
     TakeProfit,
     StopLoss,
+    TrailingStop,
     TrendReversal,
     TimeExit,
     EndOfData,

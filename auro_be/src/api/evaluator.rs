@@ -140,6 +140,7 @@ async fn run_evaluation(
         any_evaluated = true;
 
         // Evaluate
+        let rules_snapshot = state.live.rules.read().await.clone();
         let mut open_positions = state.live.open_positions.write().await;
         match evaluate_strategies(
             &state.db,
@@ -151,6 +152,7 @@ async fn run_evaluation(
             quote.bid,
             quote.ask,
             &mut *open_positions,
+            &rules_snapshot,
         )
         .await
         {

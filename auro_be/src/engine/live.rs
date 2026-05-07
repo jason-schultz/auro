@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use tokio::sync::broadcast;
 
 use crate::engine::mean_reversion::{self, MRSignal, MeanReversionParams};
+use crate::engine::rules::{entry_gate_report, Rules};
 use crate::engine::trend_following::{self, TFSignal, TrendFollowingParams};
 use crate::engine::types::{
     BufferKey, Candle, CandleAccumulator, CandleBuffer, Direction, Granularity, LiveStrategy,
@@ -14,8 +15,8 @@ use crate::oanda::client::OandaClient;
 use crate::oanda::models::StreamMessage;
 use crate::state::{AppState, LastQuote};
 
-const MOVE_TO_BREAKEVEN_PCT: f64 = 0.015;
-const TRAILING_DISTANCE_PCT: f64 = 0.025;
+pub const MOVE_TO_BREAKEVEN_PCT: f64 = 0.015;
+pub const TRAILING_DISTANCE_PCT: f64 = 0.025;
 
 /// Calculate the time slot for a given granularity.
 /// H1: just the hour (0-23), changes every 60 minutes
@@ -39,6 +40,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
         // Pre-fill buffers from the database for all enabled strategies
         run_prefill_buffers(&state).await;
         run_prefill_open_positions(&state).await;
+        run_prefill_rules(&state).await;
 
         loop {
             match rx.recv().await {
@@ -178,6 +180,9 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                             }
 
                             {
+                                // Snapshot rules under read lock so the lock is released
+                                // before the (potentially slow) strategy evaluation runs.
+                                let rules_snapshot = state.live.rules.read().await.clone();
                                 let mut open_positions = state.live.open_positions.write().await;
                                 // Evaluate strategies matching this instrument AND granularity
                                 match evaluate_strategies(
@@ -190,6 +195,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                     bid,
                                     ask,
                                     &mut *open_positions,
+                                    &rules_snapshot,
                                 )
                                 .await
                                 {
@@ -246,6 +252,32 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
             }
         }
     });
+}
+
+/// Pre-fill the in-memory rules cache from the `rules` table.
+/// Closes the gap between Rust startup and Opus's first push (~5min) — without
+/// this, Rust would default-enable everything during that window.
+async fn run_prefill_rules(state: &AppState) {
+    let rows = sqlx::query_as::<_, (uuid::Uuid, bool, Option<String>, DateTime<Utc>)>(
+        "SELECT live_strategy_id, enabled, reason, computed_at FROM rules",
+    )
+    .fetch_all(&state.db)
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            let count = rows.len();
+            let cache = crate::engine::rules::Rules::from_db_rows(rows);
+            *state.live.rules.write().await = cache;
+            tracing::info!("Pre-filled {} rules from database", count);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to pre-fill rules from database: {} \u{2014} cache stays default-empty (all strategies enabled until first push)",
+                e
+            );
+        }
+    }
 }
 
 async fn run_prefill_buffers(state: &AppState) {
@@ -417,6 +449,7 @@ pub(crate) async fn evaluate_strategies(
     bid: f64,
     ask: f64,
     open_positions: &mut HashMap<String, OpenPosition>,
+    rules: &Rules,
 ) -> Result<Vec<SignalReport>, Box<dyn std::error::Error>> {
     if !is_trading_enabled(pool).await {
         return Ok(vec![]);
@@ -452,6 +485,7 @@ pub(crate) async fn evaluate_strategies(
                 ask,
                 buffer,
                 open_positions,
+                rules,
             )
             .await?
             {
@@ -472,6 +506,7 @@ async fn evaluate_entry(
     ask: f64,
     buffer: &CandleBuffer,
     open_positions: &mut HashMap<String, OpenPosition>,
+    rules: &Rules,
 ) -> Result<Option<SignalReport>, Box<dyn std::error::Error>> {
     let params = &strategy.parameters;
 
@@ -545,6 +580,10 @@ async fn evaluate_entry(
                         "[SIGNAL] Mean reversion entry on {} ({}): price={:.5}, MA{}={:.5}, deviation={:.4}%",
                         strategy.instrument, strategy.granularity, current_price, mr_params.ma_period, ma_value, deviation_pct * 100.0
                     );
+
+                    if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
+                        return Ok(Some(gated));
+                    }
 
                     let sl_price = current_price * (1.0 + mr_params.stop_loss);
                     let tp_price = current_price * (1.0 + mr_params.exit_threshold);
@@ -625,6 +664,10 @@ async fn evaluate_entry(
                         slow_ma
                     );
 
+                    if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
+                        return Ok(Some(gated));
+                    }
+
                     let sl_price = current_price * (1.0 + tf_params.stop_loss);
                     let tp_price = tf_params.take_profit.map(|tp| current_price * (1.0 + tp));
 
@@ -650,6 +693,10 @@ async fn evaluate_entry(
                         fast_ma,
                         slow_ma
                     );
+
+                    if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
+                        return Ok(Some(gated));
+                    }
 
                     let sl_price = current_price * (1.0 - tf_params.stop_loss);
                     let tp_price = tf_params.take_profit.map(|tp| current_price * (1.0 - tp));
