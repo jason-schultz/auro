@@ -678,6 +678,7 @@ const instruments = [
     "AUD_USD",
     "USD_CAD",
     "XAU_USD",
+    "XPT_USD",
     "SPX500_USD",
     "WTICO_USD",
 ];

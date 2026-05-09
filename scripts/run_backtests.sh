@@ -21,7 +21,7 @@
 set -e
 
 BASE_URL="http://127.0.0.1:3000/api"
-TIMEFRAME="M15"
+TIMEFRAME="H1"
 STRATEGY="both"
 PARALLEL=1
 CLEAR=false
