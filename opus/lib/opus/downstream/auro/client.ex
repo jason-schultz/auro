@@ -4,6 +4,8 @@ defmodule Opus.Auro.Client do
   """
   require Logger
 
+  alias Opus.Trading.Granularity
+
   @base_url Application.compile_env(:opus, :auro_base_url, "http://localhost:3000")
 
   def base_url, do: Application.get_env(:opus, :auro_base_url, @base_url)
@@ -14,7 +16,8 @@ defmodule Opus.Auro.Client do
   Uses idempotency_key to prevent duplicate evaluations on retry.
   """
   @spec evaluate(String.t(), DateTime.t(), String.t()) :: {:ok, map()} | {:error, any()}
-  def evaluate(granularity, target_slot, idempotency_key) when granularity in ["M15", "H1"] do
+  def evaluate(granularity, target_slot, idempotency_key)
+      when granularity in Granularity.all() do
     Logger.info(
       "[AuroClient] Triggering evaluation for #{granularity} #{target_slot} with idempotency key #{idempotency_key}"
     )
@@ -71,7 +74,7 @@ defmodule Opus.Auro.Client do
   """
   @spec get_indicators(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, any()}
   def get_indicators(instrument, granularity, opts \\ [])
-      when granularity in ["M15", "H1"] do
+      when granularity in Granularity.all() do
     params =
       opts
       |> Keyword.take([:adx_period, :bollinger_period, :bollinger_std, :atr_period, :ma_period])
