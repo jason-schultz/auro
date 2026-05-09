@@ -32,7 +32,7 @@ defmodule Opus.Trading.RegimeDetector do
   @adx_trending 50.0
   @adx_choppy 15.0
 
-  @mtf_granularities ["M15", "H1"]
+  @mtf_granularities Granularity.mtf()
 
   # -- Public API --
 

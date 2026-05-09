@@ -137,11 +137,12 @@ defmodule Opus.Trading.RulesEngine do
   Returns a map: `%{live_strategy_id, enabled, reason, computed_at}`.
   """
   defp decide(strategy, regimes) do
+    h4 = Map.get(regimes, {strategy.instrument, "H4"}, %{regime: :unknown})
     h1 = Map.get(regimes, {strategy.instrument, "H1"}, %{regime: :unknown})
     m15 = Map.get(regimes, {strategy.instrument, "M15"}, %{regime: :unknown})
 
-    regime = classify_mtf(h1, m15)
-    {enabled, reason} = policy(strategy.strategy_type, regime, h1, m15)
+    regime = classify_mtf(h4, h1, m15)
+    {enabled, reason} = policy(strategy.strategy_type, regime, h4, h1, m15)
 
     %{
       live_strategy_id: strategy.id,
@@ -151,40 +152,52 @@ defmodule Opus.Trading.RulesEngine do
     }
   end
 
-  # H1 is the anchor. Both H1 and M15 must agree on trending to confirm a trend.
-  # H1 choppy overrides M15 — don't trade trend into a ranging higher timeframe.
-  # (H4 will replace H1 as anchor once H4 data is backfilled — backlog item)
-  defp classify_mtf(h1, m15) do
-    case {h1[:regime] || :unknown, m15[:regime] || :unknown} do
-      {:unknown, _} -> :unknown
-      {_, :unknown} -> :unknown
-      {:trending, :trending} -> :trending
-      {:choppy, _} -> :choppy
-      {:trending, _} -> :uncertain
+  # H4 anchors the regime since it's slowest and least noisy. M15 confirms since it's
+  # closest to execution and most actionable. H1 fills in the gaps and adds confidence.
+  defp classify_mtf(h4, h1, m15) do
+    case {h4[:regime] || :unknown, h1[:regime] || :unknown, m15[:regime] || :unknown} do
+      {:unknown, _, _} -> :unknown
+      {_, :unknown, _} -> :unknown
+      {_, _, :unknown} -> :unknown
+      {:trending, :trending, :trending} -> :trending
+      {:choppy, _, _} -> :choppy
+      {:trending, _, _} -> :uncertain
       _ -> :uncertain
     end
   end
 
-  defp policy("trend_following", :trending, h1, m15),
-    do: {true, "trending H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
+  defp policy("trend_following", :trending, h4, h1, m15),
+    do:
+      {true,
+       "trending H4:#{format_adx(h4[:adx])} H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
 
-  defp policy("trend_following", :choppy, h1, m15),
-    do: {false, "choppy TF disabled — H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
+  defp policy("trend_following", :choppy, h4, h1, m15),
+    do:
+      {false,
+       "choppy TF disabled — H4:#{format_adx(h4[:adx])} H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
 
-  defp policy("trend_following", :uncertain, h1, m15),
-    do: {true, "uncertain H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
+  defp policy("trend_following", :uncertain, h4, h1, m15),
+    do:
+      {true,
+       "uncertain H4:#{format_adx(h4[:adx])} H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
 
-  defp policy("mean_reversion", :choppy, h1, m15),
-    do: {true, "choppy MR enabled — H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
+  defp policy("mean_reversion", :choppy, h4, h1, m15),
+    do:
+      {true,
+       "choppy MR enabled — H4:#{format_adx(h4[:adx])} H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
 
-  defp policy("mean_reversion", :trending, h1, m15),
-    do: {false, "trending MR disabled — H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
+  defp policy("mean_reversion", :trending, h4, h1, m15),
+    do:
+      {false,
+       "trending MR disabled — H4:#{format_adx(h4[:adx])} H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
 
-  defp policy("mean_reversion", :uncertain, h1, m15),
-    do: {true, "uncertain H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
+  defp policy("mean_reversion", :uncertain, h4, h1, m15),
+    do:
+      {true,
+       "uncertain H4:#{format_adx(h4[:adx])} H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
 
   # fail-open: unknown regime, unknown strategy_type, etc.
-  defp policy(_strategy_type, regime, _h1, _m15),
+  defp policy(_strategy_type, regime, _h4, _h1, _m15),
     do: {true, "no regime data (#{inspect(regime)}) — defaulting to enabled"}
 
   defp format_adx(nil), do: "n/a"
