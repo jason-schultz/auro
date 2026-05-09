@@ -62,10 +62,17 @@ pub async fn run_grid_search(
             let config = grid::TrendGridConfig {
                 instrument: instrument.clone(),
                 granularity: timeframe.clone(),
-                fast_periods: vec![5, 10, 15, 20, 25],
-                slow_periods: vec![30, 40, 50, 60, 75, 100, 150],
-                stop_losses: vec![-0.01, -0.02, -0.03, -0.04, -0.05],
-                take_profits: vec![None, Some(0.02), Some(0.03), Some(0.05), Some(0.10)],
+                fast_periods: vec![8, 13, 21, 34],
+                slow_periods: vec![50, 89, 144, 200],
+                stop_losses: vec![-0.005, -0.01, -0.015, -0.025],
+                take_profits: vec![
+                    None,
+                    Some(0.01),
+                    Some(0.02),
+                    Some(0.04),
+                    Some(0.06),
+                    Some(0.08),
+                ],
             };
 
             tracing::info!(
@@ -82,10 +89,10 @@ pub async fn run_grid_search(
             let config = grid::GridSearchConfig {
                 instrument: instrument.clone(),
                 granularity: timeframe.clone(),
-                ma_periods: vec![10, 15, 20, 25, 30, 40, 50],
-                entry_thresholds: vec![-0.002, -0.003, -0.005, -0.007, -0.01, -0.015, -0.02],
-                exit_thresholds: vec![0.001, 0.002, 0.003, 0.005, 0.007, 0.01],
-                stop_losses: vec![-0.005, -0.01, -0.015, -0.02, -0.03],
+                ma_periods: vec![10, 15, 20, 30, 50, 100, 200],
+                entry_thresholds: vec![-0.001, -0.002, -0.003, -0.004, -0.005, -0.008, -0.012],
+                exit_thresholds: vec![0.0, 0.0005, 0.001, 0.002, 0.003],
+                stop_losses: vec![-0.002, -0.004, -0.006, -0.01],
             };
 
             tracing::info!(
