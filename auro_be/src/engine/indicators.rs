@@ -262,7 +262,9 @@ mod tests {
     fn atr_pct_basic_calculation() {
         // Each bar has high=100.5, low=99.5, close=100. TR=1.0 every bar (high-low dominates).
         // ATR = 1.0; close = 100; ATR% = 1.0
-        let candles: Vec<Candle> = (0..20).map(|i| ohlc(100.0, 100.5, 99.5, 100.0, i)).collect();
+        let candles: Vec<Candle> = (0..20)
+            .map(|i| ohlc(100.0, 100.5, 99.5, 100.0, i))
+            .collect();
 
         let result = atr_pct(&candles, 14).expect("ATR should compute with 20 candles");
         assert!(
@@ -310,8 +312,9 @@ mod tests {
     #[test]
     fn bollinger_at_upper_band_position_is_one() {
         // Most prices at 100, last price spikes high enough to sit at the upper band.
-        let mut candles: Vec<Candle> =
-            (0..19).map(|i| flat(100.0 + 0.1 * (i as f64 % 2.0 - 0.5), i)).collect();
+        let mut candles: Vec<Candle> = (0..19)
+            .map(|i| flat(100.0 + 0.1 * (i as f64 % 2.0 - 0.5), i))
+            .collect();
         // Upper band ≈ middle + 2*std_dev. Set last close to a value above all priors.
         candles.push(flat(101.0, 19));
 

@@ -54,7 +54,6 @@ pub struct RulesPayload {
 }
 
 impl Rules {
-
     pub fn count(payload: &RulesPayload) -> (usize, usize) {
         let (enabled, disabled) = payload.rules.values().fold((0, 0), |(e, d), entry| {
             if entry.enabled {
@@ -85,7 +84,7 @@ impl Rules {
     pub fn apply_payload(&mut self, payload: RulesPayload) {
         let (enabled, disabled) = Rules::count(&payload);
         tracing::info!(
-            "[Rules] applied: enabled={}, disabled={}, computed_at={}",
+            "[RULES] applied: enabled={}, disabled={}, computed_at={}",
             enabled,
             disabled,
             payload.computed_at
