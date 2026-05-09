@@ -34,7 +34,10 @@ pub fn router() -> Router<AppState> {
             get(indicators::get_indicators),
         )
         .route("/api/rules", post(rules::push_rules))
-        .route("/api/positions/{trade_id}", delete(positions::remove_in_memory_position))
+        .route(
+            "/api/positions/{trade_id}",
+            delete(positions::remove_in_memory_position),
+        )
         // Backtest
         .route("/api/backtest/run", post(backtest::run_grid_search))
         .route(

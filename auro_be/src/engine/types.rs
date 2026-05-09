@@ -19,7 +19,6 @@ pub struct BollingerBands {
 /// Buffer key: (instrument, granularity)
 pub type BufferKey = (String, Granularity);
 
-
 #[derive(Debug, Clone)]
 pub struct Candle {
     pub time: DateTime<Utc>,
@@ -48,8 +47,13 @@ impl CandleAccumulator {
     }
 
     /// Feed a new M1 close. Returns Some(close_price) if a candle boundary was crossed.
-    pub fn on_minute_close(&mut self, slot: u32, slot_time: DateTime<Utc>,mid: f64) -> Option<Candle> {
-        match(self.current_slot, &mut self.current_candle) {
+    pub fn on_minute_close(
+        &mut self,
+        slot: u32,
+        slot_time: DateTime<Utc>,
+        mid: f64,
+    ) -> Option<Candle> {
+        match (self.current_slot, &mut self.current_candle) {
             (Some(prev_slot), Some(_)) if prev_slot != slot => {
                 let completed = self.current_candle.take();
                 self.current_candle = Some(Candle {
@@ -77,12 +81,12 @@ impl CandleAccumulator {
                 None
             }
             (Some(_), Some(candle)) => {
-                    // Same slot, update current candle
-                    candle.high = candle.high.max(mid);
-                    candle.low = candle.low.min(mid);
-                    candle.close = mid;
-                    candle.volume += 1;
-                    None
+                // Same slot, update current candle
+                candle.high = candle.high.max(mid);
+                candle.low = candle.low.min(mid);
+                candle.close = mid;
+                candle.volume += 1;
+                None
             }
             // Shouldn't happen but compile time exhaustive
             (Some(_), None) => None,
@@ -300,4 +304,130 @@ pub struct Trade {
     pub pnl_percent: f64,
     pub entry_reason: EntryReason,
     pub exit_reason: ExitReason,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn slot_time(h: u32, m: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 1, h, m, 0).unwrap()
+    }
+
+    fn candle(time: DateTime<Utc>, close: f64) -> Candle {
+        Candle {
+            time,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1,
+        }
+    }
+
+    #[test]
+    fn accumulator_returns_none_on_first_tick() {
+        let mut acc = CandleAccumulator::new();
+        assert!(acc.on_minute_close(10, slot_time(10, 0), 1.2345).is_none());
+    }
+
+    #[test]
+    fn accumulator_returns_none_within_same_slot() {
+        let mut acc = CandleAccumulator::new();
+        let t = slot_time(10, 0);
+        acc.on_minute_close(10, t, 1.2345);
+        assert!(acc.on_minute_close(10, t, 1.2350).is_none());
+        assert!(acc.on_minute_close(10, t, 1.2355).is_none());
+    }
+
+    #[test]
+    fn accumulator_emits_completed_candle_on_slot_change() {
+        let mut acc = CandleAccumulator::new();
+        let t10 = slot_time(10, 0);
+        acc.on_minute_close(10, t10, 1.2345);
+        acc.on_minute_close(10, t10, 1.2360);
+
+        let result = acc.on_minute_close(11, slot_time(11, 0), 1.2365).unwrap();
+        assert_eq!(result.time, t10);
+        assert_eq!(result.open, 1.2345);
+        assert_eq!(result.high, 1.2360);
+        assert_eq!(result.low, 1.2345);
+        assert_eq!(result.close, 1.2360);
+        assert_eq!(result.volume, 2);
+    }
+
+    #[test]
+    fn accumulator_tracks_high_and_low_across_ticks() {
+        let mut acc = CandleAccumulator::new();
+        let t = slot_time(10, 0);
+        acc.on_minute_close(10, t, 1.2345); // open
+        acc.on_minute_close(10, t, 1.2400); // new high
+        acc.on_minute_close(10, t, 1.2300); // new low
+        acc.on_minute_close(10, t, 1.2350); // close
+
+        let result = acc.on_minute_close(11, slot_time(11, 0), 1.2360).unwrap();
+        assert_eq!(result.open, 1.2345);
+        assert_eq!(result.high, 1.2400);
+        assert_eq!(result.low, 1.2300);
+        assert_eq!(result.close, 1.2350);
+        assert_eq!(result.volume, 4);
+    }
+
+    #[test]
+    fn accumulator_tracks_multiple_slots() {
+        let mut acc = CandleAccumulator::new();
+        let t0 = slot_time(0, 0);
+        let t1 = slot_time(1, 0);
+        let t2 = slot_time(2, 0);
+
+        acc.on_minute_close(0, t0, 1.1000);
+        acc.on_minute_close(0, t0, 1.1050);
+
+        let first = acc.on_minute_close(1, t1, 1.2000).unwrap();
+        assert_eq!(first.time, t0);
+        assert_eq!(first.open, 1.1000);
+        assert_eq!(first.close, 1.1050);
+
+        acc.on_minute_close(1, t1, 1.2200);
+
+        let second = acc.on_minute_close(2, t2, 1.3000).unwrap();
+        assert_eq!(second.time, t1);
+        assert_eq!(second.open, 1.2000);
+        assert_eq!(second.close, 1.2200);
+    }
+
+    #[test]
+    fn candle_buffer_starts_empty() {
+        let buf = CandleBuffer::new(10);
+        assert_eq!(buf.candles.len(), 0);
+    }
+
+    #[test]
+    fn candle_buffer_accumulates_candles() {
+        let mut buf = CandleBuffer::new(10);
+        buf.push(candle(slot_time(0, 0), 1.0));
+        buf.push(candle(slot_time(1, 0), 2.0));
+        buf.push(candle(slot_time(2, 0), 3.0));
+        assert_eq!(buf.closes(), vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn candle_buffer_respects_max_size() {
+        let mut buf = CandleBuffer::new(3);
+        buf.push(candle(slot_time(0, 0), 1.0));
+        buf.push(candle(slot_time(1, 0), 2.0));
+        buf.push(candle(slot_time(2, 0), 3.0));
+        buf.push(candle(slot_time(3, 0), 4.0));
+        assert_eq!(buf.closes(), vec![2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn candle_buffer_evicts_oldest_first() {
+        let mut buf = CandleBuffer::new(3);
+        for i in 0..10 {
+            buf.push(candle(slot_time(i, 0), i as f64));
+        }
+        assert_eq!(buf.closes(), vec![7.0, 8.0, 9.0]);
+    }
 }
