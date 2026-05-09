@@ -14,16 +14,26 @@ defmodule Opus.Trading.RulesEngine do
   Polls every 5 minutes by default. Same cadence as RegimeDetector since rules
   derive from regimes — running more often than the source of truth wastes work.
 
-  Strategy-type → regime → decision mapping (the policy):
+  Multi-timeframe regime classification (H1 anchor, M15 confirmation):
+
+      | H1 regime   | M15 regime  | composite   |
+      | ----------- | ----------- | ----------- |
+      | trending    | trending    | trending    |
+      | choppy      | any         | choppy      |
+      | trending    | other       | uncertain   |
+      | other       | other       | uncertain   |
+      | unknown     | any         | unknown     |
+
+  Strategy-type × composite regime → decision (the policy):
 
       | strategy_type    | trending  | choppy    | uncertain | unknown   |
       | ---------------- | --------- | --------- | --------- | --------- |
-      | trend_following  | enabled   | disabled  | disabled  | enabled   |
-      | mean_reversion   | disabled  | enabled   | disabled  | enabled   |
+      | trend_following  | enabled   | disabled  | enabled   | enabled   |
+      | mean_reversion   | disabled  | enabled   | enabled   | enabled   |
 
-  "Unknown" defaults to enabled so a fresh start (before regime detector has
-  any data) doesn't accidentally disable everything. Same fail-open posture as
-  Rust's `Rules::decision`.
+  "Unknown" and "uncertain" default to enabled so a fresh start doesn't
+  accidentally disable everything. Same fail-open posture as Rust's
+  `Rules::decision`.
   """
 
   use GenServer
@@ -53,7 +63,7 @@ defmodule Opus.Trading.RulesEngine do
 
   @impl true
   def init(_opts) do
-    Logger.info("[RulesEngine] Started (#{div(@poll_interval, 60_000)}min poll interval)")
+    Logger.info("[RULESENGINE] Started (#{div(@poll_interval, 60_000)}min poll interval)")
 
     Process.send_after(self(), :poll, @initial_delay)
     {:ok, %{last_run: nil, poll_count: 0}}
@@ -93,13 +103,13 @@ defmodule Opus.Trading.RulesEngine do
     case persist_and_push(decisions) do
       :ok ->
         Logger.info(
-          "[RulesEngine] cycle #{state.poll_count + 1}: #{summarize(decisions)} across #{length(decisions)} strategies"
+          "[RULESENGINE] cycle #{state.poll_count + 1}: #{summarize(decisions)} across #{length(decisions)} strategies"
         )
 
         %{state | last_run: DateTime.utc_now(), poll_count: state.poll_count + 1}
 
       {:error, reason} ->
-        Logger.error("[RulesEngine] cycle failed: #{inspect(reason)}")
+        Logger.error("[RULESENGINE] cycle failed: #{inspect(reason)}")
         state
     end
   end
@@ -127,15 +137,11 @@ defmodule Opus.Trading.RulesEngine do
   Returns a map: `%{live_strategy_id, enabled, reason, computed_at}`.
   """
   defp decide(strategy, regimes) do
-    # The regimes map is keyed by `{instrument, granularity}` per
-    # RegimeDetector.get_all_regimes. Look up this strategy's pair to find
-    # its regime data, then apply the strategy_type × regime policy table.
-    regime_data =
-      Map.get(regimes, {strategy.instrument, strategy.granularity}, %{regime: :unknown})
+    h1 = Map.get(regimes, {strategy.instrument, "H1"}, %{regime: :unknown})
+    m15 = Map.get(regimes, {strategy.instrument, "M15"}, %{regime: :unknown})
 
-    regime = regime_data[:regime] || :unknown
-
-    {enabled, reason} = policy(strategy.strategy_type, regime, regime_data)
+    regime = classify_mtf(h1, m15)
+    {enabled, reason} = policy(strategy.strategy_type, regime, h1, m15)
 
     %{
       live_strategy_id: strategy.id,
@@ -145,24 +151,41 @@ defmodule Opus.Trading.RulesEngine do
     }
   end
 
-  defp policy("trend_following", :trending, data),
-    do: {true, "trending regime, ADX #{format_adx(data[:adx])}"}
+  # H1 is the anchor. Both H1 and M15 must agree on trending to confirm a trend.
+  # H1 choppy overrides M15 — don't trade trend into a ranging higher timeframe.
+  # (H4 will replace H1 as anchor once H4 data is backfilled — backlog item)
+  defp classify_mtf(h1, m15) do
+    case {h1[:regime] || :unknown, m15[:regime] || :unknown} do
+      {:unknown, _} -> :unknown
+      {_, :unknown} -> :unknown
+      {:trending, :trending} -> :trending
+      {:choppy, _} -> :choppy
+      {:trending, _} -> :uncertain
+      _ -> :uncertain
+    end
+  end
 
-  defp policy("trend_following", :choppy, data),
-    do: {false, "choppy regime, TF disabled (ADX #{format_adx(data[:adx])})"}
+  defp policy("trend_following", :trending, h1, m15),
+    do: {true, "trending H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
 
-  defp policy("trend_following", :uncertain, data),
-    do: {false, "uncertain regime, TF disabled (ADX #{format_adx(data[:adx])})"}
+  defp policy("trend_following", :choppy, h1, m15),
+    do: {false, "choppy TF disabled — H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
 
-  defp policy("mean_reversion", :choppy, data),
-    do: {true, "choppy regime, ADX #{format_adx(data[:adx])}"}
+  defp policy("trend_following", :uncertain, h1, m15),
+    do: {true, "uncertain H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
 
-  defp policy("mean_reversion", :trending, data),
-    do: {false, "trending regime, MR disabled (ADX #{format_adx(data[:adx])})"}
+  defp policy("mean_reversion", :choppy, h1, m15),
+    do: {true, "choppy MR enabled — H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
+
+  defp policy("mean_reversion", :trending, h1, m15),
+    do: {false, "trending MR disabled — H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
+
+  defp policy("mean_reversion", :uncertain, h1, m15),
+    do: {true, "uncertain H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"}
 
   # fail-open: unknown regime, unknown strategy_type, etc.
-  defp policy(_strategy_type, _regime, _data),
-    do: {true, "no policy match — defaulting to enabled"}
+  defp policy(_strategy_type, regime, _h1, _m15),
+    do: {true, "no regime data (#{inspect(regime)}) — defaulting to enabled"}
 
   defp format_adx(nil), do: "n/a"
   defp format_adx(adx), do: :erlang.float_to_binary(adx, decimals: 1)

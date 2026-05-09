@@ -70,7 +70,8 @@ defmodule Opus.Auro.Client do
   unless overridden via `opts`.
   """
   @spec get_indicators(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, any()}
-  def get_indicators(instrument, granularity, opts \\ []) when granularity in ["M15", "H1"] do
+  def get_indicators(instrument, granularity, opts \\ [])
+      when granularity in ["M15", "H1"] do
     params =
       opts
       |> Keyword.take([:adx_period, :bollinger_period, :bollinger_std, :atr_period, :ma_period])
