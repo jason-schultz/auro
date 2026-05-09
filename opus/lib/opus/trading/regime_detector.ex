@@ -21,6 +21,7 @@ defmodule Opus.Trading.RegimeDetector do
   use GenServer
   require Logger
 
+  alias Opus.Trading.Granularity
   alias Opus.Auro.Client, as: Auro
   alias Opus.Repo
 

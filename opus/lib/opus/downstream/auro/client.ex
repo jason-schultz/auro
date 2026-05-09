@@ -4,7 +4,7 @@ defmodule Opus.Auro.Client do
   """
   require Logger
 
-  alias Opus.Trading.Granularity
+  import Opus.Trading.Granularity, only: [is_valid: 1]
 
   @base_url Application.compile_env(:opus, :auro_base_url, "http://localhost:3000")
 
@@ -17,7 +17,7 @@ defmodule Opus.Auro.Client do
   """
   @spec evaluate(String.t(), DateTime.t(), String.t()) :: {:ok, map()} | {:error, any()}
   def evaluate(granularity, target_slot, idempotency_key)
-      when granularity in Granularity.all() do
+      when is_valid(granularity) do
     Logger.info(
       "[AuroClient] Triggering evaluation for #{granularity} #{target_slot} with idempotency key #{idempotency_key}"
     )
@@ -74,7 +74,7 @@ defmodule Opus.Auro.Client do
   """
   @spec get_indicators(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, any()}
   def get_indicators(instrument, granularity, opts \\ [])
-      when granularity in Granularity.all() do
+      when is_valid(granularity) do
     params =
       opts
       |> Keyword.take([:adx_period, :bollinger_period, :bollinger_std, :atr_period, :ma_period])
