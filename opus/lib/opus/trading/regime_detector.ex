@@ -29,8 +29,10 @@ defmodule Opus.Trading.RegimeDetector do
   @poll_interval :timer.minutes(5)
   @initial_delay :timer.seconds(15)
 
-  @adx_trending 25.0
-  @adx_choppy 20.0
+  @adx_trending 50.0
+  @adx_choppy 15.0
+
+  @mtf_granularities ["M15", "H1"]
 
   # -- Public API --
 
@@ -57,9 +59,7 @@ defmodule Opus.Trading.RegimeDetector do
 
   @impl true
   def init(_opts) do
-    Logger.info(
-      "[RegimeDetector] Started (#{div(@poll_interval, 60_000)}min poll interval)"
-    )
+    Logger.info("[RegimeDetector] Started (#{div(@poll_interval, 60_000)}min poll interval)")
 
     Process.send_after(self(), :poll, @initial_delay)
     {:ok, %{last_run: nil, regimes: %{}, poll_count: 0}}
@@ -124,14 +124,17 @@ defmodule Opus.Trading.RegimeDetector do
   end
 
   defp active_strategy_pairs do
-    query =
+    instruments =
       from(s in "live_strategies",
         where: s.enabled == true,
         distinct: true,
-        select: {s.instrument, s.granularity}
+        select: s.instrument
       )
+      |> Repo.all()
 
-    Repo.all(query)
+    for instrument <- instruments,
+        granularity <- @mtf_granularities,
+        do: {instrument, granularity}
   end
 
   defp classify(response) do
