@@ -9,6 +9,8 @@ defmodule OpusWeb.Router do
     pipe_through :api
 
     get "/regimes", RegimeController, :index
+    get "/pipeline", PipelineController, :index
+    post "/pipeline/:config_id/promote", PipelineController, :promote
   end
 
   # Enable LiveDashboard and Swoosh mailbox preview in development

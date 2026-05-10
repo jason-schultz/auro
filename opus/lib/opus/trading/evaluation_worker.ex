@@ -15,7 +15,7 @@ defmodule Opus.Trading.EvaluationWorker do
     target_slot = compute_target_slot(granularity, DateTime.utc_now())
     idempotency_key = "#{granularity}:#{DateTime.to_iso8601(target_slot)}"
 
-    Logger.info("[EVALUATIONWORKER] triggering #{granularity} eval for slot #{idempotency_key}")
+    Logger.info("[EvaluationWorker] triggering #{granularity} eval for slot #{idempotency_key}")
 
     case Client.evaluate(granularity, target_slot, idempotency_key) do
       {:ok, %{"evaluated" => true, "signals" => signals} = response} ->
@@ -23,11 +23,11 @@ defmodule Opus.Trading.EvaluationWorker do
         :ok
 
       {:ok, %{"evaluated" => false, "reason" => reason}} ->
-        Logger.info("[EVALUATIONWORKER] #{granularity} not evaluated: #{reason}")
+        Logger.info("[EvaluationWorker] #{granularity} not evaluated: #{reason}")
         :ok
 
       {:error, reason} ->
-        Logger.error("[EVALUATIONWORKER] #{granularity} eval failed: #{inspect(reason)}")
+        Logger.error("[EvaluationWorker] #{granularity} eval failed: #{inspect(reason)}")
         {:error, reason}
     end
   end
@@ -47,14 +47,14 @@ defmodule Opus.Trading.EvaluationWorker do
     signal_count = length(signals)
 
     Logger.info(
-      "[EVALUATIONWORKER] #{granularity} complete: " <>
+      "[EvaluationWorker] #{granularity} complete: " <>
         "#{signal_count} signals, " <>
         "staleness=#{staleness}, " <>
         "duplicate=#{duplicate}"
     )
 
     Enum.each(signals, fn signal ->
-      Logger.debug("[EVALUATIONWORKER] signal: #{inspect(signal)}")
+      Logger.debug("[EvaluationWorker] signal: #{inspect(signal)}")
     end)
   end
 end

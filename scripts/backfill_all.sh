@@ -44,7 +44,7 @@ echo "=== Candle counts ==="
 docker exec -it amplyiq-postgres psql -U postgres -d auro -c "
 SELECT granularity, COUNT(*) as total_candles, COUNT(DISTINCT instrument) as instruments
 FROM candles
-WHERE granularity IN ('H1', 'M15', 'H4')
+WHERE granularity IN ('H1', 'M15', 'H4', 'M1')
 GROUP BY granularity
 ORDER BY granularity;
 "
