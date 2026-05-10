@@ -48,6 +48,9 @@ anyhow = "1"
 # Cache
 lru = "0.12"
 
+# Random number generation (Monte Carlo simulation)
+rand = "0.9"
+
 [[bin]]
 name = "run_backtests"
 path = "src/bin/run_backtests.rs"

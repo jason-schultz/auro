@@ -32,7 +32,7 @@ config :opus, Oban,
        {"*/15 * * * *", Opus.Trading.EvaluationWorker, args: %{granularity: "M15"}}
      ]}
   ],
-  queues: [evaluations: 2]
+  queues: [evaluations: 2, pipeline: 4, ollama: 1]
 
 # Configures the mailer
 #
