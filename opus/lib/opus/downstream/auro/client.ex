@@ -85,6 +85,61 @@ defmodule Opus.Auro.Client do
     |> handle_response()
   end
 
+  @doc """
+  Submit a strategy config to the pipeline backtest stage.
+  Rust loads the config, runs the backtest, evaluates thresholds, and writes
+  the result to strategy_evaluations.
+
+  Returns `{:ok, %{status: "passed"|"failed", stats: map, failure_reason: string|nil}}`.
+  """
+  @spec run_pipeline_backtest(String.t()) :: {:ok, map()} | {:error, any()}
+  def run_pipeline_backtest(config_id) when is_binary(config_id) do
+    Logger.info("[AuroClient] Running pipeline backtest for config #{config_id}")
+
+    client()
+    |> Req.post(
+      url: "/api/pipeline/backtest",
+      json: %{strategy_config_id: config_id},
+      receive_timeout: 120_000
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  Run the walk-forward validation stage for a strategy config.
+  Rust splits candles 70/30 IS/OOS, runs both, evaluates thresholds, writes result.
+  """
+  @spec run_pipeline_walk_forward(String.t()) :: {:ok, map()} | {:error, any()}
+  def run_pipeline_walk_forward(config_id) when is_binary(config_id) do
+    Logger.info("[AuroClient] Running pipeline walk_forward for config #{config_id}")
+
+    client()
+    |> Req.post(
+      url: "/api/pipeline/walk_forward",
+      json: %{strategy_config_id: config_id},
+      receive_timeout: 120_000
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  Run the Monte Carlo validation stage for a strategy config.
+  Rust runs the strategy once to get trades, then shuffles the PnL sequence
+  10,000 times and computes: profitable_pct, median_sharpe, p95_drawdown.
+  """
+  @spec run_pipeline_monte_carlo(String.t()) :: {:ok, map()} | {:error, any()}
+  def run_pipeline_monte_carlo(config_id) when is_binary(config_id) do
+    Logger.info("[AuroClient] Running pipeline monte_carlo for config #{config_id}")
+
+    client()
+    |> Req.post(
+      url: "/api/pipeline/monte_carlo",
+      json: %{strategy_config_id: config_id},
+      receive_timeout: 120_000
+    )
+    |> handle_response()
+  end
+
   # -- Private --
 
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}) do

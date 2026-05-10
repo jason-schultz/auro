@@ -21,7 +21,6 @@ defmodule Opus.Trading.RegimeDetector do
   use GenServer
   require Logger
 
-  alias Opus.Trading.Granularity
   alias Opus.Auro.Client, as: Auro
   alias Opus.Repo
 
@@ -32,8 +31,6 @@ defmodule Opus.Trading.RegimeDetector do
 
   @adx_trending 50.0
   @adx_choppy 15.0
-
-  @mtf_granularities Granularity.mtf()
 
   # -- Public API --
 
@@ -125,17 +122,12 @@ defmodule Opus.Trading.RegimeDetector do
   end
 
   defp active_strategy_pairs do
-    instruments =
-      from(s in "live_strategies",
-        where: s.enabled == true,
-        distinct: true,
-        select: s.instrument
-      )
-      |> Repo.all()
-
-    for instrument <- instruments,
-        granularity <- @mtf_granularities,
-        do: {instrument, granularity}
+    from(s in "live_strategies",
+      where: s.enabled == true,
+      distinct: true,
+      select: {s.instrument, s.granularity}
+    )
+    |> Repo.all()
   end
 
   defp classify(response) do
