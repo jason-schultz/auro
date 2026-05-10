@@ -28,6 +28,11 @@ const routes = [
     component: () => import("@/views/Backtests.vue"),
   },
   {
+    path: "/pipeline",
+    name: "pipeline",
+    component: () => import("@/views/Pipeline.vue"),
+  },
+  {
     path: "/live-trades/:id",
     name: "trade-detail",
     component: () => import("@/views/TradeDetail.vue"),

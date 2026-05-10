@@ -5,7 +5,7 @@
                 Backtest Results
             </h2>
 
-            <div class="flex items-center gap-2">
+            <div v-if="sourceFilter === 'grid'" class="flex items-center gap-2">
                 <select
                     v-model="runInstrument"
                     class="bg-background text-foreground text-sm rounded px-2 py-1 border border-border focus:outline-none focus:border-primary/30"
@@ -67,20 +67,23 @@
             </div>
         </div>
 
-        <!-- Filters -->
+        <!-- Source + Filters -->
         <div class="flex items-center gap-3 mb-4">
             <div class="flex gap-1">
                 <button
-                    v-for="s in statusFilters"
+                    v-for="s in [
+                        { value: 'grid', label: 'Grid Search' },
+                        { value: 'pipeline', label: 'Pipeline' },
+                    ]"
                     :key="s.value"
                     class="px-3 py-1.5 text-sm rounded transition-colors"
                     :class="
-                        statusFilter === s.value
+                        sourceFilter === s.value
                             ? 'bg-primary/10 text-primary'
                             : 'text-muted-foreground hover:text-foreground'
                     "
                     @click="
-                        statusFilter = s.value;
+                        sourceFilter = s.value as 'grid' | 'pipeline';
                         loadResults();
                     "
                 >
@@ -89,6 +92,31 @@
             </div>
 
             <div class="w-px h-4 bg-border" />
+        </div>
+
+        <div class="flex items-center gap-3 mb-4">
+            <template v-if="sourceFilter === 'grid'">
+                <div class="flex gap-1">
+                    <button
+                        v-for="s in statusFilters"
+                        :key="s.value"
+                        class="px-3 py-1.5 text-sm rounded transition-colors"
+                        :class="
+                            statusFilter === s.value
+                                ? 'bg-primary/10 text-primary'
+                                : 'text-muted-foreground hover:text-foreground'
+                        "
+                        @click="
+                            statusFilter = s.value;
+                            loadResults();
+                        "
+                    >
+                        {{ s.label }}
+                    </button>
+                </div>
+
+                <div class="w-px h-4 bg-border" />
+            </template>
 
             <div class="flex gap-1">
                 <button
@@ -233,7 +261,13 @@
                                 {{ selectedRun.strategy_name }}
                             </div>
                             <div class="flex items-center gap-2">
-                                <template v-if="selectedRun.status === 'valid'">
+                                <template
+                                    v-if="
+                                        selectedRun.status === 'valid' ||
+                                        (selectedRun._pipeline &&
+                                            selectedRun.status === 'passed')
+                                    "
+                                >
                                     <div class="flex items-center gap-1">
                                         <span
                                             class="text-[10px] text-muted-foreground"
@@ -246,7 +280,11 @@
                                         />
                                     </div>
                                     <button
-                                        @click="deployStrategy"
+                                        @click="
+                                            selectedRun._pipeline
+                                                ? promoteStrategy()
+                                                : deployStrategy()
+                                        "
                                         :disabled="deploying"
                                         class="px-3 py-1 text-xs rounded transition-colors"
                                         :class="
@@ -257,8 +295,10 @@
                                     >
                                         {{
                                             deploying
-                                                ? "Deploying..."
-                                                : "Deploy"
+                                                ? "Promoting..."
+                                                : selectedRun._pipeline
+                                                  ? "Promote"
+                                                  : "Deploy"
                                         }}
                                     </button>
                                 </template>
@@ -429,8 +469,63 @@
                         </div>
                     </div>
 
-                    <!-- Equity curve -->
-                    <div class="fr-card p-4">
+                    <!-- Pipeline stage breakdown (pipeline source only) -->
+                    <template v-if="selectedRun._pipeline">
+                        <div class="fr-card p-4">
+                            <div class="fr-section-label mb-3">Pipeline Stages</div>
+                            <div class="space-y-2">
+                                <div
+                                    v-for="stage in ['backtest', 'walk_forward', 'monte_carlo']"
+                                    :key="stage"
+                                    class="bg-background rounded-md p-3"
+                                >
+                                    <div class="flex items-center justify-between mb-2">
+                                        <span class="text-xs font-medium text-foreground capitalize">
+                                            {{ stage.replace("_", " ") }}
+                                        </span>
+                                        <span
+                                            class="text-[10px] px-1.5 py-0.5 rounded font-medium"
+                                            :class="statusClass(selectedRun._pipeline.evaluations.find(e => e.stage === stage)?.status ?? 'pending')"
+                                        >
+                                            {{ selectedRun._pipeline.evaluations.find(e => e.stage === stage)?.status ?? 'pending' }}
+                                        </span>
+                                    </div>
+                                    <div
+                                        v-if="selectedRun._pipeline.evaluations.find(e => e.stage === stage)?.stats"
+                                        class="grid grid-cols-3 gap-2 text-[10px] font-mono text-muted-foreground"
+                                    >
+                                        <template v-if="stage === 'backtest'">
+                                            <span>Sharpe: {{ selectedRun._pipeline.evaluations.find(e => e.stage === 'backtest')?.stats?.sharpe?.toFixed(3) }}</span>
+                                            <span>Return: {{ pct(selectedRun._pipeline.evaluations.find(e => e.stage === 'backtest')?.stats?.total_return ?? 0) }}</span>
+                                            <span>Trades: {{ selectedRun._pipeline.evaluations.find(e => e.stage === 'backtest')?.stats?.num_trades }}</span>
+                                        </template>
+                                        <template v-else-if="stage === 'walk_forward'">
+                                            <span>IS: {{ selectedRun._pipeline.evaluations.find(e => e.stage === 'walk_forward')?.stats?.is_sharpe?.toFixed(3) }}</span>
+                                            <span>OOS: {{ selectedRun._pipeline.evaluations.find(e => e.stage === 'walk_forward')?.stats?.oos_sharpe?.toFixed(3) }}</span>
+                                            <span>Retention: {{ selectedRun._pipeline.evaluations.find(e => e.stage === 'walk_forward')?.stats?.sharpe_retention?.toFixed(2) }}</span>
+                                        </template>
+                                        <template v-else-if="stage === 'monte_carlo'">
+                                            <span>Median: {{ selectedRun._pipeline.evaluations.find(e => e.stage === 'monte_carlo')?.stats?.median_sharpe?.toFixed(3) }}</span>
+                                            <span>Profitable: {{ pct(selectedRun._pipeline.evaluations.find(e => e.stage === 'monte_carlo')?.stats?.profitable_pct ?? 0) }}</span>
+                                            <span>P95 DD: {{ pct(selectedRun._pipeline.evaluations.find(e => e.stage === 'monte_carlo')?.stats?.p95_drawdown ?? 0) }}</span>
+                                        </template>
+                                    </div>
+                                    <div
+                                        v-else-if="selectedRun._pipeline.evaluations.find(e => e.stage === stage)?.failure_reason"
+                                        class="text-[10px] font-mono text-red-400 mt-1"
+                                    >
+                                        {{ selectedRun._pipeline.evaluations.find(e => e.stage === stage)?.failure_reason }}
+                                    </div>
+                                    <div v-else class="text-[10px] text-muted-foreground">
+                                        Not reached
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- Equity curve (grid source only) -->
+                    <div v-if="!selectedRun._pipeline" class="fr-card p-4">
                         <div class="fr-section-label mb-3">Equity Curve</div>
                         <div
                             v-if="loadingTrades"
@@ -454,8 +549,8 @@
                         </div>
                     </div>
 
-                    <!-- Trade list -->
-                    <div class="fr-card p-4">
+                    <!-- Trade list (grid source only) -->
+                    <div v-if="!selectedRun._pipeline" class="fr-card p-4">
                         <div class="fr-section-label mb-3">Trades</div>
                         <div
                             v-if="selectedTrades.length === 0"
@@ -562,8 +657,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, nextTick } from "vue";
-import { api } from "@/services/api";
+import { ref, computed, onMounted, nextTick } from "vue";
+import { api, opusApi } from "@/services/api";
 
 interface BacktestRun {
     id: string;
@@ -590,6 +685,8 @@ interface BacktestRun {
     status: string;
     reason_flagged: string | null;
     execution_duration_ms: number;
+    // Set when row came from the pipeline source
+    _pipeline?: PipelineConfig;
 }
 
 interface BacktestTrade {
@@ -601,6 +698,29 @@ interface BacktestTrade {
     pnl_percent: number;
     entry_reason: string;
     exit_reason: string;
+}
+
+interface PipelineEvaluation {
+    stage: string;
+    status: string;
+    stats: Record<string, number> | null;
+    failure_reason: string | null;
+}
+
+interface PipelineConfig {
+    config_id: string;
+    instrument: string;
+    granularity: string;
+    strategy_type: string;
+    parameters: BacktestRun["parameters"];
+    source: string;
+    depth: number;
+    parent_config_id: string | null;
+    stage: string | null;
+    status: string | null;
+    stats: Record<string, number> | null;
+    failure_reason: string | null;
+    evaluations: PipelineEvaluation[];
 }
 
 const results = ref<BacktestRun[]>([]);
@@ -617,6 +737,7 @@ const lastRunResult = ref<any>(null);
 const chartCanvas = ref<HTMLCanvasElement | null>(null);
 const chartWrapper = ref<HTMLDivElement | null>(null);
 
+const sourceFilter = ref<"grid" | "pipeline">("grid");
 const statusFilter = ref("valid");
 const instrumentFilter = ref("");
 const sortKey = ref("sharpe_ratio");
@@ -735,6 +856,18 @@ const columns = computed(() => {
         ];
     }
     // All strategies — show generic columns
+    if (sourceFilter.value === "pipeline") {
+        return [
+            { key: "instrument", label: "Pair" },
+            { key: "strategy_type", label: "Strategy" },
+            { key: "granularity", label: "TF" },
+            { key: "num_trades", label: "#" },
+            { key: "sharpe_ratio", label: "Sharpe" },
+            { key: "oos_sharpe", label: "OOS" },
+            { key: "max_drawdown", label: "DD" },
+            { key: "status", label: "Status" },
+        ];
+    }
     return [
         { key: "instrument", label: "Pair" },
         { key: "strategy_type", label: "Strategy" },
@@ -786,6 +919,15 @@ function cellValue(key: string, row: BacktestRun): string {
     switch (key) {
         case "instrument":
             return row.instrument.replace("_", "/");
+        case "granularity":
+            return row.granularity ?? "—";
+        case "oos_sharpe": {
+            const wf = row._pipeline?.evaluations.find(
+                (e) => e.stage === "walk_forward",
+            );
+            const v = wf?.stats?.oos_sharpe;
+            return v != null ? v.toFixed(3) : "—";
+        }
         case "strategy_type":
             return row.strategy_type === "mean_reversion"
                 ? "Mean Rev"
@@ -862,8 +1004,10 @@ function pct(value: number): string {
 function statusClass(status: string): string {
     switch (status) {
         case "valid":
+        case "passed":
             return "bg-emerald-500/10 text-emerald-400";
         case "verify":
+        case "running":
             return "bg-primary/10 text-primary";
         case "failed":
             return "bg-red-500/10 text-red-400";
@@ -887,12 +1031,14 @@ function formatDate(dateStr: string): string {
 
 async function selectRun(run: BacktestRun) {
     selectedRun.value = run;
-    loadingTrades.value = true;
     selectedTrades.value = [];
     deployMessage.value = "";
     deployError.value = false;
     deployUnits.value = defaultUnits(run.instrument);
 
+    if (run._pipeline) return;
+
+    loadingTrades.value = true;
     try {
         const data = await api.get<{ trades: BacktestTrade[] }>(
             `/backtest/runs/${run.id}/trades`,
@@ -929,6 +1075,32 @@ async function deployStrategy() {
                 "Already deployed — this strategy is already active for this instrument.";
         } else {
             deployMessage.value = message;
+        }
+        deployError.value = true;
+    } finally {
+        deploying.value = false;
+    }
+}
+
+async function promoteStrategy() {
+    if (!selectedRun.value) return;
+
+    deploying.value = true;
+    deployMessage.value = "";
+    deployError.value = false;
+
+    try {
+        await opusApi.post(`/pipeline/${selectedRun.value.id}/promote`, {
+            max_position_size: deployUnits.value,
+        });
+        deployMessage.value = `Promoted with ${deployUnits.value} units. Head to Strategies to enable it.`;
+        deployError.value = false;
+    } catch (e: any) {
+        if (e?.message?.includes("409")) {
+            deployMessage.value =
+                "Already promoted — this strategy is already in live_strategies.";
+        } else {
+            deployMessage.value = e?.message || "Promote failed";
         }
         deployError.value = true;
     } finally {
@@ -1036,35 +1208,72 @@ function drawEquityCurve() {
     );
 }
 
+function normalizePipelineConfig(c: PipelineConfig): BacktestRun {
+    const btEval = c.evaluations.find((e) => e.stage === "backtest");
+    const btStats = btEval?.stats ?? {};
+    return {
+        id: c.config_id,
+        strategy_name: `${c.instrument} ${c.strategy_type} ${c.granularity}`,
+        strategy_type: c.strategy_type,
+        instrument: c.instrument,
+        granularity: c.granularity,
+        parameters: c.parameters ?? ({} as BacktestRun["parameters"]),
+        total_return: (btStats.total_return as number) ?? 0,
+        win_rate: (btStats.win_rate as number) ?? 0,
+        sharpe_ratio: (btStats.sharpe as number) ?? 0,
+        max_drawdown: (btStats.max_drawdown as number) ?? 0,
+        num_trades: (btStats.num_trades as number) ?? 0,
+        avg_win: 0,
+        avg_loss: 0,
+        status: c.status ?? "pending",
+        reason_flagged: c.failure_reason,
+        execution_duration_ms: 0,
+        _pipeline: c,
+    };
+}
+
 async function loadResults() {
     loading.value = true;
+    selectedRun.value = null;
+    selectedTrades.value = [];
     try {
-        const stratParam =
-            strategyFilter.value !== "all"
-                ? `&strategy_type=${strategyFilter.value}`
+        if (sourceFilter.value === "pipeline") {
+            const data = await opusApi.get<{
+                configs: PipelineConfig[];
+            }>("/pipeline");
+            let filtered = data.configs;
+            if (strategyFilter.value !== "all")
+                filtered = filtered.filter(
+                    (c) => c.strategy_type === strategyFilter.value,
+                );
+            if (granularityFilter.value !== "all")
+                filtered = filtered.filter(
+                    (c) => c.granularity === granularityFilter.value,
+                );
+            if (instrumentFilter.value)
+                filtered = filtered.filter(
+                    (c) => c.instrument === instrumentFilter.value,
+                );
+            results.value = filtered.map(normalizePipelineConfig);
+        } else {
+            const stratParam =
+                strategyFilter.value !== "all"
+                    ? `&strategy_type=${strategyFilter.value}`
+                    : "";
+            const granParam =
+                granularityFilter.value !== "all"
+                    ? `&granularity=${granularityFilter.value}`
+                    : "";
+            const instParam = instrumentFilter.value
+                ? `&instrument=${instrumentFilter.value}`
                 : "";
-        const granParam =
-            granularityFilter.value !== "all"
-                ? `&granularity=${granularityFilter.value}`
-                : "";
-        const instParam = instrumentFilter.value
-            ? `&instrument=${instrumentFilter.value}`
-            : "";
-
-        const data = await api.get<{ results: BacktestRun[] }>(
-            `/backtest/results?status=${statusFilter.value}&limit=500${stratParam}${granParam}${instParam}`,
-        );
-        let filtered = data.results;
-
-        if (instrumentFilter.value) {
-            filtered = filtered.filter(
-                (r) => r.instrument === instrumentFilter.value,
+            const data = await api.get<{ results: BacktestRun[] }>(
+                `/backtest/results?status=${statusFilter.value}&limit=500${stratParam}${granParam}${instParam}`,
             );
+            results.value = data.results;
         }
-
-        results.value = filtered;
     } catch (e) {
-        console.error("Failed to load backtest results:", e);
+        console.error("Failed to load results:", e);
     } finally {
         loading.value = false;
     }
