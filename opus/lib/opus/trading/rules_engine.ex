@@ -63,7 +63,7 @@ defmodule Opus.Trading.RulesEngine do
 
   @impl true
   def init(_opts) do
-    Logger.info("[RULESENGINE] Started (#{div(@poll_interval, 60_000)}min poll interval)")
+    Logger.info("[RulesEngine] Started (#{div(@poll_interval, 60_000)}min poll interval)")
 
     Process.send_after(self(), :poll, @initial_delay)
     {:ok, %{last_run: nil, poll_count: 0}}
@@ -103,13 +103,13 @@ defmodule Opus.Trading.RulesEngine do
     case persist_and_push(decisions) do
       :ok ->
         Logger.info(
-          "[RULESENGINE] cycle #{state.poll_count + 1}: #{summarize(decisions)} across #{length(decisions)} strategies"
+          "[RulesEngine] cycle #{state.poll_count + 1}: #{summarize(decisions)} across #{length(decisions)} strategies"
         )
 
         %{state | last_run: DateTime.utc_now(), poll_count: state.poll_count + 1}
 
       {:error, reason} ->
-        Logger.error("[RULESENGINE] cycle failed: #{inspect(reason)}")
+        Logger.error("[RulesEngine] cycle failed: #{inspect(reason)}")
         state
     end
   end
