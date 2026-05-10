@@ -6,7 +6,7 @@ pub enum MRSignal {
     None,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Deserialize)]
 pub struct MeanReversionParams {
     pub ma_period: usize,     // eg: 20 Candles
     pub entry_threshold: f64, // eg: -0.005 (price is 0.5% below the MA)

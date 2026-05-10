@@ -5,6 +5,7 @@ pub mod evaluator;
 mod health;
 mod indicators;
 mod live_strategies;
+mod pipeline;
 mod positions;
 mod rules;
 mod strategies;
@@ -38,7 +39,11 @@ pub fn router() -> Router<AppState> {
             "/api/positions/{trade_id}",
             delete(positions::remove_in_memory_position),
         )
-        // Backtest
+        // Pipeline
+        .route("/api/pipeline/backtest", post(pipeline::run_pipeline_backtest))
+        .route("/api/pipeline/walk_forward", post(pipeline::run_pipeline_walk_forward))
+        .route("/api/pipeline/monte_carlo", post(pipeline::run_pipeline_monte_carlo))
+        // Backtest (grid search)
         .route("/api/backtest/run", post(backtest::run_grid_search))
         .route(
             "/api/backtest/backfill",

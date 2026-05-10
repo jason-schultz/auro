@@ -8,6 +8,7 @@ pub enum TFSignal {
     None,
 }
 
+#[derive(serde::Deserialize)]
 pub struct TrendFollowingParams {
     pub fast_period: usize,       // e.g., 10
     pub slow_period: usize,       // e.g., 50

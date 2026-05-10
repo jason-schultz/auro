@@ -3,6 +3,7 @@ pub mod grid;
 pub mod indicators;
 pub mod live;
 pub mod mean_reversion;
+pub mod pipeline;
 pub mod rules;
 pub mod stats;
 pub mod trend_following;
