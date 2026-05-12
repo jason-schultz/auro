@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Auto-formats staged files before commit so CI format checks never fail.
+# Only touches services with staged changes. Re-stages only originally staged
+# files so any unstaged local edits are left untouched.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+staged=$(git diff --cached --name-only)
+
+# ── Rust ────────────────────────────────────────────────────────────────────
+staged_rs=$(echo "$staged" | grep '^auro_be/.*\.rs$' || true)
+if [ -n "$staged_rs" ]; then
+  echo "[pre-commit] Formatting Rust..."
+  (cd "$REPO_ROOT/auro_be" && cargo fmt --all)
+  echo "$staged_rs" | while IFS= read -r f; do
+    [ -f "$REPO_ROOT/$f" ] && git add "$REPO_ROOT/$f"
+  done
+fi
+
+# ── Elixir ──────────────────────────────────────────────────────────────────
+staged_ex=$(echo "$staged" | grep -E '^opus/.*\.exs?$' || true)
+if [ -n "$staged_ex" ]; then
+  echo "[pre-commit] Formatting Elixir..."
+  (cd "$REPO_ROOT/opus" && mix format)
+  echo "$staged_ex" | while IFS= read -r f; do
+    [ -f "$REPO_ROOT/$f" ] && git add "$REPO_ROOT/$f"
+  done
+fi
+
+# Vue has no format check in CI — nothing to do here.
+
+exit 0

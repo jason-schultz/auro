@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Mirrors CI checks for each service that has commits in this push.
+# Rust: fmt --check + clippy + tests
+# Elixir: fmt --check + compile warnings-as-errors + tests
+# Vue: bun test + test:views + build (includes vue-tsc type check)
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+failed=0
+
+while IFS=' ' read -r _local_ref local_sha _remote_ref remote_sha; do
+  if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+    # New branch — compare against main
+    base=$(git merge-base main "$local_sha" 2>/dev/null || echo "$local_sha^")
+  else
+    base="$remote_sha"
+  fi
+
+  changed=$(git diff --name-only "$base" "$local_sha" 2>/dev/null || true)
+
+  check_rust=false
+  check_elixir=false
+  check_vue=false
+
+  echo "$changed" | grep -q '^auro_be/' && check_rust=true || true
+  echo "$changed" | grep -q '^opus/'    && check_elixir=true || true
+  echo "$changed" | grep -q '^auro_fe/' && check_vue=true || true
+
+  # ── Rust ──────────────────────────────────────────────────────────────────
+  if $check_rust; then
+    echo ""
+    echo "=== [pre-push] Rust checks ==="
+    if ! (cd "$REPO_ROOT/auro_be" && \
+          cargo fmt --all -- --check && \
+          cargo clippy --all-targets --all-features -- -D warnings && \
+          cargo test --all-targets --all-features); then
+      echo "[pre-push] Rust checks FAILED"
+      failed=1
+    fi
+  fi
+
+  # ── Elixir ────────────────────────────────────────────────────────────────
+  if $check_elixir; then
+    echo ""
+    echo "=== [pre-push] Elixir checks ==="
+    # mix test requires the test DB (auro_test). If it's not available the
+    # compile + format checks still run and will catch most CI failures.
+    if ! (cd "$REPO_ROOT/opus" && \
+          mix format --check-formatted && \
+          mix compile --warnings-as-errors && \
+          mix test); then
+      echo "[pre-push] Elixir checks FAILED"
+      failed=1
+    fi
+  fi
+
+  # ── Vue ───────────────────────────────────────────────────────────────────
+  if $check_vue; then
+    echo ""
+    echo "=== [pre-push] Vue checks ==="
+    # bun run build includes vue-tsc type checking
+    if ! (cd "$REPO_ROOT/auro_fe" && \
+          bun test && \
+          bun run test:views && \
+          bun run build); then
+      echo "[pre-push] Vue checks FAILED"
+      failed=1
+    fi
+  fi
+
+done
+
+if [ $failed -ne 0 ]; then
+  echo ""
+  echo "[pre-push] One or more checks failed. Push aborted."
+  exit 1
+fi
+
+exit 0
