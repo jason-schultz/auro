@@ -101,7 +101,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
 
                     if current_minute != prev_minute {
                         // M1 boundary crossed — check each granularity
-                        for granularity in &[Granularity::M15, Granularity::H1] {
+                        for granularity in &[Granularity::M15, Granularity::H1, Granularity::H4] {
                             let key = (instrument.clone(), *granularity);
 
                             let slot = time_slot(*granularity, current_hour, current_minute);
@@ -236,7 +236,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                     {
                         // Update current_mid on all buffers for this instrument
                         let mut buffers = state.live.buffers.write().await;
-                        for granularity in &[Granularity::M15, Granularity::H1] {
+                        for granularity in &[Granularity::M15, Granularity::H1, Granularity::H4] {
                             let key = (instrument.clone(), *granularity);
                             if let Some(buffer) = buffers.get_mut(&key) {
                                 buffer.current_mid = mid;
