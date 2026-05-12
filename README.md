@@ -63,6 +63,13 @@ Dashboard, live strategies, backtest browser, and trade journal views. Calls bot
 
 You'll need Rust, Elixir 1.14+, Bun, and PostgreSQL (Docker recommended).
 
+Enable the git hooks (one-time, after cloning):
+```
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook auto-formats staged Rust and Elixir files before every commit. The pre-push hook mirrors CI — it runs format checks, linting, and tests for whichever services have changed commits in the push.
+
 Create the database:
 ```
 psql -U postgres -h localhost -c "CREATE DATABASE auro;"
