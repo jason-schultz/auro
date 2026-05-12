@@ -114,10 +114,8 @@ defmodule Opus.Trading.RulesEngine do
     end
   end
 
-  @doc """
-  Read all enabled rows from `live_strategies`. Returns a list of maps with
-  the fields we need: `id`, `strategy_type`, `instrument`, `granularity`.
-  """
+  # Read all enabled rows from `live_strategies`. Returns a list of maps with
+  # the fields we need: `id`, `strategy_type`, `instrument`, `granularity`.
   defp list_enabled_strategies do
     from(s in "live_strategies",
       where: s.enabled == true,
@@ -131,11 +129,8 @@ defmodule Opus.Trading.RulesEngine do
     |> Repo.all()
   end
 
-  @doc """
-  Derive a single decision from a strategy and the current regime map.
-
-  Returns a map: `%{live_strategy_id, enabled, reason, computed_at}`.
-  """
+  # Derive a single decision from a strategy and the current regime map.
+  # Returns a map: `%{live_strategy_id, enabled, reason, computed_at}`.
   defp decide(strategy, regimes) do
     h4 = Map.get(regimes, {strategy.instrument, "H4"}, %{regime: :unknown})
     h1 = Map.get(regimes, {strategy.instrument, "H1"}, %{regime: :unknown})
@@ -152,17 +147,30 @@ defmodule Opus.Trading.RulesEngine do
     }
   end
 
-  # H4 anchors the regime since it's slowest and least noisy. M15 confirms since it's
-  # closest to execution and most actionable. H1 fills in the gaps and adds confidence.
+  # H4 anchors: slowest and least noisy. H1 must agree for full confidence.
+  # M15 can veto: if M15 contradicts both H4 and H1, downgrade to :uncertain.
+  # All granularities are always available (prefill fills M1/M15/H1/H4 for every instrument).
   defp classify_mtf(h4, h1, m15) do
-    case {h4[:regime] || :unknown, h1[:regime] || :unknown, m15[:regime] || :unknown} do
-      {:unknown, _, _} -> :unknown
-      {_, :unknown, _} -> :unknown
-      {_, _, :unknown} -> :unknown
-      {:trending, :trending, :trending} -> :trending
-      {:choppy, _, _} -> :choppy
-      {:trending, _, _} -> :uncertain
-      _ -> :uncertain
+    h4_regime = h4[:regime] || :unknown
+    h1_regime = h1[:regime] || :unknown
+    m15_regime = m15[:regime] || :unknown
+
+    case {h4_regime, h1_regime} do
+      {:unknown, _} ->
+        :unknown
+
+      {_, :unknown} ->
+        :unknown
+
+      {:trending, :trending} ->
+        if m15_regime == :choppy, do: :uncertain, else: :trending
+
+      {:choppy, :choppy} ->
+        if m15_regime == :trending, do: :uncertain, else: :choppy
+
+      _ ->
+        # H4 and H1 disagree — mixed signals, avoid both strategies
+        :uncertain
     end
   end
 
@@ -203,12 +211,9 @@ defmodule Opus.Trading.RulesEngine do
   defp format_adx(nil), do: "n/a"
   defp format_adx(adx), do: :erlang.float_to_binary(adx, decimals: 1)
 
-  @doc """
-  Persist all decisions to the rules table, then push the full map to Rust.
-
-  Returns `:ok` or `{:error, reason}`. If persistence succeeds but push fails,
-  return error — the next tick will re-push with whatever's in the DB.
-  """
+  # Persist all decisions to the rules table, then push the full map to Rust.
+  # Returns `:ok` or `{:error, reason}`. If persistence succeeds but push fails,
+  # return error — the next tick will re-push with whatever's in the DB.
   defp persist_and_push(decisions) do
     Enum.each(decisions, fn d ->
       %Rule{}

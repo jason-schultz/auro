@@ -22,12 +22,33 @@ defmodule Opus.Ollama.Client do
   @spec generate_revised_parameters(String.t(), map(), map(), map() | nil) ::
           {:ok, map(), String.t()} | {:error, term()}
   def generate_revised_parameters(strategy_type, current_params, context, parent_context \\ nil) do
-    do_generate(strategy_type, current_params, context, parent_context, _validation_error = nil, _attempt = 0)
+    do_generate(
+      strategy_type,
+      current_params,
+      context,
+      parent_context,
+      _validation_error = nil,
+      _attempt = 0
+    )
   end
 
-  defp do_generate(strategy_type, current_params, context, parent_context, validation_error, attempt)
+  defp do_generate(
+         strategy_type,
+         current_params,
+         context,
+         parent_context,
+         validation_error,
+         attempt
+       )
        when attempt < 2 do
-    prompt = build_revision_prompt(strategy_type, current_params, context, parent_context, validation_error)
+    prompt =
+      build_revision_prompt(
+        strategy_type,
+        current_params,
+        context,
+        parent_context,
+        validation_error
+      )
 
     case llm_request(prompt) do
       {:ok, raw} ->
@@ -42,8 +63,18 @@ defmodule Opus.Ollama.Client do
             e
 
           {:error, reason} ->
-            Logger.debug("[Ollama] validation failed (attempt #{attempt + 1}): #{inspect(reason)}, retrying with feedback")
-            do_generate(strategy_type, current_params, context, parent_context, reason, attempt + 1)
+            Logger.debug(
+              "[Ollama] validation failed (attempt #{attempt + 1}): #{inspect(reason)}, retrying with feedback"
+            )
+
+            do_generate(
+              strategy_type,
+              current_params,
+              context,
+              parent_context,
+              reason,
+              attempt + 1
+            )
         end
 
       {:error, reason} ->
@@ -51,13 +82,26 @@ defmodule Opus.Ollama.Client do
     end
   end
 
-  defp do_generate(_strategy_type, _current_params, _context, _parent_context, last_error, _attempt) do
+  defp do_generate(
+         _strategy_type,
+         _current_params,
+         _context,
+         _parent_context,
+         last_error,
+         _attempt
+       ) do
     {:error, last_error}
   end
 
   # --- Prompt builders ---
 
-  defp build_revision_prompt("trend_following", current_params, context, parent_context, validation_error) do
+  defp build_revision_prompt(
+         "trend_following",
+         current_params,
+         context,
+         parent_context,
+         validation_error
+       ) do
     p = normalize_keys(current_params)
     fast = Map.get(p, "fast_period", "?")
     slow = Map.get(p, "slow_period", "?")
@@ -80,7 +124,13 @@ defmodule Opus.Ollama.Client do
     """
   end
 
-  defp build_revision_prompt("mean_reversion", current_params, context, parent_context, validation_error) do
+  defp build_revision_prompt(
+         "mean_reversion",
+         current_params,
+         context,
+         parent_context,
+         validation_error
+       ) do
     p = normalize_keys(current_params)
     ma = Map.get(p, "ma_period", "?")
     entry = Map.get(p, "entry_threshold", "?")
@@ -103,8 +153,14 @@ defmodule Opus.Ollama.Client do
     """
   end
 
-  defp build_revision_prompt(strategy_type, _params, _context, _parent_context, _validation_error),
-    do: raise("unsupported strategy_type for Ollama revision: #{strategy_type}")
+  defp build_revision_prompt(
+         strategy_type,
+         _params,
+         _context,
+         _parent_context,
+         _validation_error
+       ),
+       do: raise("unsupported strategy_type for Ollama revision: #{strategy_type}")
 
   defp validation_feedback(nil), do: ""
 
@@ -137,7 +193,10 @@ defmodule Opus.Ollama.Client do
 
   defp format_progress(nil, _current_params), do: ""
 
-  defp format_progress(%{params: parent_params, stats: parent_stats, current_stats: current_stats}, current_params) do
+  defp format_progress(
+         %{params: parent_params, stats: parent_stats, current_stats: current_stats},
+         current_params
+       ) do
     parent_sharpe = Map.get(parent_stats, "sharpe") || Map.get(parent_stats, :sharpe)
     current_sharpe = Map.get(current_stats, "sharpe") || Map.get(current_stats, :sharpe)
 
@@ -149,10 +208,12 @@ defmodule Opus.Ollama.Client do
 
       current_sharpe > parent_sharpe ->
         delta = Float.round(current_sharpe - parent_sharpe, 3)
+
         "PROGRESS: Your last revision improved Sharpe from #{Float.round(parent_sharpe * 1.0, 3)} → #{Float.round(current_sharpe * 1.0, 3)} (+#{delta}). This direction is working — continue adjusting in the same direction.\nChanges made: #{changes}\n"
 
       current_sharpe < parent_sharpe ->
         delta = Float.round(parent_sharpe - current_sharpe, 3)
+
         "REGRESSION: Your last revision worsened Sharpe from #{Float.round(parent_sharpe * 1.0, 3)} → #{Float.round(current_sharpe * 1.0, 3)} (-#{delta}). These changes did not help — try a different approach.\nChanges made: #{changes}\n"
 
       true ->
@@ -229,6 +290,7 @@ defmodule Opus.Ollama.Client do
 
   defp metric_hint("num_trades", "gte", "mean_reversion", params) do
     entry = Map.get(params, "entry_threshold", "?")
+
     "too few entries — make entry_threshold less negative (currently #{entry}) so the strategy fires more often on shallower pullbacks. Do NOT make it more negative."
   end
 
@@ -236,6 +298,7 @@ defmodule Opus.Ollama.Client do
     fast = Map.get(params, "fast_period", "?")
     slow = Map.get(params, "slow_period", "?")
     gap = if is_number(fast) and is_number(slow), do: slow - fast, else: "?"
+
     "too few signals — narrow the MA gap (currently fast=#{fast}, slow=#{slow}, gap=#{gap}) by reducing slow_period or increasing fast_period to generate more crossover signals."
   end
 
@@ -244,11 +307,13 @@ defmodule Opus.Ollama.Client do
 
   defp metric_hint("max_drawdown", "lte", "trend_following", params) do
     stop = Map.get(params, "stop_loss", "?")
+
     "drawdown is too large — tighten stop_loss (currently #{stop}, make it less negative) to cut losses sooner on failed trend entries."
   end
 
   defp metric_hint("max_drawdown", "lte", "mean_reversion", params) do
     stop = Map.get(params, "stop_loss", "?")
+
     "drawdown is too large — tighten stop_loss (currently #{stop}, make it less negative) so that reversions that keep moving against you are cut quickly."
   end
 
@@ -261,12 +326,14 @@ defmodule Opus.Ollama.Client do
     fast = Map.get(params, "fast_period", "?")
     slow = Map.get(params, "slow_period", "?")
     gap = if is_number(fast) and is_number(slow), do: slow - fast, else: "?"
+
     "average profit per trade is negative — increase slow_period (currently #{slow}) or widen the fast/slow gap (currently #{gap}) to trade only on stronger trends."
   end
 
   defp metric_hint("expectancy", "gt", "mean_reversion", params) do
     entry = Map.get(params, "entry_threshold", "?")
     exit_ = Map.get(params, "exit_threshold", "?")
+
     "average profit per trade is negative — tighten entry_threshold (currently #{entry}, try more negative) or widen exit_threshold (currently #{exit_}) so profitable reversions fully complete."
   end
 

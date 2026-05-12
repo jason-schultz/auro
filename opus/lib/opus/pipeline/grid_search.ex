@@ -83,7 +83,10 @@ defmodule Opus.Pipeline.GridSearch do
   defp build_candidate("slow_period", params, failure_reason) do
     current = Map.get(params, "slow_period", 30)
     fast = Map.get(params, "fast_period", 10)
-    value = if trades_too_low?(failure_reason), do: max(current - 15, fast + 5), else: current + 20
+
+    value =
+      if trades_too_low?(failure_reason), do: max(current - 15, fast + 5), else: current + 20
+
     Map.put(params, "slow_period", round(value))
   end
 

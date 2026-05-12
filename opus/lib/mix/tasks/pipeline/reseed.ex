@@ -14,12 +14,17 @@ defmodule Mix.Tasks.Pipeline.Reseed do
 
     best_configs = fetch_best_configs()
 
-    Mix.shell().info("Found #{length(best_configs)} instrument/strategy combos with prior backtest results\n")
+    Mix.shell().info(
+      "Found #{length(best_configs)} instrument/strategy combos with prior backtest results\n"
+    )
 
     {submitted, skipped} =
       Enum.reduce(best_configs, {0, 0}, fn row, {s, sk} ->
         if already_reseeded?(row) do
-          Mix.shell().info("[reseed] skip  #{row.strategy_type} #{row.instrument} (already reseeded)")
+          Mix.shell().info(
+            "[reseed] skip  #{row.strategy_type} #{row.instrument} (already reseeded)"
+          )
+
           {s, sk + 1}
         else
           attrs = %{
@@ -35,12 +40,14 @@ defmodule Mix.Tasks.Pipeline.Reseed do
               Mix.shell().info(
                 "[reseed] #{row.strategy_type} #{row.instrument} sharpe=#{Float.round(row.sharpe, 4)} → #{config.id}"
               )
+
               {s + 1, sk}
 
             {:error, reason} ->
               Mix.shell().error(
                 "[reseed] FAILED #{row.strategy_type} #{row.instrument}: #{inspect(reason)}"
               )
+
               {s, sk}
           end
         end
@@ -81,7 +88,11 @@ defmodule Mix.Tasks.Pipeline.Reseed do
   end
 
   # Skip if a reseed config already exists for this combo (source="reseed", no parent).
-  defp already_reseeded?(%{instrument: instrument, granularity: granularity, strategy_type: strategy_type}) do
+  defp already_reseeded?(%{
+         instrument: instrument,
+         granularity: granularity,
+         strategy_type: strategy_type
+       }) do
     Repo.exists?(
       from c in StrategyConfig,
         where:

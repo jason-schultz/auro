@@ -85,7 +85,9 @@ defmodule Mix.Tasks.Pipeline.Seed do
     granularity = parse_granularity(args)
     params_for_gran = Map.fetch!(@seed_params, granularity)
 
-    Mix.shell().info("Seeding pipeline for granularity=#{granularity} (#{length(@instruments)} instruments × #{map_size(params_for_gran)} strategies)\n")
+    Mix.shell().info(
+      "Seeding pipeline for granularity=#{granularity} (#{length(@instruments)} instruments × #{map_size(params_for_gran)} strategies)\n"
+    )
 
     combinations =
       for instrument <- @instruments,
@@ -107,11 +109,17 @@ defmodule Mix.Tasks.Pipeline.Seed do
 
           case Coordinator.submit_config(attrs) do
             {:ok, config} ->
-              Mix.shell().info("[seed] #{strategy_type} #{instrument} #{granularity} → #{config.id}")
+              Mix.shell().info(
+                "[seed] #{strategy_type} #{instrument} #{granularity} → #{config.id}"
+              )
+
               {s + 1, sk}
 
             {:error, reason} ->
-              Mix.shell().error("[seed] FAILED #{strategy_type} #{instrument} #{granularity}: #{inspect(reason)}")
+              Mix.shell().error(
+                "[seed] FAILED #{strategy_type} #{instrument} #{granularity}: #{inspect(reason)}"
+              )
+
               {s, sk}
           end
         end
@@ -129,7 +137,10 @@ defmodule Mix.Tasks.Pipeline.Seed do
         gran = Enum.at(args, idx + 1)
 
         unless Map.has_key?(@seed_params, gran) do
-          Mix.shell().error("Unknown granularity: #{inspect(gran)}. Valid: #{Map.keys(@seed_params) |> Enum.join(", ")}")
+          Mix.shell().error(
+            "Unknown granularity: #{inspect(gran)}. Valid: #{Map.keys(@seed_params) |> Enum.join(", ")}"
+          )
+
           exit(:shutdown)
         end
 

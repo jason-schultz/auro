@@ -54,7 +54,12 @@ defmodule Opus.Pipeline.OllamaIterationWorker do
     parent_context = build_parent_context(config, stats)
     context = %{failure_reason: failure_reason, stats: stats}
 
-    case OllamaClient.generate_revised_parameters(config.strategy_type, config.parameters, context, parent_context) do
+    case OllamaClient.generate_revised_parameters(
+           config.strategy_type,
+           config.parameters,
+           context,
+           parent_context
+         ) do
       {:ok, revised_params, prompt} ->
         opts = %{parameters: revised_params, depth: depth + 1, generation_prompt: prompt}
 

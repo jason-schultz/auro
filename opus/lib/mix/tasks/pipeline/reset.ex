@@ -21,7 +21,9 @@ defmodule Mix.Tasks.Pipeline.Reset do
     best = fetch_best_configs_with_trades()
 
     if Enum.empty?(best) do
-      Mix.shell().info("  No qualifying configs found — will fall back to pipeline.seed after reset.\n")
+      Mix.shell().info(
+        "  No qualifying configs found — will fall back to pipeline.seed after reset.\n"
+      )
     else
       Mix.shell().info("  Found #{length(best)} configs to reseed from.\n")
     end
@@ -77,6 +79,7 @@ defmodule Mix.Tasks.Pipeline.Reset do
     Repo.transaction(fn ->
       Repo.query!("TRUNCATE strategy_evaluations")
       Repo.query!("TRUNCATE strategy_configs")
+
       Repo.query!(
         "DELETE FROM oban_jobs WHERE queue IN ('pipeline', 'ollama') AND state != 'completed'"
       )
@@ -100,12 +103,14 @@ defmodule Mix.Tasks.Pipeline.Reset do
               "  [seed] #{row.strategy_type} #{row.instrument} " <>
                 "sharpe=#{Float.round(row.sharpe, 4)} trades=#{round(row.num_trades)} → #{config.id}"
             )
+
             {s + 1, f}
 
           {:error, reason} ->
             Mix.shell().error(
               "  [FAIL] #{row.strategy_type} #{row.instrument}: #{inspect(reason)}"
             )
+
             {s, f + 1}
         end
       end)
