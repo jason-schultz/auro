@@ -215,6 +215,20 @@ impl Granularity {
             Granularity::D => "D",
         }
     }
+
+    /// How many candles to hold in the in-memory buffer for this granularity.
+    /// Sized so that each buffer covers roughly the same useful lookback window
+    /// and always has enough candles for the longest indicator (ADX-14, MA-60).
+    pub fn buffer_capacity(&self) -> usize {
+        match self {
+            Granularity::M1 => 500,  // ~8 hours
+            Granularity::M5 => 500,  // ~42 hours
+            Granularity::M15 => 400, // ~4 days
+            Granularity::H1 => 200,  // ~8 days
+            Granularity::H4 => 100,  // ~17 days
+            Granularity::D => 60,    // ~3 months
+        }
+    }
 }
 
 impl Display for Granularity {

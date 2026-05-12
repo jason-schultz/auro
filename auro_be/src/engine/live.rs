@@ -101,7 +101,13 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
 
                     if current_minute != prev_minute {
                         // M1 boundary crossed — check each granularity
-                        for granularity in &[Granularity::M15, Granularity::H1, Granularity::H4] {
+                        for granularity in &[
+                            Granularity::M5,
+                            Granularity::M15,
+                            Granularity::H1,
+                            Granularity::H4,
+                            Granularity::D,
+                        ] {
                             let key = (instrument.clone(), *granularity);
 
                             let slot = time_slot(*granularity, current_hour, current_minute);
@@ -123,9 +129,9 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                             // Candle boundary crossed for this granularity
                             let buffer_snapshot = {
                                 let mut buffers = state.live.buffers.write().await;
-                                let buffer = buffers
-                                    .entry(key.clone())
-                                    .or_insert_with(|| CandleBuffer::new(200));
+                                let buffer = buffers.entry(key.clone()).or_insert_with(|| {
+                                    CandleBuffer::new(granularity.buffer_capacity())
+                                });
                                 buffer.push(closed_candle.clone());
                                 buffer.current_mid = mid;
 
@@ -236,7 +242,13 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                     {
                         // Update current_mid on all buffers for this instrument
                         let mut buffers = state.live.buffers.write().await;
-                        for granularity in &[Granularity::M15, Granularity::H1, Granularity::H4] {
+                        for granularity in &[
+                            Granularity::M5,
+                            Granularity::M15,
+                            Granularity::H1,
+                            Granularity::H4,
+                            Granularity::D,
+                        ] {
                             let key = (instrument.clone(), *granularity);
                             if let Some(buffer) = buffers.get_mut(&key) {
                                 buffer.current_mid = mid;

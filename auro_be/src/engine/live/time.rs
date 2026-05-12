@@ -24,6 +24,15 @@ pub(crate) fn compute_slot_time(
     tick_time: DateTime<Utc>,
 ) -> DateTime<Utc> {
     match granularity {
+        Granularity::D => tick_time
+            .with_hour(0)
+            .unwrap()
+            .with_minute(0)
+            .unwrap()
+            .with_second(0)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap(),
         Granularity::H1 => tick_time
             .with_minute(0)
             .unwrap()
@@ -31,6 +40,16 @@ pub(crate) fn compute_slot_time(
             .unwrap()
             .with_nanosecond(0)
             .unwrap(),
+        Granularity::M5 => {
+            let m = (tick_time.minute() / 5) * 5;
+            tick_time
+                .with_minute(m)
+                .unwrap()
+                .with_second(0)
+                .unwrap()
+                .with_nanosecond(0)
+                .unwrap()
+        }
         Granularity::M15 => {
             let m = (tick_time.minute() / 15) * 15;
             tick_time
@@ -53,8 +72,15 @@ pub(crate) fn compute_slot_time(
                 .with_nanosecond(0)
                 .unwrap()
         }
-        Granularity::D | Granularity::M5 | Granularity::M1 => {
-            unimplemented!("compute_slot_time not implemented for {:?}", granularity)
+        Granularity::M1 => {
+            let m = tick_time.minute();
+            tick_time
+                .with_minute(m)
+                .unwrap()
+                .with_second(0)
+                .unwrap()
+                .with_nanosecond(0)
+                .unwrap()
         }
     }
 }

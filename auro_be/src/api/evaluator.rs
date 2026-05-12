@@ -184,9 +184,12 @@ async fn run_evaluation(
         (Some(data), target) => {
             let diff = target - data;
             let unit_seconds = match granularity {
+                Granularity::D => 86400,
+                Granularity::H4 => 14400,
                 Granularity::H1 => 3600,
                 Granularity::M15 => 900,
-                _ => 60,
+                Granularity::M5 => 300,
+                Granularity::M1 => 60,
             };
             (diff.num_seconds() / unit_seconds).max(0) as u32
         }

@@ -64,9 +64,11 @@ async fn prefill_buffers(
     let mut count = 0;
     const MTF_GRANULARITIES: &[Granularity] = &[
         Granularity::M1,
+        Granularity::M5,
         Granularity::M15,
         Granularity::H1,
         Granularity::H4,
+        Granularity::D,
     ];
 
     for instrument in &instruments {
@@ -86,22 +88,18 @@ async fn prefill_buffers(
             .await?;
 
             if rows.is_empty() {
-                match granularity {
-                    Granularity::M1 => tracing::warn!(
-                        "No M1 candle data found for {}, live evaluation may be inaccurate until enough candles accumulate",
-                        instrument
-                    ),
-                    _ => tracing::warn!(
-                        "No {} candle data found for {}, skipping pre-fill",
-                        granularity,
-                        instrument
-                    ),
-                }
+                tracing::warn!(
+                    "No {} candle data found for {}, skipping pre-fill",
+                    granularity,
+                    instrument
+                );
                 continue;
             }
 
             let key = (instrument.clone(), *granularity);
-            let buffer = buffers.entry(key).or_insert_with(|| CandleBuffer::new(200));
+            let buffer = buffers
+                .entry(key)
+                .or_insert_with(|| CandleBuffer::new(granularity.buffer_capacity()));
 
             // Rows come in DESC order (newest first), reverse to get chronological order
             for (time, open, high, low, close, volume) in rows.iter().rev() {
