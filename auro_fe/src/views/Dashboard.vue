@@ -1,16 +1,17 @@
 <template>
     <main class="p-6">
+        <ViewHeader title="Dashboard" />
+
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <!-- Account Summary -->
             <div class="lg:col-span-1 fr-card p-4">
                 <div class="fr-section-label mb-4">Account Summary</div>
 
-                <div
+                <StateMessage
                     v-if="!account"
-                    class="text-sm text-muted-foreground py-4 text-center"
-                >
-                    Loading account...
-                </div>
+                    message="Loading account..."
+                    :compact="true"
+                />
 
                 <div v-else class="space-y-3">
                     <div class="text-center mb-4">
@@ -26,89 +27,24 @@
                         </div>
                     </div>
 
-                    <div class="grid grid-cols-2 gap-3">
-                        <div class="bg-background rounded-md p-3">
-                            <div class="text-[10px] text-muted-foreground mb-1">
-                                Unrealized P&L
-                            </div>
-                            <div
-                                class="text-sm font-mono font-medium"
-                                :class="
-                                    parseFloat(account.unrealized_pl) >= 0
-                                        ? 'text-emerald-400'
-                                        : 'text-red-400'
-                                "
-                            >
-                                {{ formatCurrency(account.unrealized_pl) }}
-                            </div>
-                        </div>
-                        <div class="bg-background rounded-md p-3">
-                            <div class="text-[10px] text-muted-foreground mb-1">
-                                Realized P&L
-                            </div>
-                            <div
-                                class="text-sm font-mono font-medium"
-                                :class="
-                                    parseFloat(account.pl) >= 0
-                                        ? 'text-emerald-400'
-                                        : 'text-red-400'
-                                "
-                            >
-                                {{ formatCurrency(account.pl) }}
-                            </div>
-                        </div>
-                        <div class="bg-background rounded-md p-3">
-                            <div class="text-[10px] text-muted-foreground mb-1">
-                                Margin Used
-                            </div>
-                            <div
-                                class="text-sm font-mono font-medium text-foreground"
-                            >
-                                {{ formatCurrency(account.margin_used) }}
-                            </div>
-                        </div>
-                        <div class="bg-background rounded-md p-3">
-                            <div class="text-[10px] text-muted-foreground mb-1">
-                                Margin Available
-                            </div>
-                            <div
-                                class="text-sm font-mono font-medium text-foreground"
-                            >
-                                {{ formatCurrency(account.margin_available) }}
-                            </div>
-                        </div>
-                    </div>
+                    <StatGrid
+                        :items="accountStatCards"
+                        columns-class="grid grid-cols-2 gap-3"
+                    />
                 </div>
             </div>
 
             <!-- Open Positions -->
-            <div class="lg:col-span-2 fr-card p-4">
-                <div class="flex items-center justify-between mb-4">
-                    <div class="fr-section-label mb-0 pb-0 border-b-0">
-                        Open Positions
-                    </div>
-                    <span class="text-[10px] text-muted-foreground font-mono">
-                        {{ positions.length }} open
-                    </span>
-                </div>
-
-                <div
-                    v-if="positionsLoading"
-                    class="text-sm text-muted-foreground py-8 text-center"
+            <div class="lg:col-span-2">
+                <DataTableScaffold
+                    :loading="positionsLoading"
+                    :empty="positions.length === 0"
+                    loading-message="Loading positions..."
+                    empty-message="No open positions"
+                    card-class="p-4"
+                    head-row-class="text-muted-foreground"
                 >
-                    Loading positions...
-                </div>
-
-                <div
-                    v-else-if="positions.length === 0"
-                    class="text-sm text-muted-foreground py-8 text-center"
-                >
-                    No open positions
-                </div>
-
-                <table v-else class="w-full text-sm">
-                    <thead>
-                        <tr class="text-muted-foreground">
+                    <template #head>
                             <th
                                 class="text-left pb-2 text-[10px] font-medium uppercase tracking-wider"
                             >
@@ -154,9 +90,8 @@
                             >
                                 P&L
                             </th>
-                        </tr>
-                    </thead>
-                    <tbody>
+                    </template>
+                    <template #body>
                         <tr
                             v-for="pos in positions"
                             :key="pos.id"
@@ -166,15 +101,10 @@
                                 {{ pos.instrument.replace("_", "/") }}
                             </td>
                             <td class="py-2 text-right">
-                                <span
-                                    class="text-[10px] px-1.5 py-0.5 rounded font-medium"
-                                    :class="
-                                        pos.side === 'Long'
-                                            ? 'bg-emerald-500/10 text-emerald-400'
-                                            : 'bg-red-500/10 text-red-400'
-                                    "
-                                    >{{ pos.side }}</span
-                                >
+                                <BadgePill
+                                    :label="pos.side"
+                                    :extra-class="pos.side === 'Long' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'"
+                                />
                             </td>
                             <td
                                 class="py-2 text-right font-mono text-foreground"
@@ -192,11 +122,10 @@
                                 ${{ pos.current }}
                             </td>
                             <td class="py-2 text-center">
-                                <span
-                                    class="text-[10px] px-1.5 py-0.5 rounded font-medium"
-                                    :class="stateColor(pos.stopLossState)"
-                                    >{{ pos.stopLossState }}</span
-                                >
+                                <BadgePill
+                                    :label="pos.stopLossState"
+                                    :extra-class="stateColor(pos.stopLossState)"
+                                />
                             </td>
                             <td
                                 class="py-2 text-right font-mono text-muted-foreground"
@@ -238,36 +167,30 @@
                                 }}{{ pos.pl.toFixed(2) }}
                             </td>
                         </tr>
-                    </tbody>
-                </table>
+                    </template>
+                </DataTableScaffold>
             </div>
 
             <!-- Algo Activity -->
-            <div class="lg:col-span-2 fr-card p-4">
-                <div class="flex items-center justify-between mb-4">
-                    <div class="fr-section-label mb-0 pb-0 border-b-0">
-                        Algo Activity
+            <div class="lg:col-span-2 min-h-0">
+                <DataCard
+                    :loading="algoLoading"
+                    :empty="algoActivity.length === 0"
+                    loading-message="Loading activity..."
+                    empty-message="No algo activity yet — waiting for signals"
+                    card-class="p-4 h-full"
+                    content-class=""
+                >
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="fr-section-label mb-0 pb-0 border-b-0">
+                            Algo Activity
+                        </div>
+                        <span class="text-[10px] text-muted-foreground font-mono">
+                            Last {{ algoActivity.length }} trades
+                        </span>
                     </div>
-                    <span class="text-[10px] text-muted-foreground font-mono">
-                        Last {{ algoActivity.length }} trades
-                    </span>
-                </div>
 
-                <div
-                    v-if="algoLoading"
-                    class="text-sm text-muted-foreground py-8 text-center"
-                >
-                    Loading activity...
-                </div>
-
-                <div
-                    v-else-if="algoActivity.length === 0"
-                    class="text-sm text-muted-foreground py-8 text-center"
-                >
-                    No algo activity yet — waiting for signals
-                </div>
-
-                <div v-else class="space-y-2">
+                    <div class="space-y-2">
                     <router-link
                         v-for="entry in algoActivity"
                         :key="entry.id"
@@ -277,11 +200,10 @@
                         <!-- Top row: action badge, instrument, strategy, units, time -->
                         <div class="flex items-center justify-between mb-2">
                             <div class="flex items-center gap-2 flex-wrap">
-                                <span
-                                    class="text-[10px] px-1.5 py-0.5 rounded font-medium"
-                                    :class="actionColor(entry.action)"
-                                    >{{ entry.action }}</span
-                                >
+                                <BadgePill
+                                    :label="entry.action"
+                                    :extra-class="actionColor(entry.action)"
+                                />
                                 <span class="text-sm text-foreground">
                                     {{ entry.instrument.replace("_", "/") }}
                                 </span>
@@ -377,7 +299,8 @@
                             </template>
                         </div>
                     </router-link>
-                </div>
+                    </div>
+                </DataCard>
             </div>
 
             <!-- Manual Opportunities -->
@@ -402,407 +325,53 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, watch } from "vue";
-import { useMarketStore } from "@/stores/market";
-import { api } from "@/services/api";
+import { computed } from "vue";
+import { useDashboard } from "@/composables/useDashboard";
+import BadgePill from "@/components/ui/BadgePill.vue";
+import DataCard from "@/components/ui/DataCard.vue";
+import DataTableScaffold from "@/components/ui/DataTableScaffold.vue";
+import StatGrid from "@/components/ui/StatGrid.vue";
+import StateMessage from "@/components/ui/StateMessage.vue";
+import ViewHeader from "@/components/ui/ViewHeader.vue";
 
-interface AccountData {
-    id: string;
-    currency: string;
-    balance: string;
-    unrealized_pl: string;
-    pl: string;
-    open_trade_count: number;
-    open_position_count: number;
-    margin_used: string;
-    margin_available: string;
-}
+const {
+    account,
+    positions,
+    positionsLoading,
+    algoActivity,
+    algoLoading,
+    formatCurrency,
+    actionColor,
+    stateColor,
+    formatPrice,
+    reasonShort,
+    exitReasonColor,
+} = useDashboard();
 
-interface StopDisplay {
-    priceLabel: string;
-    distanceLabel: string;
-    distanceClass: string;
-}
+const accountStatCards = computed(() => {
+    if (!account.value) return [];
 
-interface TargetDisplay {
-    price: string;
-    distanceLabel: string;
-    distanceClass: string;
-}
-
-interface Position {
-    id: string;
-    instrument: string;
-    side: string;
-    units: string;
-    entry: string;
-    current: string;
-    pl: number;
-    stopLossState: string;
-    stopDisplay: StopDisplay | null;
-    targetDisplay: TargetDisplay | null;
-}
-
-interface AlgoEntry {
-    id: string;
-    instrument: string;
-    direction: string;
-    units: string;
-    action: string;
-    entryReason: string;
-    exitReason: string;
-    entryPrice: number | null;
-    exitPrice: number | null;
-    duration: string | null;
-    status: string;
-    time: string;
-    pnl: number | null;
-    strategyLabel: string | null;
-}
-
-const marketStore = useMarketStore();
-const connected = computed(() => marketStore.connected);
-
-const account = ref<AccountData | null>(null);
-const positions = ref<Position[]>([]);
-const positionsLoading = ref(true);
-const algoActivity = ref<AlgoEntry[]>([]);
-const algoLoading = ref(true);
-const lastKnownPrices = ref<Record<string, number>>({});
-
-let refreshInterval: ReturnType<typeof setInterval> | null = null;
-
-watch(
-    () => marketStore.prices,
-    (prices) => {
-        for (const [instrument, price] of Object.entries(prices)) {
-            if (price?.ask) {
-                lastKnownPrices.value[instrument] = parseFloat(price.ask);
-            }
-        }
-    },
-    { deep: true },
-);
-
-function getLastKnownPrice(instrument: string): number | null {
-    return lastKnownPrices.value[instrument] ?? null;
-}
-
-function formatCurrency(value: string): string {
-    const num = parseFloat(value);
-    return new Intl.NumberFormat("en-CA", {
-        style: "currency",
-        currency: "CAD",
-        minimumFractionDigits: 2,
-    }).format(num);
-}
-
-function actionColor(action: string): string {
-    if (action.startsWith("Opened") && action.includes("Long")) {
-        return "bg-emerald-500/10 text-emerald-400";
-    }
-    if (action.startsWith("Opened") && action.includes("Short")) {
-        return "bg-red-500/10 text-red-400";
-    }
-    if (action.startsWith("Closed")) {
-        return "bg-muted text-muted-foreground";
-    }
-    return "bg-secondary text-muted-foreground";
-}
-
-function stateColor(state: string): string {
-    switch (state) {
-        case "Trailing":
-            return "bg-emerald-500/10 text-emerald-400";
-        case "Breakeven":
-            return "bg-blue-500/10 text-blue-400";
-        case "Initial":
-            return "bg-muted text-muted-foreground";
-        default:
-            return "bg-secondary text-muted-foreground";
-    }
-}
-
-function determineStopLossState(trade: any): string {
-    if (trade.trailingStopLossOrder) return "Trailing";
-    if (trade.stopLossOrder) {
-        const slPrice = parseFloat(trade.stopLossOrder.price);
-        const entry = parseFloat(trade.price);
-        if (entry > 0 && Math.abs(slPrice - entry) / entry < 0.0001) {
-            return "Breakeven";
-        }
-        return "Initial";
-    }
-    return "None";
-}
-
-function buildStopDisplay(
-    trade: any,
-    currentPrice: number | null,
-    isLong: boolean,
-): StopDisplay | null {
-    if (!currentPrice) return null;
-
-    if (trade.trailingStopLossOrder) {
-        const distance = parseFloat(trade.trailingStopLossOrder.distance);
-        const stopPrice = isLong
-            ? currentPrice - distance
-            : currentPrice + distance;
-        const distancePct = (distance / currentPrice) * 100;
-        return {
-            priceLabel: `$${stopPrice.toFixed(getDecimals(trade.instrument))}`,
-            distanceLabel: `${distancePct.toFixed(2)}% trail`,
-            distanceClass: "text-emerald-400",
-        };
-    }
-
-    if (trade.stopLossOrder) {
-        const slPrice = parseFloat(trade.stopLossOrder.price);
-        const distancePct = ((slPrice - currentPrice) / currentPrice) * 100;
-        const isFavorable = isLong ? slPrice > 0 : slPrice > 0; // SL exists
-        const distanceClass = "text-muted-foreground";
-        const sign = distancePct >= 0 ? "+" : "";
-        return {
-            priceLabel: `$${slPrice.toFixed(getDecimals(trade.instrument))}`,
-            distanceLabel: `${sign}${distancePct.toFixed(2)}%`,
-            distanceClass,
-        };
-    }
-
-    return null;
-}
-
-function buildTargetDisplay(
-    trade: any,
-    currentPrice: number | null,
-): TargetDisplay | null {
-    if (!trade.takeProfitOrder || !currentPrice) return null;
-    const tpPrice = parseFloat(trade.takeProfitOrder.price);
-    const distancePct = ((tpPrice - currentPrice) / currentPrice) * 100;
-    const sign = distancePct >= 0 ? "+" : "";
-    return {
-        price: tpPrice.toFixed(getDecimals(trade.instrument)),
-        distanceLabel: `${sign}${distancePct.toFixed(2)}%`,
-        distanceClass: "text-muted-foreground",
-    };
-}
-
-function getDecimals(instrument: string): number {
-    if (instrument.endsWith("_JPY")) return 3;
-    if (
-        [
-            "SPX500_USD",
-            "NAS100_USD",
-            "US30_USD",
-            "UK100_GBP",
-            "DE30_EUR",
-            "EU50_EUR",
-            "JP225_USD",
-            "AU200_AUD",
-        ].includes(instrument)
-    )
-        return 1;
-    if (["XAU_USD", "XPT_USD", "XPD_USD"].includes(instrument)) return 2;
-    if (instrument.startsWith("XAG_")) return 4;
-    if (["BCO_USD", "WTICO_USD"].includes(instrument)) return 3;
-    if (instrument === "NATGAS_USD" || instrument === "XCU_USD") return 4;
-    return 5;
-}
-
-function formatStrategyLabel(
-    strategyType: string | null | undefined,
-    params: Record<string, any> | null | undefined,
-    granularity: string | null | undefined,
-): string | null {
-    if (!strategyType) return null;
-    const gran = granularity ? ` ${granularity}` : "";
-
-    if (strategyType === "trend_following" && params) {
-        const fast = params.fast_period;
-        const slow = params.slow_period;
-        if (fast != null && slow != null) {
-            return `TF F${fast}/S${slow}${gran}`;
-        }
-        return `TF${gran}`;
-    }
-
-    if (strategyType === "mean_reversion" && params) {
-        const ma = params.ma_period;
-        const entry = params.entry_threshold;
-        if (ma != null && entry != null) {
-            const entryPct = (entry * 100).toFixed(1);
-            return `MR MA${ma} ${entryPct}%${gran}`;
-        }
-        return `MR${gran}`;
-    }
-
-    return `${strategyType}${gran}`;
-}
-
-function formatPrice(price: number | null, instrument: string): string {
-    if (price == null || price <= 0) return "—";
-    return price.toFixed(getDecimals(instrument));
-}
-
-function reasonShort(reason: string): string {
-    if (!reason) return "";
-    const colonIdx = reason.indexOf(":");
-    return colonIdx === -1 ? reason : reason.substring(0, colonIdx).trim();
-}
-
-function exitReasonColor(reason: string): string {
-    switch (reasonShort(reason)) {
-        case "TakeProfit":
-        case "TrailingStop":
-            return "text-emerald-400";
-        case "StopLoss":
-            return "text-red-400";
-        case "TrendReversal":
-            return "text-amber-400";
-        case "ClosedByBroker":
-            return "text-muted-foreground";
-        default:
-            return "text-foreground";
-    }
-}
-
-function formatDuration(
-    startStr: string | null | undefined,
-    endStr: string | null | undefined,
-): string | null {
-    if (!startStr || !endStr) return null;
-    const start = new Date(startStr).getTime();
-    const end = new Date(endStr).getTime();
-    if (isNaN(start) || isNaN(end) || end < start) return null;
-
-    const diffMin = Math.floor((end - start) / 60000);
-    if (diffMin < 60) return `${diffMin}m`;
-
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h`;
-
-    const diffDays = Math.floor(diffHr / 24);
-    const remainingHr = diffHr - diffDays * 24;
-    return remainingHr === 0 ? `${diffDays}d` : `${diffDays}d ${remainingHr}h`;
-}
-
-function timeAgo(dateStr: string): string {
-    const now = new Date();
-    const then = new Date(dateStr);
-    const diffMs = now.getTime() - then.getTime();
-    const diffMin = Math.floor(diffMs / 60000);
-
-    if (diffMin < 1) return "just now";
-    if (diffMin < 60) return `${diffMin}m ago`;
-
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h ago`;
-
-    const diffDays = Math.floor(diffHr / 24);
-    return `${diffDays}d ago`;
-}
-
-async function loadAccount() {
-    try {
-        account.value = await api.get<AccountData>("/account");
-    } catch (e) {
-        console.error("Failed to load account:", e);
-    }
-}
-
-async function loadPositions() {
-    try {
-        const data = await api.get<{ trades: any[] }>("/open-trades");
-        positions.value = (data.trades || []).map((t: any) => {
-            const livePrice = marketStore.prices[t.instrument];
-            const currentPrice = livePrice
-                ? parseFloat(livePrice.ask)
-                : getLastKnownPrice(t.instrument);
-
-            const entryPrice = parseFloat(t.price || "0");
-            const units = parseFloat(t.currentUnits || t.initialUnits || "0");
-            const pl = parseFloat(t.unrealizedPL || "0");
-            const isLong = units > 0;
-
-            return {
-                id: t.id,
-                instrument: t.instrument,
-                side: isLong ? "Long" : "Short",
-                units: Math.abs(units).toString(),
-                entry: entryPrice ? entryPrice.toString() : "—",
-                current: currentPrice ? currentPrice.toFixed(getDecimals(t.instrument)) : "-",
-                pl: pl,
-                stopLossState: determineStopLossState(t),
-                stopDisplay: buildStopDisplay(t, currentPrice, isLong),
-                targetDisplay: buildTargetDisplay(t, currentPrice),
-            };
-        });
-    } catch (e) {
-        console.error("Failed to load positions:", e);
-    } finally {
-        positionsLoading.value = false;
-    }
-}
-
-async function loadAlgoActivity() {
-    try {
-        const data = await api.get<{ trades: any[] }>("/live/trades?limit=20");
-        algoActivity.value = (data.trades || []).map((t: any) => {
-            const isClosed = t.status === "closed";
-            const action = isClosed
-                ? `Closed ${t.direction}`
-                : `Opened ${t.direction}`;
-
-            const entryPrice =
-                t.entry_price != null ? parseFloat(t.entry_price) : null;
-            const rawExitPrice =
-                t.exit_price != null ? parseFloat(t.exit_price) : null;
-            // Filter out the bogus zero-exit rows that pre-fix reconciler wrote
-            const exitPrice =
-                rawExitPrice != null && rawExitPrice > 0 ? rawExitPrice : null;
-
-            return {
-                id: t.id,
-                instrument: t.instrument,
-                direction: t.direction,
-                units: t.units,
-                action,
-                entryReason: t.entry_reason || "",
-                exitReason: t.exit_reason || "",
-                entryPrice,
-                exitPrice,
-                duration: isClosed
-                    ? formatDuration(t.entry_time, t.exit_time)
-                    : null,
-                status: t.status,
-                time: timeAgo(
-                    isClosed && t.exit_time ? t.exit_time : t.entry_time,
-                ),
-                pnl: t.pnl_percent != null ? t.pnl_percent : null,
-                strategyLabel: formatStrategyLabel(
-                    t.strategy_type,
-                    t.strategy_parameters,
-                    t.strategy_granularity,
-                ),
-            };
-        });
-    } catch (e) {
-        console.error("Failed to load algo activity:", e);
-    } finally {
-        algoLoading.value = false;
-    }
-}
-
-async function refreshAll() {
-    await Promise.all([loadAccount(), loadPositions(), loadAlgoActivity()]);
-}
-
-onMounted(() => {
-    refreshAll();
-    refreshInterval = setInterval(refreshAll, 15000);
-});
-
-onUnmounted(() => {
-    if (refreshInterval) clearInterval(refreshInterval);
+    return [
+        {
+            label: "Unrealized P&L",
+            value: formatCurrency(account.value.unrealized_pl),
+            valueClass: Number(account.value.unrealized_pl) >= 0 ? "text-emerald-400" : "text-red-400",
+        },
+        {
+            label: "Realized P&L",
+            value: formatCurrency(account.value.pl),
+            valueClass: Number(account.value.pl) >= 0 ? "text-emerald-400" : "text-red-400",
+        },
+        {
+            label: "Margin Used",
+            value: formatCurrency(account.value.margin_used),
+            valueClass: "text-foreground",
+        },
+        {
+            label: "Margin Available",
+            value: formatCurrency(account.value.margin_available),
+            valueClass: "text-foreground",
+        },
+    ];
 });
 </script>

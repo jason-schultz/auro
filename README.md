@@ -84,6 +84,14 @@ Run a sweep across instruments from the command line:
 
 Or call the API directly — see `auro_be/src/api/backtest.rs`. Results show up under `/backtests` in the UI.
 
+## Frontend Table Contract
+
+Shared datatable behavior for Backtests, Pipeline, and Strategies is governed by a freeze policy:
+
+- `auro_fe/docs/datatable-freeze.md`
+
+Any table behavior updates should follow that policy and keep the helper + mount + e2e tests aligned.
+
 ## .env
 
 Rust backend (`auro_be/.env`):
