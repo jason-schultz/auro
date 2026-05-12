@@ -1,7 +1,14 @@
 defmodule Opus.Pipeline.MonteCarloWorker do
   @moduledoc """
-  Executes the monte-carlo stage. On pass, logs the result for manual review.
-  On failure, enqueues OllamaIterationWorker.
+  Executes the monte-carlo stage.
+
+  Non-evo configs (no lineage_id in args):
+    - pass → promote to live_strategies
+    - fail → enqueue OllamaIterationWorker
+
+  Evo configs (lineage_id present):
+    - pass → compute + save score, insert GenerationSpawnerWorker
+    - fail → insert GenerationSpawnerWorker (counts this sibling as terminal with score=0)
   """
 
   use Oban.Worker, queue: :pipeline, max_attempts: 3
@@ -9,12 +16,20 @@ defmodule Opus.Pipeline.MonteCarloWorker do
   require Logger
 
   alias Opus.Auro.Client
-  alias Opus.Pipeline.{Coordinator, OllamaIterationWorker}
+  alias Opus.Pipeline.{Coordinator, GenerationSpawnerWorker, OllamaIterationWorker}
 
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok | {:error, term()}
-  def perform(%Oban.Job{args: %{"config_id" => config_id, "depth" => depth}}) do
-    Logger.info("[Pipeline] Running monte_carlo for config #{config_id} (depth=#{depth})")
+  def perform(%Oban.Job{
+        args: %{"config_id" => config_id, "depth" => depth} = args
+      }) do
+    lineage_id = Map.get(args, "lineage_id")
+    evo_generation = Map.get(args, "evo_generation")
+    evo? = not is_nil(lineage_id)
+
+    Logger.info(
+      "[Pipeline] Running monte_carlo for config #{config_id} (depth=#{depth}#{if evo?, do: ", evo gen=#{evo_generation}", else: ""})"
+    )
 
     case Client.run_pipeline_monte_carlo(config_id) do
       {:ok, %{"status" => "passed"} = result} ->
@@ -25,26 +40,46 @@ defmodule Opus.Pipeline.MonteCarloWorker do
             "p95_drawdown=#{get_in(result, ["stats", "p95_drawdown"])}"
         )
 
-        Coordinator.promote_to_live(config_id)
+        if evo? do
+          GenerationSpawnerWorker.compute_and_save_score(config_id)
+
+          {:ok, _job} =
+            Oban.insert(
+              GenerationSpawnerWorker.new(%{
+                lineage_id: lineage_id,
+                evo_generation: evo_generation
+              })
+            )
+        else
+          Coordinator.promote_to_live(config_id)
+        end
 
         :ok
 
       {:ok, %{"status" => "failed", "failure_reason" => reason} = result} ->
         stats = Map.get(result, "stats", %{})
 
-        Logger.info(
-          "[Pipeline] Monte Carlo failed for config #{config_id}: #{reason} — enqueuing Ollama iteration"
-        )
+        Logger.info("[Pipeline] Monte Carlo failed for config #{config_id}: #{reason}")
 
-        {:ok, _job} =
-          Oban.insert(
-            OllamaIterationWorker.new(%{
-              config_id: config_id,
-              depth: depth,
-              failure_reason: reason,
-              stats: stats
-            })
-          )
+        if evo? do
+          {:ok, _job} =
+            Oban.insert(
+              GenerationSpawnerWorker.new(%{
+                lineage_id: lineage_id,
+                evo_generation: evo_generation
+              })
+            )
+        else
+          {:ok, _job} =
+            Oban.insert(
+              OllamaIterationWorker.new(%{
+                config_id: config_id,
+                depth: depth,
+                failure_reason: reason,
+                stats: stats
+              })
+            )
+        end
 
         :ok
 

@@ -13,7 +13,14 @@ defmodule Opus.Pipeline.Coordinator do
   require Logger
 
   alias Ecto.Multi
-  alias Opus.Pipeline.{BacktestWorker, StrategyConfig, StrategyEvaluation}
+
+  alias Opus.Pipeline.{
+    BacktestWorker,
+    GenerationSpawnerWorker,
+    StrategyConfig,
+    StrategyEvaluation
+  }
+
   alias Opus.Repo
 
   @type pipeline_status_row :: %{
@@ -130,6 +137,148 @@ defmodule Opus.Pipeline.Coordinator do
   end
 
   @doc """
+  Start an evolutionary optimization lineage from a seed config.
+
+  Creates a generation-0 seed config, sets its lineage_id to its own ID,
+  and kicks off the pipeline. A GenerationSpawnerWorker is also inserted
+  immediately — it will snooze until the seed is terminal, then decide
+  whether to spawn generation 1.
+
+  `attrs` must include: instrument, granularity, strategy_type, parameters.
+
+  Example from iex:
+      Opus.Pipeline.Coordinator.submit_evo_seed(%{
+        instrument: "EUR_USD",
+        granularity: "H1",
+        strategy_type: "mean_reversion",
+        parameters: %{"ma_period" => 20, "entry_threshold" => -0.003,
+                      "exit_threshold" => 0.002, "stop_loss" => -0.005,
+                      "regime_filter" => true}
+      })
+  """
+  @spec submit_evo_seed(map()) :: {:ok, StrategyConfig.t()} | {:error, term()}
+  def submit_evo_seed(attrs) do
+    changeset =
+      StrategyConfig.changeset(
+        %StrategyConfig{},
+        Map.merge(attrs, %{source: "manual", depth: 0, evo_generation: 0})
+      )
+
+    multi =
+      Multi.new()
+      |> Multi.insert(:config, changeset)
+      |> Multi.update(:set_lineage, fn %{config: config} ->
+        StrategyConfig.changeset(config, %{lineage_id: to_string(config.id)})
+      end)
+      |> Multi.insert(:backtest_job, fn %{config: config} ->
+        BacktestWorker.new(%{
+          config_id: to_string(config.id),
+          depth: 0,
+          lineage_id: to_string(config.id),
+          evo_generation: 0
+        })
+      end)
+      |> Multi.insert(:spawner_job, fn %{config: config} ->
+        GenerationSpawnerWorker.new(%{
+          lineage_id: to_string(config.id),
+          evo_generation: 0
+        })
+      end)
+
+    case Repo.transaction(multi) do
+      {:ok, %{config: config}} ->
+        Logger.info(
+          "[Pipeline] Submitted evo seed #{config.id}: #{config.strategy_type} " <>
+            "#{config.instrument} #{config.granularity} (lineage=#{config.id})"
+        )
+
+        {:ok, config}
+
+      {:error, _step, reason, _changes} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Start an evolutionary lineage in exploratory mode.
+
+  Unlike submit_evo_seed/1, this does NOT run the seed through the pipeline.
+  Instead, it immediately spawns @children_per_gen generation-1 children by
+  mutating the seed parameters. The pipeline runs on the children, not the seed.
+  This allows the evo engine to find viable regions even when the exact seed
+  parameters would fail the pipeline.
+
+  Use this when you have a rough starting point but aren't sure it passes
+  backtest thresholds. Use submit_evo_seed/1 when you have a known-good
+  config you want to refine.
+  """
+  @spec submit_evo_seed_exploratory(map()) :: {:ok, StrategyConfig.t()} | {:error, term()}
+  def submit_evo_seed_exploratory(attrs) do
+    changeset =
+      StrategyConfig.changeset(
+        %StrategyConfig{},
+        Map.merge(attrs, %{source: "manual", depth: 0, evo_generation: 0})
+      )
+
+    multi =
+      Multi.new()
+      |> Multi.insert(:config, changeset)
+      |> Multi.update(:set_lineage, fn %{config: config} ->
+        StrategyConfig.changeset(config, %{lineage_id: to_string(config.id), score: 1.0})
+      end)
+      |> Multi.insert(:spawner_job, fn %{config: config} ->
+        # score: 1.0 means the seed is immediately "terminal and viable",
+        # so the spawner will proceed to spawn generation 1 children.
+        GenerationSpawnerWorker.new(%{
+          lineage_id: to_string(config.id),
+          evo_generation: 0
+        })
+      end)
+
+    case Repo.transaction(multi) do
+      {:ok, %{config: config}} ->
+        Logger.info(
+          "[Pipeline] Submitted exploratory evo seed #{config.id}: #{config.strategy_type} " <>
+            "#{config.instrument} #{config.granularity} (lineage=#{config.id}, spawning gen-1 immediately)"
+        )
+
+        {:ok, config}
+
+      {:error, _step, reason, _changes} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Insert a child config spawned by GenerationSpawnerWorker and kick off its pipeline.
+
+  `attrs` must include all StrategyConfig fields plus evo_generation and lineage_id.
+  """
+  @spec submit_evo_child(map()) :: {:ok, StrategyConfig.t()} | {:error, term()}
+  def submit_evo_child(attrs) do
+    changeset = StrategyConfig.changeset(%StrategyConfig{}, attrs)
+    lineage_id = Map.get(attrs, :lineage_id) || Map.get(attrs, "lineage_id")
+    evo_generation = Map.get(attrs, :evo_generation) || Map.get(attrs, "evo_generation")
+
+    multi =
+      Multi.new()
+      |> Multi.insert(:config, changeset)
+      |> Multi.insert(:backtest_job, fn %{config: config} ->
+        BacktestWorker.new(%{
+          config_id: to_string(config.id),
+          depth: 0,
+          lineage_id: lineage_id,
+          evo_generation: evo_generation
+        })
+      end)
+
+    case Repo.transaction(multi) do
+      {:ok, %{config: config}} -> {:ok, config}
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  @doc """
   Insert a new strategy config and kick off the backtest stage.
 
   `attrs` must include: instrument, granularity, strategy_type, parameters.
@@ -193,7 +342,15 @@ defmodule Opus.Pipeline.Coordinator do
             VALUES ($1, $2, $3, $4, $5, false, $6, $7, $7)
             ON CONFLICT (instrument, strategy_type, parameters) DO NOTHING
             """,
-            [id_bin, config.strategy_type, config.instrument, config.granularity, config.parameters, max_position_size, now]
+            [
+              id_bin,
+              config.strategy_type,
+              config.instrument,
+              config.granularity,
+              config.parameters,
+              max_position_size,
+              now
+            ]
           )
 
         if result.num_rows == 1 do
@@ -201,11 +358,13 @@ defmodule Opus.Pipeline.Coordinator do
             "[Pipeline] Promoted config #{config_id} to live_strategies (disabled) — " <>
               "#{config.strategy_type} #{config.instrument} #{config.granularity}"
           )
+
           {:ok, :promoted}
         else
           Logger.info(
             "[Pipeline] Config #{config_id} already in live_strategies, skipping promotion"
           )
+
           {:ok, :already_promoted}
         end
     end
@@ -233,6 +392,10 @@ defmodule Opus.Pipeline.Coordinator do
           source: c.source,
           depth: c.depth,
           parent_config_id: c.parent_config_id,
+          evo_generation: c.evo_generation,
+          lineage_id: c.lineage_id,
+          score: c.score,
+          inserted_at: c.inserted_at,
           stage: e.stage,
           status: e.status,
           stats: e.stats,

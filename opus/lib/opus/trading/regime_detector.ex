@@ -29,8 +29,8 @@ defmodule Opus.Trading.RegimeDetector do
   @poll_interval :timer.minutes(5)
   @initial_delay :timer.seconds(15)
 
-  @adx_trending 50.0
-  @adx_choppy 15.0
+  @adx_trending 25.0
+  @adx_choppy 20.0
 
   # -- Public API --
 
@@ -97,35 +97,35 @@ defmodule Opus.Trading.RegimeDetector do
 
   # -- Core logic --
 
+  @poll_granularities ~w[H4 H1 M15]
+
   defp poll do
-    case active_strategy_pairs() do
+    case active_strategy_instruments() do
       [] ->
         Logger.info("[RegimeDetector] No active strategies to poll")
         %{}
 
-      pairs ->
+      instruments ->
+        pairs = for i <- instruments, g <- @poll_granularities, do: {i, g}
+
         Enum.reduce(pairs, %{}, fn {instrument, granularity}, acc ->
           case Auro.get_indicators(instrument, granularity) do
             {:ok, response} ->
               Map.put(acc, {instrument, granularity}, classify(response))
 
-            {:error, reason} ->
-              Logger.warning(
-                "[RegimeDetector] Skipping #{instrument} #{granularity}: " <>
-                  inspect(reason)
-              )
-
+            {:error, _reason} ->
+              # No buffer for this granularity — skip silently
               acc
           end
         end)
     end
   end
 
-  defp active_strategy_pairs do
+  defp active_strategy_instruments do
     from(s in "live_strategies",
       where: s.enabled == true,
       distinct: true,
-      select: {s.instrument, s.granularity}
+      select: s.instrument
     )
     |> Repo.all()
   end

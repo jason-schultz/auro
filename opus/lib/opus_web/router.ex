@@ -30,4 +30,3 @@ defmodule OpusWeb.Router do
     end
   end
 end
-

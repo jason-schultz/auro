@@ -152,17 +152,30 @@ defmodule Opus.Trading.RulesEngine do
     }
   end
 
-  # H4 anchors the regime since it's slowest and least noisy. M15 confirms since it's
-  # closest to execution and most actionable. H1 fills in the gaps and adds confidence.
+  # H4 anchors: slowest and least noisy. H1 must agree for full confidence.
+  # M15 can veto: if M15 contradicts both H4 and H1, downgrade to :uncertain.
+  # All granularities are always available (prefill fills M1/M15/H1/H4 for every instrument).
   defp classify_mtf(h4, h1, m15) do
-    case {h4[:regime] || :unknown, h1[:regime] || :unknown, m15[:regime] || :unknown} do
-      {:unknown, _, _} -> :unknown
-      {_, :unknown, _} -> :unknown
-      {_, _, :unknown} -> :unknown
-      {:trending, :trending, :trending} -> :trending
-      {:choppy, _, _} -> :choppy
-      {:trending, _, _} -> :uncertain
-      _ -> :uncertain
+    h4_regime = h4[:regime] || :unknown
+    h1_regime = h1[:regime] || :unknown
+    m15_regime = m15[:regime] || :unknown
+
+    case {h4_regime, h1_regime} do
+      {:unknown, _} ->
+        :unknown
+
+      {_, :unknown} ->
+        :unknown
+
+      {:trending, :trending} ->
+        if m15_regime == :choppy, do: :uncertain, else: :trending
+
+      {:choppy, :choppy} ->
+        if m15_regime == :trending, do: :uncertain, else: :choppy
+
+      _ ->
+        # H4 and H1 disagree — mixed signals, avoid both strategies
+        :uncertain
     end
   end
 

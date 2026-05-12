@@ -31,9 +31,7 @@ defmodule Opus.Pipeline.GridIterationWorker do
         }
       }) do
     if depth >= @max_depth do
-      Logger.info(
-        "[Pipeline] Max depth #{@max_depth} reached for config #{config_id}, stopping"
-      )
+      Logger.info("[Pipeline] Max depth #{@max_depth} reached for config #{config_id}, stopping")
 
       :ok
     else
