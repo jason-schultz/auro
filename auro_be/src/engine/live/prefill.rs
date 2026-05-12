@@ -62,8 +62,12 @@ async fn prefill_buffers(
             .fetch_all(pool)
             .await?;
     let mut count = 0;
-    const MTF_GRANULARITIES: &[Granularity] =
-        &[Granularity::M1, Granularity::M15, Granularity::H1, Granularity::H4];
+    const MTF_GRANULARITIES: &[Granularity] = &[
+        Granularity::M1,
+        Granularity::M15,
+        Granularity::H1,
+        Granularity::H4,
+    ];
 
     for instrument in &instruments {
         for granularity in MTF_GRANULARITIES {

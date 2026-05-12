@@ -6,13 +6,13 @@ use crate::oanda::models::StreamMessage;
 use crate::state::{AppState, LastQuote};
 
 pub mod evaluator;
-pub mod pricing;
 pub mod prefill;
+pub mod pricing;
 pub mod time;
 pub mod trade_management;
 
-pub use pricing::format_price;
 pub(crate) use evaluator::{evaluate_strategies, is_trading_enabled, position_key_deltas};
+pub use pricing::format_price;
 pub(crate) use time::{compute_slot_time, time_slot};
 
 pub const MOVE_TO_BREAKEVEN_PCT: f64 = 0.015;
@@ -173,7 +173,8 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
 
                                 // Evaluate against a snapshot to avoid holding write locks
                                 // across DB/OANDA await points inside evaluate_strategies.
-                                let before_positions = state.live.open_positions.read().await.clone();
+                                let before_positions =
+                                    state.live.open_positions.read().await.clone();
                                 let mut working_positions = before_positions.clone();
 
                                 // Evaluate strategies matching this instrument AND granularity
@@ -192,10 +193,13 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                     Ok(reports) => {
                                         // Delta reconciliation is key-based only.
                                         // Value mutations for existing keys are not applied here.
-                                        let (removed, added) =
-                                            position_key_deltas(&before_positions, &working_positions);
+                                        let (removed, added) = position_key_deltas(
+                                            &before_positions,
+                                            &working_positions,
+                                        );
                                         if !removed.is_empty() || !added.is_empty() {
-                                            let mut open_positions = state.live.open_positions.write().await;
+                                            let mut open_positions =
+                                                state.live.open_positions.write().await;
                                             for trade_id in removed {
                                                 open_positions.remove(&trade_id);
                                             }

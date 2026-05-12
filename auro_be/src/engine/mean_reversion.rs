@@ -1,4 +1,8 @@
+use crate::engine::indicators::adx;
 use crate::engine::types::{Candle, Direction, EntryReason, ExitReason, Trade};
+
+const ADX_PERIOD: usize = 14;
+const ADX_TRENDING: f64 = 25.0;
 
 pub enum MRSignal {
     Enter { ma_value: f64, deviation_pct: f64 },
@@ -12,6 +16,8 @@ pub struct MeanReversionParams {
     pub entry_threshold: f64, // eg: -0.005 (price is 0.5% below the MA)
     pub exit_threshold: f64,  // eg: 0.003 (price recovered 0.3% from entry)
     pub stop_loss: f64,       // eg: -0.001 (price dropped 1% from entry)
+    #[serde(default)]
+    pub regime_filter: bool, // if true, skip entries when ADX >= 25 (trending market)
 }
 
 /// Runs the mean reversion strategy on the given candles and returns a vector of trades.
@@ -35,6 +41,14 @@ pub fn run(candles: &[Candle], params: &MeanReversionParams) -> Vec<Trade> {
         let close = candles[i].close;
         let pct_below = (close - ma) / ma;
         if pct_below < params.entry_threshold {
+            if params.regime_filter {
+                if let Some(adx_val) = adx(&candles[..=i], ADX_PERIOD) {
+                    if adx_val >= ADX_TRENDING {
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
             let entry_time = candles[i].time;
             let entry_price = close;
             let mut in_trade = true;
@@ -99,7 +113,7 @@ pub fn check_entry(closes: &[f64], params: &MeanReversionParams) -> MRSignal {
         / params.ma_period as f64;
 
     let close = closes[closes.len() - 1];
-    let deviation = (close / ma) / ma;
+    let deviation = (close - ma) / ma;
 
     if deviation < params.entry_threshold {
         MRSignal::Enter {
@@ -166,6 +180,7 @@ mod tests {
             entry_threshold: -0.002,
             exit_threshold: 0.002,
             stop_loss: -0.01,
+            regime_filter: false,
         };
         let trades = run(&candles, &params);
         assert_eq!(trades.len(), 1);
@@ -211,6 +226,7 @@ mod tests {
             entry_threshold: -0.002,
             exit_threshold: 0.002,
             stop_loss: -0.01,
+            regime_filter: false,
         };
         let trades = run(&candles, &params);
         assert_eq!(trades.len(), 1);
@@ -252,6 +268,7 @@ mod tests {
             entry_threshold: -0.002,
             exit_threshold: 0.002,
             stop_loss: -0.01,
+            regime_filter: false,
         };
         let trades = run(&candles, &params);
         assert_eq!(trades.len(), 1);

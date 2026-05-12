@@ -9,8 +9,8 @@ use crate::engine::types::{
 };
 use crate::oanda::client::OandaClient;
 
-use super::CandleBuffer;
 use super::format_price;
+use super::CandleBuffer;
 
 pub(crate) fn position_key_deltas(
     before: &HashMap<String, OpenPosition>,
@@ -69,23 +69,24 @@ pub(crate) async fn evaluate_strategies(
     let mut reports: Vec<SignalReport> = Vec::new();
 
     for strategy in &strategies {
-        let has_position = open_positions.values().any(|p| p.strategy_id == strategy.id);
+        let has_position = open_positions
+            .values()
+            .any(|p| p.strategy_id == strategy.id);
 
         if has_position {
             let exit_reports =
                 evaluate_exit(pool, oanda, strategy, current_price, buffer, open_positions).await?;
             reports.extend(exit_reports);
-        } else if let Some(entry_report) =
-            evaluate_entry(
-                pool,
-                oanda,
-                strategy,
-                current_price,
-                buffer,
-                open_positions,
-                rules,
-            )
-            .await?
+        } else if let Some(entry_report) = evaluate_entry(
+            pool,
+            oanda,
+            strategy,
+            current_price,
+            buffer,
+            open_positions,
+            rules,
+        )
+        .await?
         {
             reports.push(entry_report);
         }
@@ -134,6 +135,7 @@ async fn evaluate_entry(
                 entry_threshold: params["entry_threshold"].as_f64().unwrap_or(-0.01),
                 exit_threshold: params["exit_threshold"].as_f64().unwrap_or(0.003),
                 stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.005),
+                regime_filter: false, // live path: regime gating handled by Elixir rules engine
             };
 
             let closes = buffer.closes();
@@ -211,6 +213,7 @@ async fn evaluate_entry(
                 slow_period: params["slow_period"].as_u64().unwrap_or(50) as usize,
                 stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.02),
                 take_profit: params["take_profit"].as_f64(),
+                regime_filter: false, // live path: regime gating handled by Elixir rules engine
             };
 
             let closes = buffer.closes();
@@ -473,6 +476,7 @@ async fn evaluate_exit(
                 slow_period: params["slow_period"].as_u64().unwrap_or(50) as usize,
                 stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.02),
                 take_profit: params["take_profit"].as_f64(),
+                regime_filter: false, // live path: regime gating handled by Elixir rules engine
             };
 
             let is_long = positions_for_strategy[0].direction == Direction::Long;
