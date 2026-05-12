@@ -1,9 +1,20 @@
 <template>
     <main class="p-6">
-        <h2 class="text-lg font-semibold text-foreground mb-6">Trade Journal</h2>
+        <ViewHeader title="Trade Journal" />
 
-        <div class="fr-card p-12 text-muted-foreground text-center text-sm">
-            Wealthsimple manual trade tracking — Phase 3.
-        </div>
+        <DataCard
+            :loading="false"
+            :empty="false"
+            card-class="p-12"
+            content-class=""
+        >
+            <StateMessage message="Wealthsimple manual trade tracking - Phase 3." />
+        </DataCard>
     </main>
 </template>
+
+<script setup lang="ts">
+import DataCard from "@/components/ui/DataCard.vue";
+import StateMessage from "@/components/ui/StateMessage.vue";
+import ViewHeader from "@/components/ui/ViewHeader.vue";
+</script>

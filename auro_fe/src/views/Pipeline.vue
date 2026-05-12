@@ -1,43 +1,21 @@
 <template>
     <main class="p-6 h-[calc(100vh-57px)] flex flex-col">
-        <div class="flex items-center justify-between mb-4">
-            <h2 class="text-lg font-semibold text-foreground">Pipeline</h2>
-            <div class="flex items-center gap-2">
-                <select
-                    v-model="filterStrategy"
-                    class="bg-background text-foreground text-sm rounded px-2 py-1 border border-border focus:outline-none focus:border-primary/30"
-                >
-                    <option value="">All strategies</option>
-                    <option value="trend_following">Trend Following</option>
-                    <option value="mean_reversion">Mean Reversion</option>
-                </select>
-                <select
-                    v-model="filterGranularity"
-                    class="bg-background text-foreground text-sm rounded px-2 py-1 border border-border focus:outline-none focus:border-primary/30"
-                >
-                    <option value="">All granularities</option>
-                    <option value="H1">H1</option>
-                    <option value="H4">H4</option>
-                    <option value="M15">M15</option>
-                </select>
-                <select
-                    v-model="filterStatus"
-                    class="bg-background text-foreground text-sm rounded px-2 py-1 border border-border focus:outline-none focus:border-primary/30"
-                >
-                    <option value="">All statuses</option>
-                    <option value="pending">Pending</option>
-                    <option value="running">Running</option>
-                    <option value="passed">Passed</option>
-                    <option value="failed">Failed</option>
-                </select>
+        <ViewHeader title="Pipeline">
+            <template #actions>
+            <FilterToolbar :inline="true" :tight="true">
+                <FilterSelect v-model="filterStrategy" :options="strategyOptions" placeholder="All strategies" />
+                <FilterSelect v-model="filterGranularity" :options="granularityOptions" placeholder="All granularities" />
+                <FilterSelect v-model="filterStatus" :options="statusOptions" placeholder="All statuses" />
+                <FilterSelect v-model="filterSource" :options="sourceOptions" placeholder="All sources" />
                 <button
                     @click="load"
                     class="px-3 py-1.5 text-sm rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
                 >
                     Refresh
                 </button>
-            </div>
-        </div>
+            </FilterToolbar>
+            </template>
+        </ViewHeader>
 
         <!-- Summary pills -->
         <div v-if="summary" class="fr-card p-3 mb-4">
@@ -55,194 +33,188 @@
         </div>
 
         <!-- Table -->
-        <div class="fr-card flex-1 overflow-hidden flex flex-col">
-            <div v-if="loading" class="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-                Loading...
-            </div>
-            <div v-else-if="filtered.length === 0" class="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-                No configs found.
-            </div>
-            <div v-else class="overflow-auto flex-1">
-                <table class="w-full text-sm">
-                    <thead class="sticky top-0 bg-card border-b border-border">
-                        <tr class="text-left text-muted-foreground">
-                            <th class="px-3 py-2 font-medium">Instrument</th>
-                            <th class="px-3 py-2 font-medium">Strategy</th>
-                            <th class="px-3 py-2 font-medium">Gran</th>
-                            <th class="px-3 py-2 font-medium">Depth</th>
-                            <th class="px-3 py-2 font-medium">Stage</th>
-                            <th class="px-3 py-2 font-medium">Status</th>
-                            <th class="px-3 py-2 font-medium">Sharpe</th>
-                            <th class="px-3 py-2 font-medium">Trades</th>
-                            <th class="px-3 py-2 font-medium">Drawdown</th>
-                            <th class="px-3 py-2 font-medium">Failure</th>
-                        </tr>
-                    </thead>
-                    <tbody>
+        <DataTableScaffold
+            :loading="loading"
+            :empty="sorted.length === 0"
+            empty-message="No configs found."
+            head-class="sticky top-0 bg-card border-b border-border z-40"
+            head-row-class="text-left text-muted-foreground"
+            content-class="overflow-auto flex-1"
+            table-class="w-full min-w-max text-sm"
+        >
+            <template #head>
+                <th
+                    v-for="(col, idx) in tableColumns"
+                    :key="col.key"
+                    class="px-3 py-2 text-[10px] font-medium uppercase tracking-wider whitespace-nowrap"
+                    :class="headerClass(col.key, idx, col.sortable)"
+                    :aria-sort="ariaSortForColumn({ sortable: col.sortable, columnKey: col.key, sortKey, sortDir })"
+                >
+                    <button
+                        type="button"
+                        class="inline-flex items-center gap-0.5 transition-colors"
+                        :class="col.sortable ? 'cursor-pointer hover:text-foreground' : 'cursor-default'"
+                        :disabled="!col.sortable"
+                        @click="col.sortable && toggleSort(col.key)"
+                    >
+                        {{ col.label }}
+                        <span v-if="col.sortable && sortKey === col.key" class="ml-0.5">
+                            {{ sortDir === "asc" ? "↑" : "↓" }}
+                        </span>
+                    </button>
+                </th>
+            </template>
+            <template #body>
                         <tr
-                            v-for="c in filtered"
+                            v-for="c in sorted"
                             :key="c.config_id"
-                            class="border-b border-border/40 hover:bg-muted/20 transition-colors"
+                            class="group border-b border-border/40 hover:bg-muted/20 transition-colors"
                         >
-                            <td class="px-3 py-2 font-mono text-foreground">
+                            <td :class="cellClass('instrument', c, 0, 'font-mono text-foreground')">
                                 {{ c.instrument.replace("_", "/") }}
                             </td>
-                            <td class="px-3 py-2 text-muted-foreground">
-                                {{ strategyLabel(c.strategy_type) }}
+                            <td :class="cellClass('strategy_type', c, 1, 'text-muted-foreground')">
+                                <StrategyTypeBadge :type="c.strategy_type" />
                             </td>
-                            <td class="px-3 py-2 font-mono text-xs text-muted-foreground">
+                            <td :class="cellClass('granularity', c, 2, 'text-xs text-muted-foreground')">
                                 {{ c.granularity }}
                             </td>
-                            <td class="px-3 py-2">
-                                <span
-                                    class="px-1.5 py-0.5 rounded text-xs font-mono"
-                                    :class="c.depth > 0 ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'"
-                                >
-                                    {{ c.depth }}
-                                </span>
+                            <td :class="cellClass('generation', c, 3, 'text-xs')">
+                                <template v-if="c.evo_generation != null">
+                                    <span class="text-primary">G{{ c.evo_generation }}</span>
+                                    <span class="text-muted-foreground"> C{{ childRank(c) }}</span>
+                                </template>
+                                <template v-else-if="c.depth > 0">
+                                    <span class="text-muted-foreground">d{{ c.depth }}</span>
+                                </template>
+                                <template v-else>
+                                    <span class="text-muted-foreground">—</span>
+                                </template>
                             </td>
-                            <td class="px-3 py-2 text-muted-foreground font-mono text-xs">
+                            <td :class="cellClass('stage', c, 4, 'text-muted-foreground text-xs')">
                                 {{ stageLabel(c.stage) }}
                             </td>
-                            <td class="px-3 py-2">
-                                <span
-                                    class="px-2 py-0.5 rounded-full text-xs font-medium"
-                                    :class="statusClass(c.status)"
-                                >
-                                    {{ c.status || "pending" }}
-                                </span>
+                            <td :class="cellClass('status', c, 5)">
+                                <StatusBadge :status="c.status" />
                             </td>
-                            <td class="px-3 py-2 font-mono text-xs" :class="sharpeColor(sharpeStat(c))">
+                            <td :class="cellClass('sharpe', c, 6, `text-xs ${sharpeColor(sharpeStat(c))}`)">
                                 {{ fmt(sharpeStat(c)) }}
                             </td>
-                            <td class="px-3 py-2 font-mono text-xs text-muted-foreground">
+                            <td :class="cellClass('trades', c, 7, 'text-xs text-muted-foreground')">
                                 {{ tradesStat(c) ?? "—" }}
                             </td>
-                            <td class="px-3 py-2 font-mono text-xs text-red-400">
-                                {{ drawdownStat(c) != null ? (drawdownStat(c)! * 100).toFixed(1) + "%" : "—" }}
+                            <td :class="cellClass('drawdown', c, 8, 'text-xs text-red-400')">
+                                {{ formatTablePercent(drawdownStat(c), { decimals: 1 }) }}
                             </td>
-                            <td class="px-3 py-2 text-xs text-muted-foreground max-w-[200px] truncate" :title="c.failure_reason ?? undefined">
+                            <td :class="cellClass('score', c, 9, `text-xs ${scoreColor(c.score)}`)">
+                                {{ c.score != null ? c.score.toFixed(3) : "—" }}
+                            </td>
+                            <td :class="cellClass('failure_reason', c, 10, 'text-xs text-muted-foreground max-w-50 truncate')" :title="c.failure_reason ?? undefined">
                                 {{ c.failure_reason || "—" }}
                             </td>
                         </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+            </template>
+        </DataTableScaffold>
     </main>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { usePipeline } from "@/composables/usePipeline";
+import FilterSelect from "@/components/ui/FilterSelect.vue";
+import FilterToolbar from "@/components/ui/FilterToolbar.vue";
+import DataTableScaffold from "@/components/ui/DataTableScaffold.vue";
+import StatusBadge from "@/components/ui/StatusBadge.vue";
+import StrategyTypeBadge from "@/components/ui/StrategyTypeBadge.vue";
+import ViewHeader from "@/components/ui/ViewHeader.vue";
+import {
+    PIPELINE_COLUMNS,
+    ariaSortForColumn,
+    formatTablePercent,
+    stickyFirstColumnClass,
+    tableCellAlignClass,
+    tableHeaderAlignClass,
+    tableWidthClass,
+} from "@/lib/ui";
+import type { PipelineConfig } from "@/types/pipeline";
 
-const OPUS_BASE = "http://localhost:4321";
+const strategyOptions = [
+    { value: "trend_following", label: "Trend Following" },
+    { value: "mean_reversion", label: "Mean Reversion" },
+];
 
-interface Evaluation {
-    stage: string;
-    status: string;
-    stats: Record<string, number> | null;
-    failure_reason: string | null;
+const granularityOptions = [
+    { value: "H1", label: "H1" },
+    { value: "H4", label: "H4" },
+    { value: "M15", label: "M15" },
+];
+
+const statusOptions = [
+    { value: "pending", label: "Pending" },
+    { value: "running", label: "Running" },
+    { value: "passed", label: "Passed" },
+    { value: "failed", label: "Failed" },
+];
+
+const sourceOptions = [
+    { value: "evo", label: "Evo only" },
+    { value: "manual", label: "Manual" },
+];
+
+const {
+    loading,
+    summary,
+    filterStrategy,
+    filterGranularity,
+    filterStatus,
+    filterSource,
+    sorted,
+    sortKey,
+    sortDir,
+    childRank,
+    load,
+    toggleSort,
+    stageLabel,
+    sharpeStat,
+    tradesStat,
+    drawdownStat,
+    sharpeColor,
+    scoreColor,
+    fmt,
+} = usePipeline();
+
+const tableColumns = PIPELINE_COLUMNS;
+
+function headerClass(key: string, columnIndex: number, sortable: boolean): string {
+    return [
+        tableWidthClass("pipeline", key),
+        tableHeaderAlignClass(key),
+        sortable ? "cursor-pointer hover:text-foreground transition-colors" : "",
+        stickyFirstColumnClass({
+            isFirst: columnIndex === 0,
+            isHeader: true,
+        }),
+    ]
+        .filter(Boolean)
+        .join(" ");
 }
 
-interface Config {
-    config_id: string;
-    instrument: string;
-    granularity: string;
-    strategy_type: string;
-    source: string;
-    depth: number;
-    parent_config_id: string | null;
-    stage: string | null;
-    status: string | null;
-    stats: Record<string, number> | null;
-    failure_reason: string | null;
-    evaluations: Evaluation[];
+function cellClass(
+    key: string,
+    _row: PipelineConfig,
+    columnIndex: number,
+    extraClass = "",
+): string {
+    return [
+        "px-3 py-2 font-mono",
+        tableWidthClass("pipeline", key),
+        tableCellAlignClass(key),
+        extraClass,
+        stickyFirstColumnClass({
+            isFirst: columnIndex === 0,
+            isHeader: false,
+        }),
+    ]
+        .filter(Boolean)
+        .join(" ");
 }
-
-interface Summary {
-    total: number;
-    running: number;
-    passed: number;
-    failed: number;
-    pending: number;
-    backtest: number;
-    walk_forward: number;
-    monte_carlo: number;
-}
-
-const loading = ref(false);
-const configs = ref<Config[]>([]);
-const summary = ref<Summary | null>(null);
-const filterStrategy = ref("");
-const filterGranularity = ref("");
-const filterStatus = ref("");
-
-const filtered = computed(() => {
-    return configs.value.filter((c) => {
-        if (filterStrategy.value && c.strategy_type !== filterStrategy.value) return false;
-        if (filterGranularity.value && c.granularity !== filterGranularity.value) return false;
-        if (filterStatus.value && (c.status || "pending") !== filterStatus.value) return false;
-        return true;
-    });
-});
-
-async function load() {
-    loading.value = true;
-    try {
-        const res = await fetch(`${OPUS_BASE}/api/pipeline`);
-        const data = await res.json();
-        configs.value = data.configs ?? [];
-        summary.value = data.summary ?? null;
-    } catch (e) {
-        console.error("Failed to load pipeline status", e);
-    } finally {
-        loading.value = false;
-    }
-}
-
-function strategyLabel(type: string) {
-    return type === "trend_following" ? "Trend" : type === "mean_reversion" ? "Mean Rev" : type;
-}
-
-function stageLabel(stage: string | null) {
-    if (!stage) return "—";
-    return { backtest: "Backtest", walk_forward: "Walk-fwd", monte_carlo: "Monte Carlo" }[stage] ?? stage;
-}
-
-function statusClass(status: string | null) {
-    switch (status) {
-        case "passed": return "bg-emerald-500/15 text-emerald-400";
-        case "failed": return "bg-red-500/15 text-red-400";
-        case "running": return "bg-yellow-500/15 text-yellow-400";
-        default: return "bg-muted text-muted-foreground";
-    }
-}
-
-function sharpeStat(c: Config): number | null {
-    if (!c.stats) return null;
-    return c.stats.sharpe ?? c.stats.oos_sharpe ?? c.stats.median_sharpe ?? null;
-}
-
-function tradesStat(c: Config): number | null {
-    if (!c.stats) return null;
-    return c.stats.num_trades ?? c.stats.oos_num_trades ?? null;
-}
-
-function drawdownStat(c: Config): number | null {
-    if (!c.stats) return null;
-    return c.stats.max_drawdown ?? c.stats.p95_drawdown ?? null;
-}
-
-function sharpeColor(v: number | null) {
-    if (v === null) return "text-muted-foreground";
-    if (v >= 2.0) return "text-emerald-400";
-    if (v >= 1.0) return "text-primary";
-    return "text-red-400";
-}
-
-function fmt(v: number | null) {
-    return v !== null ? v.toFixed(2) : "—";
-}
-
-onMounted(load);
 </script>

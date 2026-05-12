@@ -1,166 +1,121 @@
 <template>
     <main class="p-6 h-[calc(100vh-57px)] flex flex-col">
-        <div class="flex items-center justify-between mb-3">
-            <h2 class="text-lg font-semibold text-foreground">
-                Live Strategies
-            </h2>
-            <span class="text-xs text-muted-foreground font-mono">
-                {{ enabledCount }}/{{ strategies.length }} active
-            </span>
-        </div>
+        <ViewHeader title="Live Strategies" :compact="true">
+            <template #actions>
+                <span class="text-xs text-muted-foreground font-mono">
+                    {{ enabledCount }}/{{ strategies.length }} active
+                </span>
+            </template>
+        </ViewHeader>
 
         <!-- Filters -->
-        <div class="flex items-center gap-3 mb-3">
-            <div class="flex gap-1">
-                <button
-                    v-for="tab in marketTabs"
-                    :key="tab.id"
-                    class="px-2.5 py-1 text-sm rounded transition-colors"
-                    :class="
-                        activeTab === tab.id
-                            ? 'bg-primary/10 text-primary'
-                            : 'text-muted-foreground hover:text-foreground'
-                    "
-                    @click="activeTab = tab.id"
-                >
-                    {{ tab.label }}
-                    <span
-                        v-if="tabCount(tab.id) > 0"
-                        class="ml-0.5 text-[10px] font-mono opacity-60"
-                        >{{ tabCount(tab.id) }}</span
-                    >
-                </button>
-            </div>
+        <FilterToolbar>
+            <SegmentedFilterGroup
+                v-model="activeTab"
+                :options="marketTabs"
+                :counts="marketTabCounts"
+                active-class="bg-primary/10 text-primary"
+                inactive-class="text-muted-foreground hover:text-foreground"
+            />
 
-            <div class="w-px h-4 bg-border" />
+            <FilterToolbarDivider />
 
-            <div class="flex gap-1">
-                <button
-                    v-for="f in strategyFilters"
-                    :key="f.value"
-                    class="px-2.5 py-1 text-sm rounded transition-colors"
-                    :class="
-                        strategyFilter === f.value
-                            ? 'bg-primary/10 text-primary'
-                            : 'text-muted-foreground hover:text-foreground'
-                    "
-                    @click="strategyFilter = f.value"
-                >
-                    {{ f.label }}
-                </button>
-            </div>
+            <SegmentedFilterGroup
+                v-model="strategyFilter"
+                :options="strategyFilters"
+                active-class="bg-primary/10 text-primary"
+                inactive-class="text-muted-foreground hover:text-foreground"
+            />
 
-            <div class="w-px h-4 bg-border" />
+            <FilterToolbarDivider />
 
-            <div class="flex gap-1">
-                <button
-                    v-for="f in statusFilters"
-                    :key="f.value"
-                    class="px-2.5 py-1 text-sm rounded transition-colors"
-                    :class="
-                        statusFilter === f.value
-                            ? 'bg-primary/10 text-primary'
-                            : 'text-muted-foreground hover:text-foreground'
-                    "
-                    @click="statusFilter = f.value"
-                >
-                    {{ f.label }}
-                </button>
-            </div>
-        </div>
+            <SegmentedFilterGroup
+                v-model="statusFilter"
+                :options="statusFilters"
+                active-class="bg-primary/10 text-primary"
+                inactive-class="text-muted-foreground hover:text-foreground"
+            />
+        </FilterToolbar>
 
-        <!-- Loading -->
-        <div
-            v-if="loading"
-            class="flex-1 flex items-center justify-center text-sm text-muted-foreground"
+        <DataTableScaffold
+            :loading="loading"
+            :empty="sortedStrategies.length === 0"
+            :empty-message="strategies.length === 0 ? 'No strategies deployed yet. Deploy from the Backtests page.' : 'No strategies match this filter.'"
+            card-class="min-h-0"
+            content-class="overflow-auto h-full"
+            table-class="w-full min-w-max text-sm"
+            head-class="sticky top-0 bg-card z-40"
+            head-row-class="border-b border-border"
         >
-            Loading strategies...
-        </div>
-
-        <!-- Empty state -->
-        <div
-            v-else-if="sortedStrategies.length === 0"
-            class="flex-1 flex items-center justify-center text-sm text-muted-foreground"
-        >
-            {{
-                strategies.length === 0
-                    ? "No strategies deployed yet. Deploy from the Backtests page."
-                    : "No strategies match this filter."
-            }}
-        </div>
-
-        <!-- Table -->
-        <div v-else class="fr-card overflow-hidden flex-1 min-h-0">
-            <div class="overflow-auto h-full">
-                <table class="w-full text-sm">
-                    <thead class="sticky top-0 bg-card z-10">
-                        <tr class="border-b border-border">
+            <template #head>
                             <th
-                                v-for="col in columns"
+                                v-for="(col, idx) in columns"
                                 :key="col.key"
-                                class="text-left px-3 py-2.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground whitespace-nowrap transition-colors"
-                                :class="
-                                    col.sortable
-                                        ? 'cursor-pointer hover:text-foreground'
-                                        : ''
-                                "
-                                @click="col.sortable && toggleSort(col.key)"
+                                class="px-3 py-2.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground whitespace-nowrap"
+                                :class="headerClass(col.key, idx, col.sortable)"
+                                :aria-sort="ariaSortForColumn({ sortable: col.sortable, columnKey: col.key, sortKey, sortDir })"
                             >
-                                {{ col.label }}
-                                <span
-                                    v-if="sortKey === col.key"
-                                    class="ml-0.5"
-                                    >{{ sortDir === "asc" ? "↑" : "↓" }}</span
+                                <button
+                                    type="button"
+                                    class="inline-flex items-center gap-0.5 transition-colors"
+                                    :class="col.sortable ? 'cursor-pointer hover:text-foreground' : 'cursor-default'"
+                                    :disabled="!col.sortable"
+                                    @click="col.sortable && toggleSort(col.key)"
                                 >
+                                    {{ col.label }}
+                                    <span
+                                        v-if="col.sortable && sortKey === col.key"
+                                        class="ml-0.5"
+                                        >{{ sortDir === "asc" ? "↑" : "↓" }}</span
+                                    >
+                                </button>
                             </th>
                             <th
                                 class="px-3 py-2.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground w-8"
+                                :class="tableWidthClass('strategies', 'actions')"
                             />
-                        </tr>
-                    </thead>
-                    <tbody>
+            </template>
+            <template #body>
                         <tr
                             v-for="strategy in sortedStrategies"
                             :key="strategy.id"
-                            class="border-b border-border transition-colors hover:bg-primary/[0.02]"
+                            class="group border-b border-border transition-colors hover:bg-primary/2"
                         >
                             <!-- Instrument -->
-                            <td class="px-3 py-2 whitespace-nowrap">
+                            <td :class="cellClass('instrument', 0, 'font-medium text-foreground')">
                                 <span class="font-medium text-foreground">{{
                                     strategy.instrument.replace("_", "/")
                                 }}</span>
                             </td>
 
-                            <!-- Type -->
-                            <td class="px-3 py-2 whitespace-nowrap">
-                                <span
-                                    class="text-[10px] px-1.5 py-0.5 rounded font-medium"
-                                    :class="
-                                        strategy.strategy_type ===
-                                        'mean_reversion'
-                                            ? 'bg-blue-500/10 text-blue-400'
-                                            : 'bg-violet-500/10 text-violet-400'
-                                    "
-                                    >{{
-                                        strategy.strategy_type ===
-                                        "mean_reversion"
-                                            ? "Mean Rev"
-                                            : "Trend"
-                                    }}</span
-                                >
+                            <!-- Type + source badge -->
+                            <td :class="cellClass('strategy_type', 1)">
+                                <div class="flex items-center gap-1">
+                                    <StrategyTypeBadge :type="strategy.strategy_type" />
+                                    <BadgePill
+                                        v-if="strategy.source === 'evolution'"
+                                        label="Evo"
+                                        size="2xs"
+                                        :extra-class="'bg-amber-500/10 text-amber-400'"
+                                        :title="strategy.pipeline_score != null ? 'Evo score: ' + strategy.pipeline_score.toFixed(3) : 'Evolutionary pipeline'"
+                                    />
+                                    <BadgePill
+                                        v-else-if="strategy.source === 'pipeline' || strategy.source === 'ollama' || strategy.source === 'manual' || strategy.source === 'reseed'"
+                                        label="Pipeline"
+                                        size="2xs"
+                                        :extra-class="'bg-muted text-muted-foreground'"
+                                        title="Promoted via pipeline"
+                                    />
+                                </div>
                             </td>
 
                             <!-- Timeframe -->
-                            <td
-                                class="px-3 py-2 whitespace-nowrap font-mono text-muted-foreground text-xs"
-                            >
+                            <td :class="cellClass('granularity', 2, 'text-xs text-muted-foreground')">
                                 {{ strategy.granularity }}
                             </td>
 
                             <!-- Params -->
-                            <td
-                                class="px-3 py-2 whitespace-nowrap font-mono text-[11px] text-muted-foreground"
-                            >
+                            <td :class="cellClass('params', 3, 'text-[11px] text-muted-foreground')">
                                 <template
                                     v-if="
                                         strategy.strategy_type ===
@@ -193,9 +148,7 @@
                             </td>
 
                             <!-- Return -->
-                            <td
-                                class="px-3 py-2 whitespace-nowrap font-mono text-right"
-                            >
+                            <td :class="cellClass('total_return', 4)">
                                 <template v-if="strategy.backtest_stats">
                                     <span
                                         :class="
@@ -219,9 +172,7 @@
                             </td>
 
                             <!-- Win Rate -->
-                            <td
-                                class="px-3 py-2 whitespace-nowrap font-mono text-foreground text-right"
-                            >
+                            <td :class="cellClass('win_rate', 5, 'text-foreground')">
                                 <template v-if="strategy.backtest_stats">
                                     {{ pct(strategy.backtest_stats.win_rate) }}
                                 </template>
@@ -231,14 +182,10 @@
                             </td>
 
                             <!-- Sharpe -->
-                            <td
-                                class="px-3 py-2 whitespace-nowrap font-mono text-foreground text-right"
-                            >
+                            <td :class="cellClass('sharpe_ratio', 6, 'text-foreground')">
                                 <template v-if="strategy.backtest_stats">
                                     {{
-                                        strategy.backtest_stats.sharpe_ratio.toFixed(
-                                            2,
-                                        )
+                                        num(strategy.backtest_stats.sharpe_ratio)
                                     }}
                                 </template>
                                 <span v-else class="text-muted-foreground/30"
@@ -246,10 +193,19 @@
                                 >
                             </td>
 
+                            <!-- OOS Sharpe (pipeline only) -->
+                            <td :class="cellClass('oos_sharpe', 7)">
+                                <template v-if="strategy.oos_stats">
+                                    <span :class="strategy.oos_stats.oos_sharpe >= 0.5 ? 'text-emerald-400' : strategy.oos_stats.oos_sharpe >= 0.15 ? 'text-primary' : 'text-red-400'">
+                                        {{ num(strategy.oos_stats.oos_sharpe) }}
+                                    </span>
+                                    <span class="text-muted-foreground/50 text-[10px] ml-1">{{ strategy.oos_stats.oos_num_trades }}t</span>
+                                </template>
+                                <span v-else class="text-muted-foreground/30">—</span>
+                            </td>
+
                             <!-- Drawdown -->
-                            <td
-                                class="px-3 py-2 whitespace-nowrap font-mono text-red-400 text-right"
-                            >
+                            <td :class="cellClass('max_drawdown', 8, 'text-red-400')">
                                 <template v-if="strategy.backtest_stats">
                                     {{
                                         pct(
@@ -264,9 +220,7 @@
                             </td>
 
                             <!-- Trades -->
-                            <td
-                                class="px-3 py-2 whitespace-nowrap font-mono text-foreground text-right"
-                            >
+                            <td :class="cellClass('num_trades', 9, 'text-foreground')">
                                 <template v-if="strategy.backtest_stats">
                                     {{ strategy.backtest_stats.num_trades }}
                                 </template>
@@ -276,9 +230,7 @@
                             </td>
 
                             <!-- Live # trades -->
-                            <td
-                                class="px-3 py-2 whitespace-nowrap font-mono text-foreground text-right"
-                            >
+                            <td :class="cellClass('live_num_trades', 10, 'text-foreground')">
                                 <template v-if="strategy.live_stats">
                                     {{ strategy.live_stats.num_trades }}
                                 </template>
@@ -288,9 +240,7 @@
                             </td>
 
                             <!-- Live Win Rate -->
-                            <td
-                                class="px-3 py-2 whitespace-nowrap font-mono text-right"
-                            >
+                            <td :class="cellClass('live_win_rate', 11)">
                                 <template v-if="strategy.live_stats">
                                     <span class="text-foreground">{{
                                         pct(strategy.live_stats.win_rate)
@@ -313,16 +263,15 @@
                             </td>
 
                             <!-- Edge status -->
-                            <td class="px-3 py-2 whitespace-nowrap">
-                                <span
-                                    class="text-[10px] px-1.5 py-0.5 rounded font-medium"
-                                    :class="edgeStatus(strategy).color"
-                                    >{{ edgeStatus(strategy).label }}</span
-                                >
+                            <td :class="cellClass('edge', 12)">
+                                <BadgePill
+                                    :label="edgeStatus(strategy).label"
+                                    :extra-class="edgeStatus(strategy).color"
+                                />
                             </td>
 
                             <!-- Status toggle -->
-                            <td class="px-3 py-2 whitespace-nowrap">
+                            <td :class="cellClass('enabled', 13)">
                                 <button
                                     @click="toggleStrategy(strategy)"
                                     :disabled="toggling === strategy.id"
@@ -337,7 +286,7 @@
                                         class="absolute top-0.5 w-3 h-3 rounded-full transition-all"
                                         :class="
                                             strategy.enabled
-                                                ? 'left-[17px] bg-emerald-400'
+                                                ? 'left-4.25 bg-emerald-400'
                                                 : 'left-0.5 bg-[#4a4a5a]'
                                         "
                                     />
@@ -345,7 +294,7 @@
                             </td>
 
                             <!-- Delete -->
-                            <td class="px-1 py-2 whitespace-nowrap">
+                            <td class="px-1 py-2 whitespace-nowrap" :class="tableWidthClass('strategies', 'actions')">
                                 <button
                                     v-if="deleteConfirm !== strategy.id"
                                     @click="deleteConfirm = strategy.id"
@@ -371,10 +320,8 @@
                                 </div>
                             </td>
                         </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+            </template>
+        </DataTableScaffold>
 
         <!-- Error toast -->
         <div
@@ -387,425 +334,87 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
-import { api } from "@/services/api";
+import { computed, onMounted } from "vue";
+import { useStrategies } from "@/composables/useStrategies";
+import BadgePill from "@/components/ui/BadgePill.vue";
+import StrategyTypeBadge from "@/components/ui/StrategyTypeBadge.vue";
+import SegmentedFilterGroup from "@/components/ui/SegmentedFilterGroup.vue";
+import FilterToolbar from "@/components/ui/FilterToolbar.vue";
+import FilterToolbarDivider from "@/components/ui/FilterToolbarDivider.vue";
+import DataTableScaffold from "@/components/ui/DataTableScaffold.vue";
+import ViewHeader from "@/components/ui/ViewHeader.vue";
+import {
+    ariaSortForColumn,
+    stickyFirstColumnClass,
+    tableCellAlignClass,
+    tableHeaderAlignClass,
+    tableWidthClass,
+} from "@/lib/ui";
 
-interface BacktestStats {
-    total_return: number;
-    win_rate: number;
-    sharpe_ratio: number;
-    max_drawdown: number;
-    num_trades: number;
-    avg_win: number;
-    avg_loss: number;
-}
+const {
+    strategies,
+    loading,
+    activeTab,
+    strategyFilter,
+    statusFilter,
+    sortKey,
+    sortDir,
+    toggling,
+    deleting,
+    deleteConfirm,
+    errorMessage,
+    marketTabs,
+    strategyFilters,
+    statusFilters,
+    columns,
+    sortedStrategies,
+    enabledCount,
+    tabCount,
+    toggleSort,
+    pct,
+    num,
+    winRateDeltaLabel,
+    winRateDeltaClass,
+    edgeStatus,
+    toggleStrategy,
+    deleteStrategy,
+    loadStrategies,
+} = useStrategies();
 
-interface LiveStats {
-    num_trades: number;
-    wins: number;
-    losses: number;
-    win_rate: number;
-    total_return: number;
-    avg_win: number;
-    avg_loss: number;
-}
-
-interface LiveStrategy {
-    id: string;
-    strategy_type: string;
-    instrument: string;
-    granularity: string;
-    parameters: Record<string, any>;
-    enabled: boolean;
-    max_position_size: string;
-    created_at: string;
-    updated_at: string;
-    backtest_run_id: string | null;
-    backtest_stats: BacktestStats | null;
-    live_stats: LiveStats | null;
-}
-
-const instrumentCategories: Record<string, string> = {
-    EUR_USD: "forex",
-    GBP_USD: "forex",
-    USD_JPY: "forex",
-    AUD_USD: "forex",
-    USD_CAD: "forex",
-    NZD_USD: "forex",
-    USD_CHF: "forex",
-    EUR_GBP: "forex",
-    EUR_JPY: "forex",
-    GBP_JPY: "forex",
-    AUD_JPY: "forex",
-    EUR_AUD: "forex",
-    EUR_CAD: "forex",
-    EUR_CHF: "forex",
-    EUR_NZD: "forex",
-    GBP_AUD: "forex",
-    GBP_CAD: "forex",
-    GBP_CHF: "forex",
-    GBP_NZD: "forex",
-    AUD_CAD: "forex",
-    AUD_CHF: "forex",
-    AUD_NZD: "forex",
-    NZD_CAD: "forex",
-    NZD_CHF: "forex",
-    NZD_JPY: "forex",
-    CAD_JPY: "forex",
-    CAD_CHF: "forex",
-    CHF_JPY: "forex",
-    USD_SGD: "forex",
-    EUR_SGD: "forex",
-    SGD_JPY: "forex",
-    USD_HKD: "forex",
-    USD_NOK: "forex",
-    USD_SEK: "forex",
-    USD_DKK: "forex",
-    EUR_NOK: "forex",
-    EUR_SEK: "forex",
-    EUR_DKK: "forex",
-    USD_CNH: "forex",
-    EUR_HUF: "forex",
-    USD_HUF: "forex",
-    EUR_PLN: "forex",
-    USD_PLN: "forex",
-    EUR_CZK: "forex",
-    USD_CZK: "forex",
-    USD_MXN: "forex",
-    USD_ZAR: "forex",
-    EUR_ZAR: "forex",
-    USD_TRY: "forex",
-    EUR_TRY: "forex",
-    USD_THB: "forex",
-    USD_INR: "forex",
-    XAU_USD: "metals",
-    XAG_USD: "metals",
-    XAU_EUR: "metals",
-    XAG_EUR: "metals",
-    XAU_GBP: "metals",
-    XAG_GBP: "metals",
-    XAU_AUD: "metals",
-    XAG_AUD: "metals",
-    XAU_CAD: "metals",
-    XAG_CAD: "metals",
-    XAU_CHF: "metals",
-    XAG_CHF: "metals",
-    XAU_JPY: "metals",
-    XAG_JPY: "metals",
-    XAU_NZD: "metals",
-    XAG_NZD: "metals",
-    XAU_SGD: "metals",
-    XAG_SGD: "metals",
-    XAU_HKD: "metals",
-    XPT_USD: "metals",
-    XPD_USD: "metals",
-    BCO_USD: "commodities",
-    WTICO_USD: "commodities",
-    NATGAS_USD: "commodities",
-    SOYBN_USD: "commodities",
-    CORN_USD: "commodities",
-    SUGAR_USD: "commodities",
-    WHEAT_USD: "commodities",
-    SPX500_USD: "indices",
-    NAS100_USD: "indices",
-    US30_USD: "indices",
-    US2000_USD: "indices",
-    UK100_GBP: "indices",
-    DE30_EUR: "indices",
-    FR40_EUR: "indices",
-    EU50_EUR: "indices",
-    JP225_USD: "indices",
-    AU200_AUD: "indices",
-    HK33_HKD: "indices",
-    SG30_SGD: "indices",
-    CN50_USD: "indices",
-    TWIX_USD: "indices",
-    IN50_USD: "indices",
-    USB02Y_USD: "bonds",
-    USB05Y_USD: "bonds",
-    USB10Y_USD: "bonds",
-    USB30Y_USD: "bonds",
-    UK10YB_GBP: "bonds",
-    DE10YB_EUR: "bonds",
-};
-
-function getCategory(instrument: string): string {
-    return instrumentCategories[instrument] || "forex";
-}
-
-const strategies = ref<LiveStrategy[]>([]);
-const loading = ref(true);
-const activeTab = ref("all");
-const strategyFilter = ref("all");
-const statusFilter = ref("all");
-const sortKey = ref("instrument");
-const sortDir = ref<"asc" | "desc">("asc");
-const toggling = ref<string | null>(null);
-const deleting = ref<string | null>(null);
-const deleteConfirm = ref<string | null>(null);
-const errorMessage = ref("");
-
-const marketTabs = [
-    { id: "all", label: "All" },
-    { id: "forex", label: "Forex" },
-    { id: "metals", label: "Metals" },
-    { id: "commodities", label: "Commodities" },
-    { id: "indices", label: "Indices" },
-    { id: "bonds", label: "Bonds" },
-];
-
-const strategyFilters = [
-    { value: "all", label: "All" },
-    { value: "mean_reversion", label: "Mean Reversion" },
-    { value: "trend_following", label: "Trend Following" },
-];
-
-const statusFilters = [
-    { value: "all", label: "All" },
-    { value: "enabled", label: "Active" },
-    { value: "disabled", label: "Inactive" },
-];
-
-const columns = [
-    { key: "instrument", label: "Pair", sortable: true },
-    { key: "strategy_type", label: "Type", sortable: true },
-    { key: "granularity", label: "TF", sortable: false },
-    { key: "params", label: "Parameters", sortable: false },
-    { key: "total_return", label: "BT Return", sortable: true },
-    { key: "win_rate", label: "BT Win%", sortable: true },
-    { key: "sharpe_ratio", label: "Sharpe", sortable: true },
-    { key: "max_drawdown", label: "DD", sortable: true },
-    { key: "num_trades", label: "BT #", sortable: true },
-    { key: "live_num_trades", label: "Live #", sortable: true },
-    { key: "live_win_rate", label: "Live Win%", sortable: true },
-    { key: "edge", label: "Edge", sortable: false },
-    { key: "enabled", label: "Live", sortable: true },
-];
-
-const filteredStrategies = computed(() => {
-    let filtered = strategies.value;
-    if (activeTab.value !== "all") {
-        filtered = filtered.filter(
-            (s) => getCategory(s.instrument) === activeTab.value,
-        );
-    }
-    if (strategyFilter.value !== "all") {
-        filtered = filtered.filter(
-            (s) => s.strategy_type === strategyFilter.value,
-        );
-    }
-    if (statusFilter.value === "enabled") {
-        filtered = filtered.filter((s) => s.enabled);
-    } else if (statusFilter.value === "disabled") {
-        filtered = filtered.filter((s) => !s.enabled);
-    }
-    return filtered;
+const marketTabCounts = computed(() => {
+    return Object.fromEntries(marketTabs.map((tab) => [tab.id, tabCount(tab.id)]));
 });
-
-const sortedStrategies = computed(() => {
-    const sorted = [...filteredStrategies.value];
-    sorted.sort((a, b) => {
-        let aVal: any, bVal: any;
-
-        switch (sortKey.value) {
-            case "instrument":
-                aVal = a.instrument;
-                bVal = b.instrument;
-                break;
-            case "strategy_type":
-                aVal = a.strategy_type;
-                bVal = b.strategy_type;
-                break;
-            case "enabled":
-                aVal = a.enabled ? 1 : 0;
-                bVal = b.enabled ? 1 : 0;
-                break;
-            case "total_return":
-                aVal = a.backtest_stats?.total_return ?? -999;
-                bVal = b.backtest_stats?.total_return ?? -999;
-                break;
-            case "win_rate":
-                aVal = a.backtest_stats?.win_rate ?? -999;
-                bVal = b.backtest_stats?.win_rate ?? -999;
-                break;
-            case "sharpe_ratio":
-                aVal = a.backtest_stats?.sharpe_ratio ?? -999;
-                bVal = b.backtest_stats?.sharpe_ratio ?? -999;
-                break;
-            case "max_drawdown":
-                aVal = a.backtest_stats?.max_drawdown ?? -999;
-                bVal = b.backtest_stats?.max_drawdown ?? -999;
-                break;
-            case "num_trades":
-                aVal = a.backtest_stats?.num_trades ?? -999;
-                bVal = b.backtest_stats?.num_trades ?? -999;
-                break;
-            case "live_num_trades":
-                aVal = a.live_stats?.num_trades ?? -1;
-                bVal = b.live_stats?.num_trades ?? -1;
-                break;
-            case "live_win_rate":
-                aVal = a.live_stats?.win_rate ?? -1;
-                bVal = b.live_stats?.win_rate ?? -1;
-                break;
-            default:
-                aVal = a.instrument;
-                bVal = b.instrument;
-        }
-
-        if (typeof aVal === "string") {
-            return sortDir.value === "asc"
-                ? aVal.localeCompare(bVal)
-                : bVal.localeCompare(aVal);
-        }
-        return sortDir.value === "asc" ? aVal - bVal : bVal - aVal;
-    });
-    return sorted;
-});
-
-const enabledCount = computed(
-    () => strategies.value.filter((s) => s.enabled).length,
-);
-
-function tabCount(tabId: string): number {
-    if (tabId === "all") return strategies.value.length;
-    return strategies.value.filter((s) => getCategory(s.instrument) === tabId)
-        .length;
-}
-
-function toggleSort(key: string) {
-    if (sortKey.value === key) {
-        sortDir.value = sortDir.value === "asc" ? "desc" : "asc";
-    } else {
-        sortKey.value = key;
-        sortDir.value =
-            key === "instrument" || key === "strategy_type" ? "asc" : "desc";
-    }
-}
-
-function pct(value: number): string {
-    return (value * 100).toFixed(2) + "%";
-}
-
-function expectancy(
-    winRate: number,
-    avgWin: number,
-    avgLoss: number,
-): number {
-    return winRate * avgWin + (1 - winRate) * avgLoss;
-}
-
-function winRateDeltaLabel(strategy: LiveStrategy): string {
-    if (!strategy.live_stats || !strategy.backtest_stats) return "";
-    const delta = strategy.live_stats.win_rate - strategy.backtest_stats.win_rate;
-    const sign = delta >= 0 ? "+" : "";
-    return `${sign}${(delta * 100).toFixed(1)}`;
-}
-
-function winRateDeltaClass(strategy: LiveStrategy): string {
-    if (!strategy.live_stats || !strategy.backtest_stats)
-        return "text-muted-foreground";
-    const delta = strategy.live_stats.win_rate - strategy.backtest_stats.win_rate;
-    if (Math.abs(delta) < 0.02) return "text-muted-foreground";
-    return delta >= 0 ? "text-emerald-400" : "text-red-400";
-}
-
-function edgeStatus(strategy: LiveStrategy): {
-    label: string;
-    color: string;
-} {
-    const live = strategy.live_stats;
-    const bt = strategy.backtest_stats;
-    if (!live || !bt) {
-        return { label: "—", color: "bg-muted/40 text-muted-foreground/60" };
-    }
-    if (live.num_trades < 5) {
-        return {
-            label: `${live.num_trades}/5`,
-            color: "bg-muted text-muted-foreground",
-        };
-    }
-
-    const liveExp = expectancy(live.win_rate, live.avg_win, live.avg_loss);
-    const btExp = expectancy(bt.win_rate, bt.avg_win, bt.avg_loss);
-
-    if (liveExp <= 0 && btExp <= 0) {
-        return { label: "Neg E", color: "bg-red-500/10 text-red-400" };
-    }
-    if (btExp <= 0) {
-        return {
-            label: "Live > BT",
-            color: "bg-emerald-500/10 text-emerald-400",
-        };
-    }
-
-    const ratio = liveExp / btExp;
-    if (ratio >= 0.85) {
-        return {
-            label: "Holding",
-            color: "bg-emerald-500/10 text-emerald-400",
-        };
-    }
-    if (ratio >= 0.5) {
-        return { label: "Decay", color: "bg-amber-500/10 text-amber-400" };
-    }
-    return { label: "Broken", color: "bg-red-500/10 text-red-400" };
-}
-
-function showError(msg: string) {
-    errorMessage.value = msg;
-    setTimeout(() => {
-        errorMessage.value = "";
-    }, 4000);
-}
-
-async function toggleStrategy(strategy: LiveStrategy) {
-    toggling.value = strategy.id;
-    try {
-        const data = await api.post<{ id: string; enabled: boolean }>(
-            `/live/strategies/${strategy.id}/toggle`,
-            {},
-        );
-        strategy.enabled = data.enabled;
-    } catch (e: any) {
-        showError("Failed to toggle strategy");
-        console.error("Toggle failed:", e);
-    } finally {
-        toggling.value = null;
-    }
-}
-
-async function deleteStrategy(strategy: LiveStrategy) {
-    deleting.value = strategy.id;
-    deleteConfirm.value = null;
-    try {
-        await api.delete(`/live/strategies/${strategy.id}`);
-        strategies.value = strategies.value.filter((s) => s.id !== strategy.id);
-    } catch (e: any) {
-        const msg = e?.response?.data?.error || "Failed to delete strategy";
-        showError(msg);
-        console.error("Delete failed:", e);
-    } finally {
-        deleting.value = null;
-    }
-}
-
-async function loadStrategies() {
-    loading.value = true;
-    try {
-        const data = await api.get<{
-            strategies: LiveStrategy[];
-            count: number;
-        }>("/live/strategies");
-        strategies.value = data.strategies;
-    } catch (e) {
-        console.error("Failed to load strategies:", e);
-    } finally {
-        loading.value = false;
-    }
-}
 
 onMounted(() => {
     loadStrategies();
 });
+
+function headerClass(key: string, columnIndex: number, sortable: boolean): string {
+    return [
+        tableWidthClass("strategies", key),
+        tableHeaderAlignClass(key),
+        sortable ? "cursor-pointer hover:text-foreground transition-colors" : "",
+        stickyFirstColumnClass({
+            isFirst: columnIndex === 0,
+            isHeader: true,
+        }),
+    ]
+        .filter(Boolean)
+        .join(" ");
+}
+
+function cellClass(key: string, columnIndex: number, extraClass = ""): string {
+    return [
+        "px-3 py-2 whitespace-nowrap font-mono",
+        tableWidthClass("strategies", key),
+        tableCellAlignClass(key),
+        extraClass,
+        stickyFirstColumnClass({
+            isFirst: columnIndex === 0,
+            isHeader: false,
+        }),
+    ]
+        .filter(Boolean)
+        .join(" ");
+}
 </script>

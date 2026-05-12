@@ -1,5 +1,5 @@
-import { ref, onUnmounted } from "vue";
-import { useMarketStore } from "@/stores/market";
+import { getCurrentInstance, onUnmounted, ref } from "vue";
+import { useMarketStore } from "../stores/market";
 
 export function useWebSocket(url: string) {
   const connected = ref(false);
@@ -62,9 +62,11 @@ export function useWebSocket(url: string) {
     ws = null;
   }
 
-  onUnmounted(() => {
-    disconnect();
-  });
+  if (getCurrentInstance()) {
+    onUnmounted(() => {
+      disconnect();
+    });
+  }
 
   return { connected, connect, disconnect };
 }

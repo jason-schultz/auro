@@ -1,39 +1,31 @@
 <template>
     <main class="p-6 h-[calc(100vh-57px)] flex flex-col">
-        <!-- Market tabs -->
-        <div class="flex items-center gap-1 mb-4">
-            <button
-                v-for="tab in tabs"
-                :key="tab.id"
-                class="px-3 py-1.5 text-sm rounded transition-colors"
-                :class="
-                    activeTab === tab.id
-                        ? 'bg-primary/10 text-primary'
-                        : 'text-muted-foreground hover:text-foreground'
-                "
-                @click="activeTab = tab.id"
-            >
-                {{ tab.label }}
-            </button>
-        </div>
+        <ViewHeader title="Markets" />
+
+        <FilterToolbar>
+            <SegmentedFilterGroup
+                :model-value="activeTab"
+                :options="tabs"
+                active-class="bg-primary/10 text-primary"
+                inactive-class="text-muted-foreground hover:text-foreground"
+                @update:model-value="(value) => (activeTab = value)"
+            />
+        </FilterToolbar>
 
         <div v-if="marketClosed" class="fr-card p-3 mb-4">
-            <div class="text-sm text-muted-foreground text-center">
-                Forex market is currently closed. Live prices will resume Sunday
-                5pm ET.
-            </div>
+            <StateMessage
+                message="Forex market is currently closed. Live prices will resume Sunday 5pm ET."
+                :compact="true"
+            />
         </div>
 
         <!-- TSX placeholder -->
         <div v-if="activeTab === 'tsx'" class="flex-1">
-            <div class="fr-card p-12 text-muted-foreground text-center text-sm">
-                <div class="mb-2">
-                    TSX equities — Wealthsimple manual tracking
-                </div>
-                <div class="text-[10px] text-muted-foreground/50">
-                    Data source TBD. Will pull from Yahoo Finance or Alpha
-                    Vantage.
-                </div>
+            <div class="fr-card p-12">
+                <StateMessage
+                    message="TSX equities - Wealthsimple manual tracking"
+                    detail="Data source TBD. Will pull from Yahoo Finance or Alpha Vantage."
+                />
             </div>
         </div>
 
@@ -64,13 +56,10 @@
 
                 <div
                     v-if="filteredInstruments.length === 0"
-                    class="text-sm text-muted-foreground py-8 text-center"
                 >
-                    {{
-                        loading
-                            ? "Loading instruments..."
-                            : "No instruments available"
-                    }}
+                    <StateMessage
+                        :message="loading ? 'Loading instruments...' : 'No instruments available'"
+                    />
                 </div>
 
                 <div v-else class="grid gap-2">
@@ -164,151 +153,22 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
-import { useMarketStore } from "@/stores/market";
-import { api } from "@/services/api";
+import { useMarkets } from "@/composables/useMarkets";
 import CandleChart from "@/components/CandleChart.vue";
+import FilterToolbar from "@/components/ui/FilterToolbar.vue";
+import SegmentedFilterGroup from "@/components/ui/SegmentedFilterGroup.vue";
+import StateMessage from "@/components/ui/StateMessage.vue";
+import ViewHeader from "@/components/ui/ViewHeader.vue";
 
-const marketStore = useMarketStore();
-const connected = computed(() => marketStore.connected);
-
-const activeTab = ref("forex");
-const loading = ref(true);
-
-interface OandaInstrument {
-    name: string;
-    displayName: string;
-    type: string;
-}
-
-const allInstruments = ref<OandaInstrument[]>([]);
-
-const tabs = [
-    { id: "forex", label: "Forex" },
-    { id: "metals", label: "Metals" },
-    { id: "commodities", label: "Commodities" },
-    { id: "indices", label: "Indices" },
-    { id: "bonds", label: "Bonds" },
-    { id: "tsx", label: "TSX" },
-];
-
-const currentTabLabel = computed(() => {
-    return tabs.find((t) => t.id === activeTab.value)?.label ?? "";
-});
-
-const marketClosed = computed(() => {
-    const now = new Date();
-    const et = new Date(
-        now.toLocaleString("en-US", { timeZone: "America/New_York" }),
-    );
-    const day = et.getDay();
-    const hour = et.getHours();
-    if (day === 6) return true; // Saturday
-    if (day === 0 && hour < 17) return true; // Sunday before 5pm ET
-    if (day === 5 && hour >= 17) return true; // Friday after 5pm ET
-    return false;
-});
-
-// Map OANDA instrument types to our tab categories
-function categorize(instrument: OandaInstrument): string {
-    const name = instrument.name;
-    const type = instrument.type;
-
-    if (type === "METAL") return "metals";
-    if (type === "CURRENCY") return "forex";
-
-    // CFD type needs manual splitting
-    // Bonds
-    if (name.includes("USB") || name.includes("10YB")) return "bonds";
-
-    // Commodities
-    if (
-        name.startsWith("WTICO") ||
-        name.startsWith("BCO") ||
-        name.startsWith("NATGAS") ||
-        name.startsWith("CORN") ||
-        name.startsWith("SOYBN") ||
-        name.startsWith("WHEAT") ||
-        name.startsWith("SUGAR") ||
-        name.startsWith("XCU") ||
-        name.startsWith("XPT") ||
-        name.startsWith("XPD")
-    ) {
-        return "commodities";
-    }
-
-    // Everything else CFD is an index
-    return "indices";
-}
-
-const filteredInstruments = computed(() => {
-    const category = activeTab.value;
-    const instrumentNames = allInstruments.value
-        .filter((inst) => categorize(inst) === category)
-        .map((inst) => inst.name);
-
-    // Merge with live price data from the store
-    return instrumentNames.map((name) => {
-        const tick = marketStore.prices[name];
-        if (tick) {
-            const bid = parseFloat(tick.bid);
-            const ask = parseFloat(tick.ask);
-            const spread = ask - bid;
-
-            return {
-                instrument: name,
-                bid: tick.bid,
-                ask: tick.ask,
-                spread: spread.toFixed(name.includes("JPY") ? 3 : 5),
-                time: tick.time,
-                bidDirection: tick.prevBid
-                    ? Math.abs(bid - parseFloat(tick.prevBid)) > 0.00001
-                        ? bid > parseFloat(tick.prevBid)
-                            ? "up"
-                            : "down"
-                        : "flat"
-                    : "flat",
-                askDirection: tick.prevAsk
-                    ? Math.abs(ask - parseFloat(tick.prevAsk)) > 0.00001
-                        ? ask > parseFloat(tick.prevAsk)
-                            ? "up"
-                            : "down"
-                        : "flat"
-                    : "flat",
-            };
-        }
-
-        return {
-            instrument: name,
-            bid: null,
-            ask: null,
-            spread: null,
-            time: null,
-            bidDirection: "flat",
-            askDirection: "flat",
-        };
-    });
-});
-
-function formatTime(time: string): string {
-    try {
-        return new Date(time).toLocaleTimeString();
-    } catch {
-        return time;
-    }
-}
-
-onMounted(async () => {
-    try {
-        const data = await api.get<{
-            instruments: OandaInstrument[];
-            count: number;
-        }>("/instruments");
-        allInstruments.value = data.instruments;
-    } catch (e) {
-        console.error("Failed to load instruments:", e);
-    } finally {
-        loading.value = false;
-    }
-});
+const {
+    marketStore,
+    connected,
+    activeTab,
+    loading,
+    tabs,
+    currentTabLabel,
+    marketClosed,
+    filteredInstruments,
+    formatTime,
+} = useMarkets();
 </script>
