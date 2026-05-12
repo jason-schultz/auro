@@ -703,7 +703,7 @@ pub async fn get_trading_config(State(state): State<AppState>) -> AppResult<Json
             .await
             .map_err(AppError::Database)?;
 
-    let config: serde_json::Map<String, Value> = rows.into_iter().map(|(k, v)| (k, v)).collect();
+    let config: serde_json::Map<String, Value> = rows.into_iter().collect();
 
     Ok(Json(json!({ "config": config })))
 }

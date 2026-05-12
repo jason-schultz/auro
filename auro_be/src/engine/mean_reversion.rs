@@ -52,9 +52,9 @@ pub fn run(candles: &[Candle], params: &MeanReversionParams) -> Vec<Trade> {
             let entry_time = candles[i].time;
             let entry_price = close;
             let mut in_trade = true;
-            for j in i + 1..candles.len() {
-                let exit_price = candles[j].close;
-                let exit_time = candles[j].time;
+            for (j, candle) in candles.iter().enumerate().skip(i + 1) {
+                let exit_price = candle.close;
+                let exit_time = candle.time;
                 let pnl = (exit_price - entry_price) / entry_price;
                 if pnl > params.exit_threshold || pnl < params.stop_loss {
                     in_trade = false;

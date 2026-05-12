@@ -37,7 +37,7 @@ pub(crate) async fn run_prefill_rules(state: &AppState) {
 pub(crate) async fn run_prefill_buffers(state: &AppState) {
     let mut buffers = state.live.buffers.write().await;
 
-    match prefill_buffers(&state.db, &mut *buffers).await {
+    match prefill_buffers(&state.db, &mut buffers).await {
         Ok(count) => {
             tracing::info!(
                 "Pre-filled buffers for {} instrument/granularity pairs",
