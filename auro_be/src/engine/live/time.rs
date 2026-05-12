@@ -145,6 +145,46 @@ mod tests {
     }
 
     #[test]
+    fn time_slot_m5_changes_every_5_minutes() {
+        // Hour 0
+        assert_eq!(time_slot(Granularity::M5, 0, 0), 0);
+        assert_eq!(time_slot(Granularity::M5, 0, 4), 0); // still in first 5-min block
+        assert_eq!(time_slot(Granularity::M5, 0, 5), 1); // new block
+        assert_eq!(time_slot(Granularity::M5, 0, 10), 2);
+        assert_eq!(time_slot(Granularity::M5, 0, 55), 11);
+        // Hour 1
+        assert_eq!(time_slot(Granularity::M5, 1, 0), 12);
+        assert_eq!(time_slot(Granularity::M5, 1, 5), 13);
+        // Hour 23
+        assert_eq!(time_slot(Granularity::M5, 23, 55), 287);
+    }
+
+    #[test]
+    fn time_slot_m5_consecutive_minutes_same_slot() {
+        // Minutes 0-4 should all be the same slot
+        let slot = time_slot(Granularity::M5, 10, 0);
+        for m in 0..5 {
+            assert_eq!(time_slot(Granularity::M5, 10, m), slot);
+        }
+        // Minute 5 starts a new slot
+        assert_ne!(time_slot(Granularity::M5, 10, 5), slot);
+    }
+
+    #[test]
+    fn compute_slot_time_m5_returns_start_of_current_5min_block() {
+        let tick = Utc.with_ymd_and_hms(2026, 5, 1, 14, 37, 42).unwrap();
+        let expected = Utc.with_ymd_and_hms(2026, 5, 1, 14, 35, 0).unwrap();
+        assert_eq!(compute_slot_time(Granularity::M5, tick), expected);
+    }
+
+    #[test]
+    fn compute_slot_time_m5_at_block_boundary() {
+        let tick = Utc.with_ymd_and_hms(2026, 5, 1, 14, 25, 0).unwrap();
+        let expected = Utc.with_ymd_and_hms(2026, 5, 1, 14, 25, 0).unwrap();
+        assert_eq!(compute_slot_time(Granularity::M5, tick), expected);
+    }
+
+    #[test]
     fn time_slot_h4_changes_every_4_hours() {
         assert_eq!(time_slot(Granularity::H4, 0, 0), 0);
         assert_eq!(time_slot(Granularity::H4, 1, 30), 0); // still in first 4h block

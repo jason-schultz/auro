@@ -79,11 +79,12 @@ async fn prefill_buffers(
                 FROM candles
                 WHERE instrument = $1 AND granularity = $2
             ORDER BY timestamp DESC
-            LIMIT 200
+            LIMIT $3
             "#,
             )
             .bind(instrument)
             .bind(granularity.as_str())
+            .bind(granularity.buffer_capacity() as i64)
             .fetch_all(pool)
             .await?;
 

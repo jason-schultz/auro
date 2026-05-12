@@ -450,4 +450,59 @@ mod tests {
         }
         assert_eq!(buf.closes(), vec![7.0, 8.0, 9.0]);
     }
+
+    #[test]
+    fn buffer_capacity_correct_for_all_granularities() {
+        assert_eq!(Granularity::M1.buffer_capacity(), 500);
+        assert_eq!(Granularity::M5.buffer_capacity(), 500);
+        assert_eq!(Granularity::M15.buffer_capacity(), 400);
+        assert_eq!(Granularity::H1.buffer_capacity(), 200);
+        assert_eq!(Granularity::H4.buffer_capacity(), 100);
+        assert_eq!(Granularity::D.buffer_capacity(), 60);
+    }
+
+    #[test]
+    fn buffer_closes_are_chronological_oldest_to_newest() {
+        let mut buf = CandleBuffer::new(5);
+        buf.push(candle(slot_time(0, 0), 1.1000)); // oldest
+        buf.push(candle(slot_time(1, 0), 1.2000));
+        buf.push(candle(slot_time(2, 0), 1.3000)); // newest
+
+        let closes = buf.closes();
+        assert_eq!(closes, vec![1.1000, 1.2000, 1.3000]);
+        // Evaluators index from the tail: closes[len-1] is the newest close
+        assert_eq!(*closes.last().unwrap(), 1.3000);
+    }
+
+    #[test]
+    fn evaluator_sees_newest_candles_after_overflow() {
+        // Fill a small buffer well past capacity to confirm the window slides
+        // correctly and a strategy consuming closes[len-period..] gets recent data.
+        let capacity = 5;
+        let mut buf = CandleBuffer::new(capacity);
+
+        // Push 10 candles with close prices 1.0 through 10.0
+        for i in 1..=10u32 {
+            buf.push(candle(slot_time(i, 0), i as f64));
+        }
+
+        let closes = buf.closes();
+
+        // Buffer should hold exactly `capacity` candles
+        assert_eq!(closes.len(), capacity);
+
+        // The window should be the 5 most recent: 6.0, 7.0, 8.0, 9.0, 10.0
+        assert_eq!(closes, vec![6.0, 7.0, 8.0, 9.0, 10.0]);
+
+        // Simulate a mean-reversion MA(3): uses closes[len-3..] = [8.0, 9.0, 10.0]
+        let ma_period = 3;
+        let ma: f64 = closes[closes.len() - ma_period..].iter().sum::<f64>() / ma_period as f64;
+        assert_eq!(ma, 9.0); // (8+9+10)/3 — newest 3 candles, not oldest
+
+        // Simulate a trend-following fast MA(2): uses closes[len-2..] = [9.0, 10.0]
+        let fast_period = 2;
+        let fast_ma: f64 =
+            closes[closes.len() - fast_period..].iter().sum::<f64>() / fast_period as f64;
+        assert_eq!(fast_ma, 9.5); // (9+10)/2 — newest 2 candles
+    }
 }
