@@ -114,10 +114,8 @@ defmodule Opus.Trading.RulesEngine do
     end
   end
 
-  @doc """
-  Read all enabled rows from `live_strategies`. Returns a list of maps with
-  the fields we need: `id`, `strategy_type`, `instrument`, `granularity`.
-  """
+  # Read all enabled rows from `live_strategies`. Returns a list of maps with
+  # the fields we need: `id`, `strategy_type`, `instrument`, `granularity`.
   defp list_enabled_strategies do
     from(s in "live_strategies",
       where: s.enabled == true,
@@ -131,11 +129,8 @@ defmodule Opus.Trading.RulesEngine do
     |> Repo.all()
   end
 
-  @doc """
-  Derive a single decision from a strategy and the current regime map.
-
-  Returns a map: `%{live_strategy_id, enabled, reason, computed_at}`.
-  """
+  # Derive a single decision from a strategy and the current regime map.
+  # Returns a map: `%{live_strategy_id, enabled, reason, computed_at}`.
   defp decide(strategy, regimes) do
     h4 = Map.get(regimes, {strategy.instrument, "H4"}, %{regime: :unknown})
     h1 = Map.get(regimes, {strategy.instrument, "H1"}, %{regime: :unknown})
@@ -216,12 +211,9 @@ defmodule Opus.Trading.RulesEngine do
   defp format_adx(nil), do: "n/a"
   defp format_adx(adx), do: :erlang.float_to_binary(adx, decimals: 1)
 
-  @doc """
-  Persist all decisions to the rules table, then push the full map to Rust.
-
-  Returns `:ok` or `{:error, reason}`. If persistence succeeds but push fails,
-  return error — the next tick will re-push with whatever's in the DB.
-  """
+  # Persist all decisions to the rules table, then push the full map to Rust.
+  # Returns `:ok` or `{:error, reason}`. If persistence succeeds but push fails,
+  # return error — the next tick will re-push with whatever's in the DB.
   defp persist_and_push(decisions) do
     Enum.each(decisions, fn d ->
       %Rule{}

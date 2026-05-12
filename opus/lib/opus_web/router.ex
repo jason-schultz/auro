@@ -2,15 +2,15 @@ defmodule OpusWeb.Router do
   use OpusWeb, :router
 
   pipeline :api do
-    plug :accepts, ["json"]
+    plug(:accepts, ["json"])
   end
 
   scope "/api", OpusWeb do
-    pipe_through :api
+    pipe_through(:api)
 
-    get "/regimes", RegimeController, :index
-    get "/pipeline", PipelineController, :index
-    post "/pipeline/:config_id/promote", PipelineController, :promote
+    get("/regimes", RegimeController, :index)
+    get("/pipeline", PipelineController, :index)
+    post("/pipeline/:config_id/promote", PipelineController, :promote)
   end
 
   # Enable LiveDashboard and Swoosh mailbox preview in development
@@ -23,10 +23,9 @@ defmodule OpusWeb.Router do
     import Phoenix.LiveDashboard.Router
 
     scope "/dev" do
-      pipe_through [:fetch_session, :protect_from_forgery]
+      pipe_through([:fetch_session, :protect_from_forgery])
 
-      live_dashboard "/dashboard", metrics: OpusWeb.Telemetry
-      forward "/mailbox", Plug.Swoosh.MailboxPreview
+      live_dashboard("/dashboard", metrics: OpusWeb.Telemetry)
     end
   end
 end
