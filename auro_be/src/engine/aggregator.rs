@@ -69,19 +69,6 @@ fn snap_to_minutes(timestamp: DateTime<Utc>, minutes: usize) -> DateTime<Utc> {
     }
 }
 
-fn format_granularity(minutes: usize) -> String {
-    match minutes {
-        1 => "M1".to_string(),
-        5 => "M5".to_string(),
-        15 => "M15".to_string(),
-        30 => "M30".to_string(),
-        60 => "H1".to_string(),
-        240 => "H4".to_string(),
-        1440 => "D1".to_string(),
-        n => format!("M{}", n),
-    }
-}
-
 pub fn granularity_to_minutes(granularity: String) -> usize {
     match granularity.as_str() {
         "M1" => 1,

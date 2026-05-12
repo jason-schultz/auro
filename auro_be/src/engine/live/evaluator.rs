@@ -9,8 +9,8 @@ use crate::engine::types::{
 };
 use crate::oanda::client::OandaClient;
 
-use super::CandleBuffer;
 use super::format_price;
+use super::CandleBuffer;
 
 pub(crate) fn position_key_deltas(
     before: &HashMap<String, OpenPosition>,
@@ -43,6 +43,7 @@ pub(crate) async fn is_trading_enabled(pool: &PgPool) -> bool {
         .unwrap_or(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn evaluate_strategies(
     pool: &PgPool,
     oanda: &OandaClient,
@@ -69,23 +70,24 @@ pub(crate) async fn evaluate_strategies(
     let mut reports: Vec<SignalReport> = Vec::new();
 
     for strategy in &strategies {
-        let has_position = open_positions.values().any(|p| p.strategy_id == strategy.id);
+        let has_position = open_positions
+            .values()
+            .any(|p| p.strategy_id == strategy.id);
 
         if has_position {
             let exit_reports =
                 evaluate_exit(pool, oanda, strategy, current_price, buffer, open_positions).await?;
             reports.extend(exit_reports);
-        } else if let Some(entry_report) =
-            evaluate_entry(
-                pool,
-                oanda,
-                strategy,
-                current_price,
-                buffer,
-                open_positions,
-                rules,
-            )
-            .await?
+        } else if let Some(entry_report) = evaluate_entry(
+            pool,
+            oanda,
+            strategy,
+            current_price,
+            buffer,
+            open_positions,
+            rules,
+        )
+        .await?
         {
             reports.push(entry_report);
         }
@@ -134,6 +136,7 @@ async fn evaluate_entry(
                 entry_threshold: params["entry_threshold"].as_f64().unwrap_or(-0.01),
                 exit_threshold: params["exit_threshold"].as_f64().unwrap_or(0.003),
                 stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.005),
+                regime_filter: false, // live path: regime gating handled by Elixir rules engine
             };
 
             let closes = buffer.closes();
@@ -166,43 +169,41 @@ async fn evaluate_entry(
                 );
             }
 
-            match mean_reversion::check_entry(&closes, &mr_params) {
-                MRSignal::Enter {
-                    ma_value,
-                    deviation_pct,
-                } => {
-                    tracing::info!(
-                        "[SIGNAL] Mean reversion entry on {} ({}): price={:.5}, MA{}={:.5}, deviation={:.4}%",
-                        strategy.instrument, strategy.granularity, current_price, mr_params.ma_period, ma_value, deviation_pct * 100.0
-                    );
+            if let MRSignal::Enter {
+                ma_value,
+                deviation_pct,
+            } = mean_reversion::check_entry(&closes, &mr_params)
+            {
+                tracing::info!(
+                    "[SIGNAL] Mean reversion entry on {} ({}): price={:.5}, MA{}={:.5}, deviation={:.4}%",
+                    strategy.instrument, strategy.granularity, current_price, mr_params.ma_period, ma_value, deviation_pct * 100.0
+                );
 
-                    if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
-                        return Ok(Some(gated));
-                    }
-
-                    let sl_price = current_price * (1.0 + mr_params.stop_loss);
-                    let tp_price = current_price * (1.0 + mr_params.exit_threshold);
-
-                    return execute_entry(
-                        pool,
-                        oanda,
-                        strategy,
-                        &Direction::Long,
-                        &strategy.max_position_size,
-                        current_price,
-                        sl_price,
-                        Some(tp_price),
-                        &format!(
-                            "BelowMA: MA{}={:.5}, deviation={:.4}%",
-                            mr_params.ma_period,
-                            ma_value,
-                            deviation_pct * 100.0
-                        ),
-                        open_positions,
-                    )
-                    .await;
+                if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
+                    return Ok(Some(gated));
                 }
-                _ => {}
+
+                let sl_price = current_price * (1.0 + mr_params.stop_loss);
+                let tp_price = current_price * (1.0 + mr_params.exit_threshold);
+
+                return execute_entry(
+                    pool,
+                    oanda,
+                    strategy,
+                    &Direction::Long,
+                    &strategy.max_position_size,
+                    current_price,
+                    sl_price,
+                    Some(tp_price),
+                    &format!(
+                        "BelowMA: MA{}={:.5}, deviation={:.4}%",
+                        mr_params.ma_period,
+                        ma_value,
+                        deviation_pct * 100.0
+                    ),
+                    open_positions,
+                )
+                .await;
             }
         }
         "trend_following" => {
@@ -211,6 +212,7 @@ async fn evaluate_entry(
                 slow_period: params["slow_period"].as_u64().unwrap_or(50) as usize,
                 stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.02),
                 take_profit: params["take_profit"].as_f64(),
+                regime_filter: false, // live path: regime gating handled by Elixir rules engine
             };
 
             let closes = buffer.closes();
@@ -319,6 +321,7 @@ async fn evaluate_entry(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_entry(
     pool: &PgPool,
     oanda: &OandaClient,
@@ -473,20 +476,20 @@ async fn evaluate_exit(
                 slow_period: params["slow_period"].as_u64().unwrap_or(50) as usize,
                 stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.02),
                 take_profit: params["take_profit"].as_f64(),
+                regime_filter: false, // live path: regime gating handled by Elixir rules engine
             };
 
             let is_long = positions_for_strategy[0].direction == Direction::Long;
             let closes = buffer.closes();
 
-            match trend_following::check_exit(&closes, &tf_params, is_long) {
-                TFSignal::ExitTrendReversal { fast_ma, slow_ma } => {
-                    should_exit = true;
-                    exit_reason = format!(
-                        "TrendReversal: fast_ma={:.5}, slow_ma={:.5}",
-                        fast_ma, slow_ma
-                    );
-                }
-                _ => {}
+            if let TFSignal::ExitTrendReversal { fast_ma, slow_ma } =
+                trend_following::check_exit(&closes, &tf_params, is_long)
+            {
+                should_exit = true;
+                exit_reason = format!(
+                    "TrendReversal: fast_ma={:.5}, slow_ma={:.5}",
+                    fast_ma, slow_ma
+                );
             }
         }
         _ => {}

@@ -78,8 +78,6 @@ const INSTRUMENTS: &[&str] = &[
 
 #[derive(Debug, serde::Deserialize)]
 struct GridResponse {
-    strategy: Option<String>,
-    instrument: Option<String>,
     error: Option<String>,
     results: Option<ResultCounts>,
     timing: Option<Timing>,
@@ -96,7 +94,6 @@ struct ResultCounts {
 struct Timing {
     grid_seconds: f64,
     store_seconds: f64,
-    total_seconds: f64,
 }
 
 struct Args {
@@ -210,7 +207,7 @@ async fn main() {
     if args.clear {
         println!("\nClearing old backtest results...");
         match client
-            .delete(&format!("{}/backtest/results", BASE_URL))
+            .delete(format!("{}/backtest/results", BASE_URL))
             .send()
             .await
         {

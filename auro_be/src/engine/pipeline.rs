@@ -62,15 +62,15 @@ pub fn instrument_to_class(instrument: &str) -> &'static str {
 fn run_strategy(candles: &[Candle], config: &StrategyConfig) -> AppResult<Vec<Trade>> {
     match config.strategy_type.as_str() {
         "mean_reversion" => {
-            let params: MeanReversionParams =
-                serde_json::from_value(config.parameters.clone()).map_err(|e| {
+            let params: MeanReversionParams = serde_json::from_value(config.parameters.clone())
+                .map_err(|e| {
                     AppError::BadRequest(format!("invalid mean_reversion parameters: {}", e))
                 })?;
             Ok(run_mean_reversion(candles, &params))
         }
         "trend_following" => {
-            let params: TrendFollowingParams =
-                serde_json::from_value(config.parameters.clone()).map_err(|e| {
+            let params: TrendFollowingParams = serde_json::from_value(config.parameters.clone())
+                .map_err(|e| {
                     AppError::BadRequest(format!("invalid trend_following parameters: {}", e))
                 })?;
             Ok(run_trend_following(candles, &params))
@@ -171,6 +171,7 @@ async fn load_thresholds(
     stage: &str,
     timeframe_class: &str,
     instrument_class: &str,
+    strategy_type: &str,
 ) -> AppResult<Vec<ThresholdRow>> {
     let to_rows = |rows: Vec<(String, String, f64)>| {
         rows.into_iter()
@@ -182,10 +183,27 @@ async fn load_thresholds(
             .collect::<Vec<_>>()
     };
 
-    // Try instrument-specific thresholds first.
+    // Level 1: instrument_class + strategy_type specific.
     let rows = sqlx::query_as::<_, (String, String, f64)>(
         "SELECT metric, operator, value FROM validation_thresholds \
-         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = $3",
+         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = $3 AND strategy_type = $4",
+    )
+    .bind(stage)
+    .bind(timeframe_class)
+    .bind(instrument_class)
+    .bind(strategy_type)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    if !rows.is_empty() {
+        return Ok(to_rows(rows));
+    }
+
+    // Level 2: instrument_class + strategy_type='all' (strategy-agnostic instrument thresholds).
+    let rows = sqlx::query_as::<_, (String, String, f64)>(
+        "SELECT metric, operator, value FROM validation_thresholds \
+         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = $3 AND strategy_type = 'all'",
     )
     .bind(stage)
     .bind(timeframe_class)
@@ -198,10 +216,10 @@ async fn load_thresholds(
         return Ok(to_rows(rows));
     }
 
-    // Fall back to the 'all' catch-all class.
+    // Level 3: catch-all (instrument_class='all', strategy_type='all').
     let rows = sqlx::query_as::<_, (String, String, f64)>(
         "SELECT metric, operator, value FROM validation_thresholds \
-         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = 'all'",
+         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = 'all' AND strategy_type = 'all'",
     )
     .bind(stage)
     .bind(timeframe_class)
@@ -212,11 +230,7 @@ async fn load_thresholds(
     Ok(to_rows(rows))
 }
 
-async fn upsert_evaluation_running(
-    pool: &PgPool,
-    config_id: Uuid,
-    stage: &str,
-) -> AppResult<Uuid> {
+async fn upsert_evaluation_running(pool: &PgPool, config_id: Uuid, stage: &str) -> AppResult<Uuid> {
     let row = sqlx::query_as::<_, (Uuid,)>(
         r#"
         INSERT INTO strategy_evaluations (id, strategy_config_id, stage, status, inserted_at, updated_at)
@@ -260,7 +274,11 @@ async fn finalize_evaluation(
     Ok(())
 }
 
-async fn fail_stage(pool: &PgPool, evaluation_id: Uuid, failure: String) -> AppResult<EvaluationResult> {
+async fn fail_stage(
+    pool: &PgPool,
+    evaluation_id: Uuid,
+    failure: String,
+) -> AppResult<EvaluationResult> {
     let stats = serde_json::json!({});
     finalize_evaluation(pool, evaluation_id, "failed", &stats, Some(&failure)).await?;
     Ok(EvaluationResult {
@@ -314,7 +332,14 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
     let stats_json = backtest_stats_to_json(&bt_stats);
     let timeframe_class = granularity_to_timeframe_class(config.granularity);
     let instrument_class = instrument_to_class(&config.instrument);
-    let thresholds = load_thresholds(pool, "backtest", timeframe_class, instrument_class).await?;
+    let thresholds = load_thresholds(
+        pool,
+        "backtest",
+        timeframe_class,
+        instrument_class,
+        &config.strategy_type,
+    )
+    .await?;
     let (status, failure_reason) =
         evaluate_thresholds(&stats_json, &thresholds, "backtest", timeframe_class);
 
@@ -416,7 +441,14 @@ pub async fn run_walk_forward(
     let stats_json = walk_forward_stats_to_json(&is_stats, &oos_stats);
     let timeframe_class = granularity_to_timeframe_class(config.granularity);
     let instrument_class = instrument_to_class(&config.instrument);
-    let thresholds = load_thresholds(pool, "walk_forward", timeframe_class, instrument_class).await?;
+    let thresholds = load_thresholds(
+        pool,
+        "walk_forward",
+        timeframe_class,
+        instrument_class,
+        &config.strategy_type,
+    )
+    .await?;
     let (status, failure_reason) =
         evaluate_thresholds(&stats_json, &thresholds, "walk_forward", timeframe_class);
 
@@ -569,7 +601,14 @@ pub async fn run_monte_carlo(
     let stats_json = run_monte_carlo_sims(&trades);
     let timeframe_class = granularity_to_timeframe_class(config.granularity);
     let instrument_class = instrument_to_class(&config.instrument);
-    let thresholds = load_thresholds(pool, "monte_carlo", timeframe_class, instrument_class).await?;
+    let thresholds = load_thresholds(
+        pool,
+        "monte_carlo",
+        timeframe_class,
+        instrument_class,
+        &config.strategy_type,
+    )
+    .await?;
     let (status, failure_reason) =
         evaluate_thresholds(&stats_json, &thresholds, "monte_carlo", timeframe_class);
 

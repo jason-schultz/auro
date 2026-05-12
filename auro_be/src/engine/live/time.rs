@@ -18,7 +18,10 @@ pub(crate) fn time_slot(granularity: Granularity, hour: u32, minute: u32) -> u32
 }
 
 /// Returns the canonical start time of the slot containing `tick_time`.
-pub(crate) fn compute_slot_time(granularity: Granularity, tick_time: DateTime<Utc>) -> DateTime<Utc> {
+pub(crate) fn compute_slot_time(
+    granularity: Granularity,
+    tick_time: DateTime<Utc>,
+) -> DateTime<Utc> {
     match granularity {
         Granularity::H1 => tick_time
             .with_minute(0)

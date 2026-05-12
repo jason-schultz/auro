@@ -52,10 +52,15 @@ pub fn adx(candles: &[Candle], period: usize) -> Option<f64> {
     let mut dxs: Vec<f64> = Vec::with_capacity(trs.len() - period + 1);
     dxs.push(dx_value(s_plus, s_minus, s_tr));
 
-    for i in period..trs.len() {
-        s_tr = s_tr - s_tr / p_f + trs[i];
-        s_plus = s_plus - s_plus / p_f + plus_dms[i];
-        s_minus = s_minus - s_minus / p_f + minus_dms[i];
+    for ((tr, plus_dm), minus_dm) in trs
+        .iter()
+        .skip(period)
+        .zip(plus_dms.iter().skip(period))
+        .zip(minus_dms.iter().skip(period))
+    {
+        s_tr = s_tr - s_tr / p_f + *tr;
+        s_plus = s_plus - s_plus / p_f + *plus_dm;
+        s_minus = s_minus - s_minus / p_f + *minus_dm;
         dxs.push(dx_value(s_plus, s_minus, s_tr));
     }
 
@@ -65,8 +70,8 @@ pub fn adx(candles: &[Candle], period: usize) -> Option<f64> {
 
     // Wilder-smooth DX into ADX: first = simple mean of first `period`, then prev * (p-1)/p + curr/p
     let mut adx: f64 = dxs[..period].iter().sum::<f64>() / p_f;
-    for i in period..dxs.len() {
-        adx = (adx * (p_f - 1.0) + dxs[i]) / p_f;
+    for dx in dxs.iter().skip(period) {
+        adx = (adx * (p_f - 1.0) + *dx) / p_f;
     }
 
     Some(adx)
@@ -105,8 +110,8 @@ pub fn atr_pct(candles: &[Candle], period: usize) -> Option<f64> {
 
     let p_f = period as f64;
     let mut atr: f64 = trs[..period].iter().sum::<f64>() / p_f;
-    for i in period..trs.len() {
-        atr = (atr * (p_f - 1.0) + trs[i]) / p_f;
+    for tr in trs.iter().skip(period) {
+        atr = (atr * (p_f - 1.0) + *tr) / p_f;
     }
 
     let last_close = candles.last()?.close;

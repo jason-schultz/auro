@@ -1,5 +1,9 @@
+use crate::engine::indicators::adx;
 use crate::engine::live::{MOVE_TO_BREAKEVEN_PCT, TRAILING_DISTANCE_PCT};
 use crate::engine::types::{Candle, Direction, EntryReason, ExitReason, StopLossState, Trade};
+
+const ADX_PERIOD: usize = 14;
+const ADX_CHOPPY: f64 = 20.0;
 
 pub enum TFSignal {
     EnterLong { fast_ma: f64, slow_ma: f64 },
@@ -14,6 +18,8 @@ pub struct TrendFollowingParams {
     pub slow_period: usize,       // e.g., 50
     pub stop_loss: f64,           // e.g., -0.02 (-2%)
     pub take_profit: Option<f64>, // e.g., Some(0.05) or None to ride the trend
+    #[serde(default)]
+    pub regime_filter: bool, // if true, skip entries when ADX < 20 (choppy market)
 }
 
 pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
@@ -43,6 +49,16 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
         let bearish_cross = prev_fast >= prev_slow && fast < slow;
 
         if bullish_cross || bearish_cross {
+            if params.regime_filter {
+                if let Some(adx_val) = adx(&candles[..=i], ADX_PERIOD) {
+                    if adx_val < ADX_CHOPPY {
+                        prev_fast = fast;
+                        prev_slow = slow;
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
             let direction = if bullish_cross {
                 Direction::Long
             } else {
@@ -344,6 +360,7 @@ mod tests {
             slow_period: 30,
             stop_loss: -0.05,
             take_profit: Some(0.03),
+            regime_filter: false,
         };
 
         let trades = run(&candles, &params);
@@ -390,6 +407,7 @@ mod tests {
             slow_period: 20,
             stop_loss: -0.15,
             take_profit: None,
+            regime_filter: false,
         };
 
         let trades = run(&candles, &params);
@@ -442,6 +460,7 @@ mod tests {
             slow_period: 20,
             stop_loss: -0.02,
             take_profit: None,
+            regime_filter: false,
         };
 
         let trades = run(&candles, &params);
@@ -499,6 +518,7 @@ mod tests {
             slow_period: 20,
             stop_loss: -0.02,
             take_profit: None,
+            regime_filter: false,
         };
 
         let trades = run(&candles, &params);
@@ -547,6 +567,7 @@ mod tests {
             slow_period: 20,
             stop_loss: -0.05, // wide initial SL — won't get hit before BE/trailing
             take_profit: None,
+            regime_filter: false,
         };
 
         let trades = run(&candles, &params);
@@ -600,6 +621,7 @@ mod tests {
             slow_period: 20,
             stop_loss: -0.05, // wide initial SL — never reached
             take_profit: None,
+            regime_filter: false,
         };
 
         let trades = run(&candles, &params);

@@ -94,6 +94,12 @@ impl CandleAccumulator {
     }
 }
 
+impl Default for CandleAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Buffer of candle closes used by strategy evaluation.
 /// One buffer per (instrument, granularity) pair.
 #[derive(Debug, Clone)]

@@ -40,9 +40,18 @@ pub fn router() -> Router<AppState> {
             delete(positions::remove_in_memory_position),
         )
         // Pipeline
-        .route("/api/pipeline/backtest", post(pipeline::run_pipeline_backtest))
-        .route("/api/pipeline/walk_forward", post(pipeline::run_pipeline_walk_forward))
-        .route("/api/pipeline/monte_carlo", post(pipeline::run_pipeline_monte_carlo))
+        .route(
+            "/api/pipeline/backtest",
+            post(pipeline::run_pipeline_backtest),
+        )
+        .route(
+            "/api/pipeline/walk_forward",
+            post(pipeline::run_pipeline_walk_forward),
+        )
+        .route(
+            "/api/pipeline/monte_carlo",
+            post(pipeline::run_pipeline_monte_carlo),
+        )
         // Backtest (grid search)
         .route("/api/backtest/run", post(backtest::run_grid_search))
         .route(

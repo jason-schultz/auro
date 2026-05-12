@@ -8,16 +8,6 @@ use crate::error::AppResult;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Strategy {
-    pub id: Uuid,
-    pub name: String,
-    pub instrument: String,
-    pub granularity: String,
-    pub enabled: bool,
-    pub config: StrategyConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyConfig {
     pub entry_rules: Vec<Rule>,
     pub exit_rules: Vec<Rule>,

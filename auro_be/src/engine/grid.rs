@@ -183,6 +183,7 @@ pub fn run_mean_grid(candles: &[Candle], config: &GridSearchConfig) -> Vec<GridS
                         entry_threshold,
                         exit_threshold,
                         stop_loss,
+                        regime_filter: true,
                     };
 
                     let start = Instant::now();
@@ -204,6 +205,7 @@ pub fn run_mean_grid(candles: &[Candle], config: &GridSearchConfig) -> Vec<GridS
                             "entry_threshold": entry_threshold,
                             "exit_threshold": exit_threshold,
                             "stop_loss": stop_loss,
+                            "regime_filter": true,
                         }),
                         stats: bt_stats,
                         trades,
@@ -235,6 +237,7 @@ pub fn run_trend_grid(candles: &[Candle], config: &TrendGridConfig) -> Vec<GridS
                         slow_period: slow,
                         stop_loss,
                         take_profit: *take_profit,
+                        regime_filter: true,
                     };
 
                     let start = Instant::now();
@@ -256,6 +259,7 @@ pub fn run_trend_grid(candles: &[Candle], config: &TrendGridConfig) -> Vec<GridS
                             "slow_period": slow,
                             "stop_loss": stop_loss,
                             "take_profit": take_profit,
+                            "regime_filter": true,
                         }),
                         stats: bt_stats,
                         trades,

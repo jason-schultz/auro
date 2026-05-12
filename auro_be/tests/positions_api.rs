@@ -28,10 +28,7 @@ async fn delete_position_endpoint_removes_existing_position() {
 
     let app = api::router().with_state(state.clone());
     let request = common::http::request(Method::DELETE, "/api/positions/trade-1", None);
-    let response = app
-        .oneshot(request)
-        .await
-        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -48,10 +45,7 @@ async fn delete_position_endpoint_is_noop_for_unknown_trade_id() {
     let app = api::router().with_state(state.clone());
     let request = common::http::request(Method::DELETE, "/api/positions/missing", None);
 
-    let response = app
-        .oneshot(request)
-        .await
-        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 

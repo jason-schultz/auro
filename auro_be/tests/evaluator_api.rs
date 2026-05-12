@@ -57,7 +57,11 @@ async fn evaluate_endpoint_rejects_invalid_granularity() {
         "idempotency_key": "idem-invalid-granularity",
     });
 
-    let request = common::http::request(Method::POST, "/api/evaluate/NOT_A_REAL_GRANULARITY", Some(request_body));
+    let request = common::http::request(
+        Method::POST,
+        "/api/evaluate/NOT_A_REAL_GRANULARITY",
+        Some(request_body),
+    );
     let response = app.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);

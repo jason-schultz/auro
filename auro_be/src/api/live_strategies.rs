@@ -164,7 +164,7 @@ pub async fn list_live_strategies(
         .await
         .map_err(AppError::Database)?;
 
-    // Query 2: batch-fetch backtest stats for those IDs
+    // Query 2: batch-fetch grid-search backtest stats for strategies that have a backtest_run_id
     let mut stats_map: HashMap<Uuid, Value> = HashMap::new();
     if !backtest_ids.is_empty() {
         let stat_rows = sqlx::query_as::<_, (Uuid, f64, f64, f64, f64, i32, f64, f64)>(
@@ -198,6 +198,80 @@ pub async fn list_live_strategies(
         }
     }
 
+    // Query 3: for pipeline strategies (no backtest_run_id), look up stats from
+    // strategy_configs + strategy_evaluations matched by (instrument, strategy_type, parameters).
+    // DISTINCT ON picks the highest-scoring config when multiple pipeline runs share the same params.
+    let pipeline_ids: Vec<Uuid> = rows.iter().filter(|r| r.9.is_none()).map(|r| r.0).collect();
+    let mut pipeline_stats_map: HashMap<Uuid, Value> = HashMap::new();
+    if !pipeline_ids.is_empty() {
+        let pipeline_rows =
+            sqlx::query_as::<_, (Uuid, String, Option<f64>, Option<Value>, Option<Value>)>(
+                r#"
+            SELECT DISTINCT ON (ls.id)
+                ls.id,
+                sc.source,
+                sc.score,
+                bt.stats  AS bt_stats,
+                wf.stats  AS wf_stats
+            FROM live_strategies ls
+            JOIN strategy_configs sc
+                ON  sc.instrument    = ls.instrument
+                AND sc.strategy_type = ls.strategy_type
+                AND sc.parameters    = ls.parameters
+            LEFT JOIN strategy_evaluations bt
+                ON  bt.strategy_config_id = sc.id
+                AND bt.stage   = 'backtest'
+                AND bt.status  = 'passed'
+            LEFT JOIN strategy_evaluations wf
+                ON  wf.strategy_config_id = sc.id
+                AND wf.stage   = 'walk_forward'
+                AND wf.status  = 'passed'
+            WHERE ls.id = ANY($1)
+            ORDER BY ls.id, sc.score DESC NULLS LAST
+            "#,
+            )
+            .bind(&pipeline_ids)
+            .fetch_all(&state.db)
+            .await
+            .map_err(AppError::Database)?;
+
+        for (live_id, source, score, bt_stats, wf_stats) in pipeline_rows {
+            // Map pipeline bt_stats fields to the same shape as grid-search backtest_stats.
+            // Pipeline uses "sharpe" / "total_return" etc; grid search uses "sharpe_ratio".
+            // avg_win / avg_loss not available from pipeline — set to null.
+            let backtest_stats = bt_stats.as_ref().map(|b| {
+                json!({
+                    "sharpe_ratio": b["sharpe"],
+                    "win_rate":     b["win_rate"],
+                    "num_trades":   b["num_trades"],
+                    "max_drawdown": b["max_drawdown"],
+                    "total_return": b["total_return"],
+                    "avg_win":      null,
+                    "avg_loss":     null,
+                })
+            });
+
+            let oos_stats = wf_stats.as_ref().map(|w| {
+                json!({
+                    "oos_sharpe":     w["oos_sharpe"],
+                    "oos_num_trades": w["oos_num_trades"],
+                    "oos_return":     w["oos_return"],
+                    "sharpe_retention": w["sharpe_retention"],
+                })
+            });
+
+            pipeline_stats_map.insert(
+                live_id,
+                json!({
+                    "source":         source,
+                    "pipeline_score": score,
+                    "backtest_stats": backtest_stats,
+                    "oos_stats":      oos_stats,
+                }),
+            );
+        }
+    }
+
     let mut strategies: Vec<Value> = rows
         .iter()
         .map(
@@ -213,6 +287,14 @@ pub async fn list_live_strategies(
                 updated,
                 backtest_run_id,
             )| {
+                // Strategies with a backtest_run_id came from the grid-search / Backtests page.
+                // Everything else came through the pipeline (Ollama, evo, manual promote).
+                let source = if backtest_run_id.is_some() {
+                    "grid_search"
+                } else {
+                    "pipeline"
+                };
+
                 let mut obj = json!({
                     "id": id,
                     "strategy_type": stype,
@@ -224,12 +306,19 @@ pub async fn list_live_strategies(
                     "created_at": created,
                     "updated_at": updated,
                     "backtest_run_id": backtest_run_id,
+                    "source": source,
                 });
 
                 if let Some(bt_id) = backtest_run_id {
                     if let Some(stats) = stats_map.get(bt_id) {
                         obj["backtest_stats"] = stats.clone();
                     }
+                } else if let Some(pipeline) = pipeline_stats_map.get(id) {
+                    // Refine source from the strategy_config if available (e.g. "evolution")
+                    obj["source"] = pipeline["source"].clone();
+                    obj["pipeline_score"] = pipeline["pipeline_score"].clone();
+                    obj["backtest_stats"] = pipeline["backtest_stats"].clone();
+                    obj["oos_stats"] = pipeline["oos_stats"].clone();
                 }
 
                 if let Some(live) = live_stats_map.get(id) {
@@ -601,7 +690,7 @@ pub struct DeployParams {
 /// Check if a sqlx error is a unique constraint violation (Postgres error code 23505)
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     if let sqlx::Error::Database(ref db_err) = e {
-        return db_err.code().map_or(false, |code| code == "23505");
+        return db_err.code().is_some_and(|code| code == "23505");
     }
     false
 }
@@ -614,7 +703,7 @@ pub async fn get_trading_config(State(state): State<AppState>) -> AppResult<Json
             .await
             .map_err(AppError::Database)?;
 
-    let config: serde_json::Map<String, Value> = rows.into_iter().map(|(k, v)| (k, v)).collect();
+    let config: serde_json::Map<String, Value> = rows.into_iter().collect();
 
     Ok(Json(json!({ "config": config })))
 }

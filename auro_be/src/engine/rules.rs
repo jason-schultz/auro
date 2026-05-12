@@ -109,7 +109,7 @@ impl Rules {
                     reason: reason.unwrap_or_else(|| "(no reason recorded)".to_string()),
                 },
             );
-            if latest.map_or(true, |t| computed_at > t) {
+            if latest.is_none_or(|t| computed_at > t) {
                 latest = Some(computed_at);
             }
         }
