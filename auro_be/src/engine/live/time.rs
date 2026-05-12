@@ -171,7 +171,9 @@ mod tests {
         ];
         for (tick_hour, expected_hour) in cases {
             let tick = Utc.with_ymd_and_hms(2026, 5, 1, tick_hour, 30, 0).unwrap();
-            let expected = Utc.with_ymd_and_hms(2026, 5, 1, expected_hour, 0, 0).unwrap();
+            let expected = Utc
+                .with_ymd_and_hms(2026, 5, 1, expected_hour, 0, 0)
+                .unwrap();
             assert_eq!(
                 compute_slot_time(Granularity::H4, tick),
                 expected,
