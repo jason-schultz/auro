@@ -100,13 +100,16 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                     };
 
                     if current_minute != prev_minute {
-                        // M1 boundary crossed — check each granularity
+                        // M1 boundary crossed — check each granularity.
+                        // D is intentionally excluded: time_slot returns a constant 0 (no
+                        // wall-clock day boundary) and the OANDA session day closes at 17:00 ET,
+                        // not UTC midnight. D buffers are pre-filled from DB on startup; live
+                        // accumulation is deferred until session-aware boundary logic is added.
                         for granularity in &[
                             Granularity::M5,
                             Granularity::M15,
                             Granularity::H1,
                             Granularity::H4,
-                            Granularity::D,
                         ] {
                             let key = (instrument.clone(), *granularity);
 
