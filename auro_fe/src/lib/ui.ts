@@ -115,6 +115,21 @@ export const STRATEGIES_COLUMNS = [
     { key: "enabled", label: "Live", sortable: true },
 ] satisfies TableColumn[];
 
+export const JOURNAL_COLUMNS = [
+    { key: "instrument", label: "Instrument", sortable: true },
+    { key: "strategy_type", label: "Strategy", sortable: true },
+    { key: "direction", label: "Dir", sortable: false },
+    { key: "entry_price", label: "Entry", sortable: true },
+    { key: "exit_price", label: "Exit", sortable: false },
+    { key: "pnl_percent", label: "PnL %", sortable: true },
+    { key: "duration", label: "Duration", sortable: false },
+    { key: "mae_pct", label: "MAE %", sortable: true },
+    { key: "mfe_pct", label: "MFE %", sortable: true },
+    { key: "regime_at_entry", label: "Regime", sortable: false },
+    { key: "exit_reason", label: "Exit Reason", sortable: false },
+    { key: "stop_loss_state_at_close", label: "SL State", sortable: false },
+] satisfies TableColumn[];
+
 export const TABLE_WIDTH_TOKENS = {
     backtests: {
         instrument: "w-[8.5rem] min-w-[8.5rem]",

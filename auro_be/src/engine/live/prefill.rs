@@ -212,6 +212,8 @@ async fn prefill_open_positions(
                     strategy_type.as_str(),
                     entry_price,
                 ),
+                worst_price: entry_price,
+                best_price: entry_price,
             },
         );
         count += 1;

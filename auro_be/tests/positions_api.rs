@@ -16,6 +16,8 @@ fn sample_position(trade_id: &str) -> OpenPosition {
         units: "1000".to_string(),
         stop_loss_state: StopLossState::Initial,
         granularity: Granularity::H1,
+        worst_price: 1.12345,
+        best_price: 1.12345,
     }
 }
 

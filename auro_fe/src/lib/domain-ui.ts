@@ -53,3 +53,20 @@ export function strategyEnabledBadgeClass(enabled: boolean | null): string {
         ? "bg-emerald-500/10 text-emerald-400"
         : "bg-muted text-muted-foreground";
 }
+
+export function pnlClass(value: number | null | undefined): string {
+    if (value == null) return "text-muted-foreground";
+    return value >= 0 ? "text-green-400" : "text-red-400";
+}
+
+export function slStateClass(state: string | null | undefined): string {
+    if (state === "Trailing") return "text-green-400";
+    if (state === "Breakeven") return "text-blue-400";
+    return "text-muted-foreground";
+}
+
+export function formatIndicatorValue(value: unknown): string {
+    if (value == null) return "—";
+    if (typeof value === "number") return value.toFixed(5);
+    return String(value);
+}

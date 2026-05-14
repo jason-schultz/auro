@@ -14,7 +14,7 @@ if [ -n "$staged_rs" ]; then
   echo "[pre-commit] Formatting Rust..."
   (cd "$REPO_ROOT/auro_be" && cargo fmt --all)
   echo "$staged_rs" | while IFS= read -r f; do
-    [ -f "$REPO_ROOT/$f" ] && git add "$REPO_ROOT/$f"
+    if [ -f "$REPO_ROOT/$f" ]; then git add "$REPO_ROOT/$f"; fi
   done
 fi
 
@@ -24,7 +24,7 @@ if [ -n "$staged_ex" ]; then
   echo "[pre-commit] Formatting Elixir..."
   (cd "$REPO_ROOT/opus" && mix format)
   echo "$staged_ex" | while IFS= read -r f; do
-    [ -f "$REPO_ROOT/$f" ] && git add "$REPO_ROOT/$f"
+    if [ -f "$REPO_ROOT/$f" ]; then git add "$REPO_ROOT/$f"; fi
   done
 fi
 

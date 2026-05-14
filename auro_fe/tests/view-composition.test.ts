@@ -55,12 +55,18 @@ describe("view composition contracts", () => {
         expect(tradeDetail).toContain("<BadgePill");
     });
 
-    it("keeps placeholder views aligned with shared shell components", () => {
+    it("keeps Journal wired to shared shell components", () => {
         const journal = readViewTemplate("Journal.vue");
-        const strategyEditor = readViewTemplate("StrategyEditor.vue");
 
         expect(journal).toContain("<ViewHeader");
-        expect(journal).toContain("<DataCard");
+        expect(journal).toContain("<FilterToolbar");
+        expect(journal).toContain("<SegmentedFilterGroup");
+        expect(journal).toContain("<DataTableScaffold");
+    });
+
+    it("keeps placeholder views aligned with shared shell components", () => {
+        const strategyEditor = readViewTemplate("StrategyEditor.vue");
+
         expect(strategyEditor).toContain("<ViewHeader");
         expect(strategyEditor).toContain("<DataCard");
     });

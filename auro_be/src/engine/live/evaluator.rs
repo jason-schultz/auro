@@ -1,6 +1,7 @@
 use sqlx::PgPool;
 use std::collections::HashMap;
 
+use crate::engine::indicators;
 use crate::engine::mean_reversion::{self, MRSignal, MeanReversionParams};
 use crate::engine::rules::{entry_gate_report, Rules};
 use crate::engine::trend_following::{self, TFSignal, TrendFollowingParams};
@@ -186,6 +187,16 @@ async fn evaluate_entry(
                 let sl_price = current_price * (1.0 + mr_params.stop_loss);
                 let tp_price = current_price * (1.0 + mr_params.exit_threshold);
 
+                let adx = indicators::adx(&buffer.candles, 14);
+                let indicators_json = serde_json::json!({
+                    "ma_period": mr_params.ma_period,
+                    "ma_value": ma_value,
+                    "price_deviation_pct": deviation_pct,
+                    "adx": adx,
+                });
+                let (_, regime_reason) = rules.decision(&strategy.id);
+                let regime = regime_reason.unwrap_or("unknown").to_string();
+
                 return execute_entry(
                     pool,
                     oanda,
@@ -201,6 +212,8 @@ async fn evaluate_entry(
                         ma_value,
                         deviation_pct * 100.0
                     ),
+                    indicators_json,
+                    regime,
                     open_positions,
                 )
                 .await;
@@ -268,6 +281,19 @@ async fn evaluate_entry(
                     let sl_price = current_price * (1.0 + tf_params.stop_loss);
                     let tp_price = tf_params.take_profit.map(|tp| current_price * (1.0 + tp));
 
+                    let adx = indicators::adx(&buffer.candles, 14);
+                    let ma_gap_pct = (fast_ma - slow_ma) / slow_ma * 100.0;
+                    let indicators_json = serde_json::json!({
+                        "fast_period": tf_params.fast_period,
+                        "slow_period": tf_params.slow_period,
+                        "fast_ma": fast_ma,
+                        "slow_ma": slow_ma,
+                        "ma_gap_pct": ma_gap_pct,
+                        "adx": adx,
+                    });
+                    let (_, regime_reason) = rules.decision(&strategy.id);
+                    let regime = regime_reason.unwrap_or("unknown").to_string();
+
                     return execute_entry(
                         pool,
                         oanda,
@@ -278,6 +304,8 @@ async fn evaluate_entry(
                         sl_price,
                         tp_price,
                         &format!("CrossAbove: fast_ma={:.5}, slow_ma={:.5}", fast_ma, slow_ma),
+                        indicators_json,
+                        regime,
                         open_positions,
                     )
                     .await;
@@ -299,6 +327,19 @@ async fn evaluate_entry(
                     let tp_price = tf_params.take_profit.map(|tp| current_price * (1.0 - tp));
                     let short_units = format!("-{}", strategy.max_position_size);
 
+                    let adx = indicators::adx(&buffer.candles, 14);
+                    let ma_gap_pct = (fast_ma - slow_ma) / slow_ma * 100.0;
+                    let indicators_json = serde_json::json!({
+                        "fast_period": tf_params.fast_period,
+                        "slow_period": tf_params.slow_period,
+                        "fast_ma": fast_ma,
+                        "slow_ma": slow_ma,
+                        "ma_gap_pct": ma_gap_pct,
+                        "adx": adx,
+                    });
+                    let (_, regime_reason) = rules.decision(&strategy.id);
+                    let regime = regime_reason.unwrap_or("unknown").to_string();
+
                     return execute_entry(
                         pool,
                         oanda,
@@ -309,6 +350,8 @@ async fn evaluate_entry(
                         sl_price,
                         tp_price,
                         &format!("CrossBelow: fast_ma={:.5}, slow_ma={:.5}", fast_ma, slow_ma),
+                        indicators_json,
+                        regime,
                         open_positions,
                     )
                     .await;
@@ -332,6 +375,8 @@ async fn execute_entry(
     sl_price: f64,
     tp_price: Option<f64>,
     entry_reason: &str,
+    indicators_at_entry: serde_json::Value,
+    regime_at_entry: String,
     open_positions: &mut HashMap<String, OpenPosition>,
 ) -> Result<Option<SignalReport>, Box<dyn std::error::Error + Send + Sync>> {
     let sl_str = format_price(&strategy.instrument, sl_price);
@@ -381,8 +426,9 @@ async fn execute_entry(
             sqlx::query(
                 r#"INSERT INTO live_trades
                     (live_strategy_id, oanda_trade_id, instrument, direction, units,
-                     entry_price, stop_loss_price, take_profit_price, entry_reason, status)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'open')"#,
+                     entry_price, stop_loss_price, take_profit_price, entry_reason,
+                     indicators_at_entry, regime_at_entry, status)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'open')"#,
             )
             .bind(strategy.id)
             .bind(&trade_id)
@@ -393,6 +439,8 @@ async fn execute_entry(
             .bind(sl_price)
             .bind(tp_price)
             .bind(entry_reason)
+            .bind(&indicators_at_entry)
+            .bind(&regime_at_entry)
             .execute(pool)
             .await?;
 
@@ -425,6 +473,8 @@ async fn execute_entry(
                     stop_loss_state: StopLossState::initial_for_strategy_type(
                         &strategy.strategy_type,
                     ),
+                    worst_price: fill_price,
+                    best_price: fill_price,
                 },
             );
 
@@ -538,12 +588,14 @@ async fn evaluate_exit(
                     sqlx::query(
                         r#"UPDATE live_trades
                         SET exit_price = $1, exit_time = NOW(), pnl_percent = $2,
-                            exit_reason = $3, status = 'closed', updated_at = NOW()
-                        WHERE oanda_trade_id = $4"#,
+                            exit_reason = $3, status = 'closed',
+                            stop_loss_state_at_close = $4, updated_at = NOW()
+                        WHERE oanda_trade_id = $5"#,
                     )
                     .bind(fill_price)
                     .bind(pnl)
                     .bind(&exit_reason)
+                    .bind(pos.stop_loss_state.as_str())
                     .bind(&trade_id)
                     .execute(pool)
                     .await?;
@@ -591,6 +643,8 @@ mod tests {
             entry_price,
             units: "1000".to_string(),
             stop_loss_state: StopLossState::Initial,
+            worst_price: entry_price,
+            best_price: entry_price,
         }
     }
 

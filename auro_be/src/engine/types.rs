@@ -292,6 +292,15 @@ impl StopLossState {
             _ => StopLossState::NotApplicable,
         }
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StopLossState::Initial => "Initial",
+            StopLossState::Breakeven => "Breakeven",
+            StopLossState::Trailing => "Trailing",
+            StopLossState::NotApplicable => "NotApplicable",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -304,6 +313,8 @@ pub struct OpenPosition {
     pub entry_price: f64,
     pub units: String,
     pub stop_loss_state: StopLossState,
+    pub worst_price: f64,
+    pub best_price: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]

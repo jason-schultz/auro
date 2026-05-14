@@ -54,3 +54,32 @@ export interface TradeDetailResponse {
     backtest: BacktestData | null;
     live_aggregate: LiveAggregateData | null;
 }
+
+export interface JournalTrade {
+    id: string;
+    oanda_trade_id: string | null;
+    instrument: string;
+    direction: string;
+    units: string;
+    entry_price: number | null;
+    exit_price: number | null;
+    entry_time: string;
+    exit_time: string | null;
+    pnl_percent: number | null;
+    entry_reason: string | null;
+    exit_reason: string | null;
+    status: string;
+    strategy_type: string | null;
+    strategy_granularity: string | null;
+    strategy_parameters: Record<string, unknown> | null;
+    indicators_at_entry: Record<string, unknown> | null;
+    regime_at_entry: string | null;
+    mae_pct: number | null;
+    mfe_pct: number | null;
+    stop_loss_state_at_close: string | null;
+}
+
+export interface JournalResponse {
+    trades: JournalTrade[];
+    count: number;
+}
