@@ -70,15 +70,15 @@ defmodule Opus.Pipeline.MonteCarloWorker do
               })
             )
         else
-          {:ok, _job} =
-            Oban.insert(
-              OllamaIterationWorker.new(%{
-                config_id: config_id,
-                depth: depth,
-                failure_reason: reason,
-                stats: stats
-              })
-            )
+          {:ok, _job} = :ok
+          # Oban.insert(
+          #   OllamaIterationWorker.new(%{
+          #     config_id: config_id,
+          #     depth: depth,
+          #     failure_reason: reason,
+          #     stats: stats
+          #   })
+          # )
         end
 
         :ok
