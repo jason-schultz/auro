@@ -107,13 +107,13 @@ async fn evaluate_entry(
 ) -> Result<Option<SignalReport>, Box<dyn std::error::Error + Send + Sync>> {
     let params = &strategy.parameters;
 
-    let already_open = open_positions
-        .values()
-        .any(|pos| pos.instrument == strategy.instrument);
+    let already_open = open_positions.values().any(|pos| {
+        pos.instrument == strategy.instrument && pos.granularity == strategy.granularity
+    });
 
     if already_open {
         tracing::debug!(
-            "[SKIP ENTRY] {} {} - position already open on this instrument",
+            "[SKIP ENTRY] {} {} - position already open on this instrument+granularity",
             strategy.instrument,
             strategy.granularity
         );
@@ -418,6 +418,7 @@ async fn execute_entry(
                     strategy_id: strategy.id,
                     trade_id,
                     instrument: strategy.instrument.clone(),
+                    granularity: strategy.granularity,
                     direction: *direction,
                     entry_price: fill_price,
                     units: units.to_string(),
@@ -585,6 +586,7 @@ mod tests {
             strategy_id: Uuid::nil(),
             trade_id: trade_id.to_string(),
             instrument: "EUR_USD".to_string(),
+            granularity: Granularity::H1,
             direction: Direction::Long,
             entry_price,
             units: "1000".to_string(),

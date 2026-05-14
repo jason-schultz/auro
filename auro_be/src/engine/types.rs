@@ -216,6 +216,19 @@ impl Granularity {
         }
     }
 
+    /// The pipeline validation threshold class for this granularity.
+    /// D shares H4's thresholds (same swing-trading characteristics, too few daily signals
+    /// to warrant a separate class).
+    pub fn timeframe_class(&self) -> &'static str {
+        match self {
+            Granularity::M1 => "M1",
+            Granularity::M5 => "M5",
+            Granularity::M15 => "M15",
+            Granularity::H1 => "H1",
+            Granularity::H4 | Granularity::D => "H4",
+        }
+    }
+
     /// How many candles to hold in the in-memory buffer for this granularity.
     /// Sized so that each buffer covers roughly the same useful lookback window
     /// and always has enough candles for the longest indicator (ADX-14, MA-60).
@@ -286,6 +299,7 @@ pub struct OpenPosition {
     pub strategy_id: uuid::Uuid,
     pub trade_id: String,
     pub instrument: String,
+    pub granularity: Granularity,
     pub direction: Direction,
     pub entry_price: f64,
     pub units: String,

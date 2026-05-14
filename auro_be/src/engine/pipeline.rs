@@ -35,15 +35,6 @@ struct ThresholdRow {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-pub fn granularity_to_timeframe_class(g: Granularity) -> &'static str {
-    match g {
-        Granularity::H4 | Granularity::D => "h4",
-        Granularity::H1 => "h1",
-        Granularity::M15 | Granularity::M5 => "intraday",
-        Granularity::M1 => "scalp",
-    }
-}
-
 pub fn instrument_to_class(instrument: &str) -> &'static str {
     match instrument {
         "EUR_USD" | "GBP_USD" | "USD_JPY" | "USD_CHF" | "USD_CAD" | "AUD_USD" | "NZD_USD" => {
@@ -330,7 +321,7 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
 
     let bt_stats = calculate_backtest_stats(&trades);
     let stats_json = backtest_stats_to_json(&bt_stats);
-    let timeframe_class = granularity_to_timeframe_class(config.granularity);
+    let timeframe_class = config.granularity.timeframe_class();
     let instrument_class = instrument_to_class(&config.instrument);
     let thresholds = load_thresholds(
         pool,
@@ -439,7 +430,7 @@ pub async fn run_walk_forward(
     let is_stats = calculate_backtest_stats(&is_trades);
     let oos_stats = calculate_backtest_stats(&oos_trades);
     let stats_json = walk_forward_stats_to_json(&is_stats, &oos_stats);
-    let timeframe_class = granularity_to_timeframe_class(config.granularity);
+    let timeframe_class = config.granularity.timeframe_class();
     let instrument_class = instrument_to_class(&config.instrument);
     let thresholds = load_thresholds(
         pool,
@@ -599,7 +590,7 @@ pub async fn run_monte_carlo(
     }
 
     let stats_json = run_monte_carlo_sims(&trades);
-    let timeframe_class = granularity_to_timeframe_class(config.granularity);
+    let timeframe_class = config.granularity.timeframe_class();
     let instrument_class = instrument_to_class(&config.instrument);
     let thresholds = load_thresholds(
         pool,

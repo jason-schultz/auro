@@ -161,9 +161,17 @@ async fn prefill_open_positions(
         let trade_id = trade["id"].as_str().ok_or("trade missing id")?;
         let units = trade["currentUnits"].as_str().unwrap_or("0").to_string();
 
-        let row: Option<(uuid::Uuid, String, Direction, f64, String, String)> = sqlx::query_as(
+        let row: Option<(
+            uuid::Uuid,
+            String,
+            Direction,
+            f64,
+            String,
+            String,
+            Granularity,
+        )> = sqlx::query_as(
             "SELECT lt.live_strategy_id, lt.instrument, lt.direction, lt.entry_price, \
-            lt.oanda_trade_id, ls.strategy_type \
+            lt.oanda_trade_id, ls.strategy_type, ls.granularity \
             FROM live_trades lt \
             JOIN live_strategies ls ON ls.id = lt.live_strategy_id \
             WHERE lt.oanda_trade_id = $1 AND lt.status = 'open'",
@@ -172,8 +180,15 @@ async fn prefill_open_positions(
         .fetch_optional(pool)
         .await?;
 
-        let Some((strategy_id, instrument, direction, entry_price, db_trade_id, strategy_type)) =
-            row
+        let Some((
+            strategy_id,
+            instrument,
+            direction,
+            entry_price,
+            db_trade_id,
+            strategy_type,
+            granularity,
+        )) = row
         else {
             tracing::warn!(
                 "OANDA has open trade {} but no matching live_trades row — skipping",
@@ -188,6 +203,7 @@ async fn prefill_open_positions(
                 strategy_id,
                 trade_id: db_trade_id,
                 instrument,
+                granularity,
                 direction,
                 entry_price,
                 units,
