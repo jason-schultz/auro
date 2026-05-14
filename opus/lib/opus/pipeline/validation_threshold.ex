@@ -11,7 +11,7 @@ defmodule Opus.Pipeline.ValidationThreshold do
 
   @primary_key false
 
-  @timeframe_classes ~w[h4 h1 intraday scalp]
+  @timeframe_classes ~w[H4 H1 M15 M5 M1]
   @stages ~w[backtest walk_forward monte_carlo]
   @operators ~w[gte lte gt lt]
 
