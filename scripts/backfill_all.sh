@@ -18,24 +18,38 @@ INSTRUMENTS=(
 "DE30_EUR" "JP225_USD" "AU200_AUD" "EU50_EUR"
 )
 
-# echo "=== Backfilling H1 candles (5 years) ==="
-# for instrument in "${INSTRUMENTS[@]}"; do
-#     echo "--- ${instrument} H1 ---"
-#     curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=H1&days=1825" > /dev/null
-# done
-
-echo "=== Backfilling H4 candles (5 years) ==="
+echo ""
+echo "=== Backfilling D candles (8 years) ==="
 for instrument in "${INSTRUMENTS[@]}"; do
-    echo "--- ${instrument} H4 ---"
-    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=H4&days=1825" > /dev/null
+    echo "--- ${instrument} D ---"
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=D&days=2920" > /dev/null
 done
 
-# echo ""
-# echo "=== Backfilling M15 candles (2 years) ==="
-# for instrument in "${INSTRUMENTS[@]}"; do
-#     echo "--- ${instrument} M15 ---"
-#     curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=M15&days=730" > /dev/null
-# done
+echo "=== Backfilling H1 candles (8 years) ==="
+for instrument in "${INSTRUMENTS[@]}"; do
+    echo "--- ${instrument} H1 ---"
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=H1&days=2920" > /dev/null
+done
+
+echo "=== Backfilling H4 candles (8 years) ==="
+for instrument in "${INSTRUMENTS[@]}"; do
+    echo "--- ${instrument} H4 ---"
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=H4&days=2920" > /dev/null
+done
+
+echo ""
+echo "=== Backfilling M15 candles (2 years) ==="
+for instrument in "${INSTRUMENTS[@]}"; do
+    echo "--- ${instrument} M15 ---"
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=M15&days=730" > /dev/null
+done
+
+echo ""
+echo "=== Backfilling M5 candles (2 years) ==="
+for instrument in "${INSTRUMENTS[@]}"; do
+    echo "--- ${instrument} M5 ---"
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=M5&days=730" > /dev/null
+done
 
 echo ""
 echo "=== Backfill complete ==="
@@ -44,7 +58,7 @@ echo "=== Candle counts ==="
 docker exec -it amplyiq-postgres psql -U postgres -d auro -c "
 SELECT granularity, COUNT(*) as total_candles, COUNT(DISTINCT instrument) as instruments
 FROM candles
-WHERE granularity IN ('H1', 'M15', 'H4', 'M1')
+WHERE granularity IN ('D', 'H1', 'H4', 'M15', 'M5', 'M1')
 GROUP BY granularity
 ORDER BY granularity;
 "

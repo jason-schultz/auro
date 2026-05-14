@@ -146,6 +146,7 @@ const granularityOptions = [
     { value: "H1", label: "H1" },
     { value: "H4", label: "H4" },
     { value: "M15", label: "M15" },
+    { value: "M5", label: "M5" },
 ];
 
 const statusOptions = [

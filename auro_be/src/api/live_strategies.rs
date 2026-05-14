@@ -750,6 +750,11 @@ struct LiveTradeRow {
     strategy_type: Option<String>,
     parameters: Option<Value>,
     granularity: Option<String>,
+    indicators_at_entry: Option<Value>,
+    regime_at_entry: Option<String>,
+    mae_pct: Option<f64>,
+    mfe_pct: Option<f64>,
+    stop_loss_state_at_close: Option<String>,
 }
 
 pub async fn get_live_trades(
@@ -763,7 +768,9 @@ pub async fn get_live_trades(
         SELECT lt.id, lt.live_strategy_id, lt.oanda_trade_id, lt.instrument, lt.direction, lt.units,
                lt.entry_price, lt.exit_price, lt.entry_time, lt.exit_time,
                lt.pnl_percent, lt.entry_reason, lt.exit_reason, lt.status,
-               ls.strategy_type, ls.parameters, ls.granularity
+               ls.strategy_type, ls.parameters, ls.granularity,
+               lt.indicators_at_entry, lt.regime_at_entry,
+               lt.mae_pct, lt.mfe_pct, lt.stop_loss_state_at_close
         FROM live_trades lt
         LEFT JOIN live_strategies ls ON ls.id = lt.live_strategy_id
     "#;
@@ -810,6 +817,11 @@ pub async fn get_live_trades(
                 "strategy_type": row.strategy_type,
                 "strategy_parameters": row.parameters,
                 "strategy_granularity": row.granularity,
+                "indicators_at_entry": row.indicators_at_entry,
+                "regime_at_entry": row.regime_at_entry,
+                "mae_pct": row.mae_pct,
+                "mfe_pct": row.mfe_pct,
+                "stop_loss_state_at_close": row.stop_loss_state_at_close,
             })
         })
         .collect();
