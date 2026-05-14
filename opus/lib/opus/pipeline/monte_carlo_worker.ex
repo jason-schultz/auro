@@ -16,7 +16,7 @@ defmodule Opus.Pipeline.MonteCarloWorker do
   require Logger
 
   alias Opus.Auro.Client
-  alias Opus.Pipeline.{Coordinator, GenerationSpawnerWorker, OllamaIterationWorker}
+  alias Opus.Pipeline.{Coordinator, GenerationSpawnerWorker}
 
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok | {:error, term()}
@@ -57,7 +57,7 @@ defmodule Opus.Pipeline.MonteCarloWorker do
         :ok
 
       {:ok, %{"status" => "failed", "failure_reason" => reason} = result} ->
-        stats = Map.get(result, "stats", %{})
+        _stats = Map.get(result, "stats", %{})
 
         Logger.info("[Pipeline] Monte Carlo failed for config #{config_id}: #{reason}")
 
@@ -70,7 +70,8 @@ defmodule Opus.Pipeline.MonteCarloWorker do
               })
             )
         else
-          {:ok, _job} = :ok
+          :ok
+          # {:ok, _job} = :ok
           # Oban.insert(
           #   OllamaIterationWorker.new(%{
           #     config_id: config_id,
