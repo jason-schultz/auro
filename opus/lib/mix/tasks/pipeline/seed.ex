@@ -8,6 +8,7 @@ defmodule Mix.Tasks.Pipeline.Seed do
     mix pipeline.seed                      # H1 (default)
     mix pipeline.seed --granularity H4
     mix pipeline.seed --granularity M15
+    mix pipeline.seed --granularity M5
 
   Skips instrument/strategy/granularity combos that already have a root config
   (source=manual, no parent). Safe to re-run after a partial seed.
@@ -74,6 +75,20 @@ defmodule Mix.Tasks.Pipeline.Seed do
         "entry_threshold" => -0.003,
         "exit_threshold" => 0.002,
         "stop_loss" => -0.008
+      }
+    },
+    "M5" => %{
+      "trend_following" => %{
+        "fast_period" => 20,
+        "slow_period" => 60,
+        "stop_loss" => -0.01,
+        "take_profit" => nil
+      },
+      "mean_reversion" => %{
+        "ma_period" => 20,
+        "entry_threshold" => -0.002,
+        "exit_threshold" => 0.0015,
+        "stop_loss" => -0.005
       }
     }
   }

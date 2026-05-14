@@ -16,7 +16,7 @@ defmodule Opus.Pipeline.WalkForwardWorker do
   require Logger
 
   alias Opus.Auro.Client
-  alias Opus.Pipeline.{GenerationSpawnerWorker, MonteCarloWorker, OllamaIterationWorker}
+  alias Opus.Pipeline.{GenerationSpawnerWorker, MonteCarloWorker}
 
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok | {:error, term()}
@@ -48,7 +48,7 @@ defmodule Opus.Pipeline.WalkForwardWorker do
         :ok
 
       {:ok, %{"status" => "failed", "failure_reason" => reason} = result} ->
-        stats = Map.get(result, "stats", %{})
+        _stats = Map.get(result, "stats", %{})
 
         Logger.info("[Pipeline] Walk-forward failed for config #{config_id}: #{reason}")
 
@@ -61,15 +61,16 @@ defmodule Opus.Pipeline.WalkForwardWorker do
               })
             )
         else
-          {:ok, _job} =
-            Oban.insert(
-              OllamaIterationWorker.new(%{
-                config_id: config_id,
-                depth: depth,
-                failure_reason: reason,
-                stats: stats
-              })
-            )
+          :ok
+          # {:ok, _job} =
+          # Oban.insert(
+          #   OllamaIterationWorker.new(%{
+          #     config_id: config_id,
+          #     depth: depth,
+          #     failure_reason: reason,
+          #     stats: stats
+          #   })
+          # )
         end
 
         :ok
