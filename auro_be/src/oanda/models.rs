@@ -112,6 +112,8 @@ pub struct Instrument {
     pub pip_location: Option<i32>,
     pub display_precision: Option<i32>,
     pub minimum_trade_size: Option<String>,
+    pub maximum_order_units: Option<String>,
+    pub trade_units_precision: Option<i32>,
 }
 
 // pub enum TradeOrderUpdate {

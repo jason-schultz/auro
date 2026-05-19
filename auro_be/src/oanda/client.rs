@@ -211,6 +211,7 @@ impl OandaClient {
         units: &str,
         stop_loss_price: Option<&str>,
         take_profit_price: Option<&str>,
+        trailing_stop_distance: Option<&str>,
     ) -> AppResult<serde_json::Value> {
         let url = format!("{}/v3/accounts/{}/orders", self.base_url, self.account_id);
 
@@ -222,7 +223,9 @@ impl OandaClient {
             "positionFill": "DEFAULT",
         });
 
-        if let Some(sl) = stop_loss_price {
+        if let Some(dist) = trailing_stop_distance {
+            order["trailingStopLossOnFill"] = json!({"distance": dist, "timeInForce": "GTC"});
+        } else if let Some(sl) = stop_loss_price {
             order["stopLossOnFill"] = json!({"price": sl, "timeInForce": "GTC"})
         }
 
@@ -445,6 +448,65 @@ impl OandaClient {
             .json()
             .await
             .map_err(|e| AppError::Oanda(format!("Failed to parse trade: {}", e)))?;
+
+        Ok(body)
+    }
+
+    /// Fetch a single OANDA transaction by transaction id.
+    pub async fn get_transaction(&self, transaction_id: &str) -> AppResult<serde_json::Value> {
+        let url = format!(
+            "{}/v3/accounts/{}/transactions/{}",
+            self.base_url, self.account_id, transaction_id
+        );
+
+        let resp = self
+            .http_client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|e| AppError::Oanda(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::Oanda(format!("HTTP {}: {}", status, body)));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Oanda(format!("Failed to parse transaction: {}", e)))?;
+
+        Ok(body)
+    }
+
+    /// Fetch transactions after a given transaction id.
+    pub async fn list_transactions_since(&self, since_id: &str) -> AppResult<serde_json::Value> {
+        let url = format!(
+            "{}/v3/accounts/{}/transactions/sinceid",
+            self.base_url, self.account_id
+        );
+
+        let resp = self
+            .http_client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .query(&[("id", since_id), ("type", "ORDER_FILL")])
+            .send()
+            .await
+            .map_err(|e| AppError::Oanda(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::Oanda(format!("HTTP {}: {}", status, body)));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Oanda(format!("Failed to parse transactions: {}", e)))?;
 
         Ok(body)
     }

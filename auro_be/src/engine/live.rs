@@ -1,17 +1,21 @@
 use chrono::{DateTime, Timelike, Utc};
 use tokio::sync::broadcast;
 
+use crate::db::record_signal_event;
 use crate::engine::types::{CandleAccumulator, CandleBuffer, Granularity, OpenPosition};
 use crate::oanda::models::StreamMessage;
 use crate::state::{AppState, LastQuote};
 
+pub mod account_cache;
 pub mod evaluator;
+pub mod instrument_cache;
 pub mod prefill;
 pub mod pricing;
+pub mod sizing;
 pub mod time;
 pub mod trade_management;
 
-pub(crate) use evaluator::{evaluate_strategies, is_trading_enabled, position_key_deltas};
+pub(crate) use evaluator::{evaluate_and_apply, is_trading_enabled};
 pub use pricing::format_price;
 pub(crate) use time::{compute_slot_time, time_slot};
 
@@ -173,70 +177,50 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                     instrument,
                                     e
                                 );
+                            } else {
+                                *state.live.last_candle_persisted.write().await = Some(Utc::now());
                             }
 
+                            match evaluate_and_apply(
+                                &state,
+                                instrument,
+                                *granularity,
+                                &buffer_snapshot,
+                                mid,
+                            )
+                            .await
                             {
-                                // Snapshot rules under read lock so the lock is released
-                                // before the (potentially slow) strategy evaluation runs.
-                                let rules_snapshot = state.live.rules.read().await.clone();
-
-                                // Evaluate against a snapshot to avoid holding write locks
-                                // across DB/OANDA await points inside evaluate_strategies.
-                                let before_positions =
-                                    state.live.open_positions.read().await.clone();
-                                let mut working_positions = before_positions.clone();
-
-                                // Evaluate strategies matching this instrument AND granularity
-                                match evaluate_strategies(
-                                    &state.db,
-                                    &state.oanda,
-                                    instrument,
-                                    granularity,
-                                    &buffer_snapshot,
-                                    mid,
-                                    &mut working_positions,
-                                    &rules_snapshot,
-                                )
-                                .await
-                                {
-                                    Ok(reports) => {
-                                        // Delta reconciliation is key-based only.
-                                        // Value mutations for existing keys are not applied here.
-                                        let (removed, added) = position_key_deltas(
-                                            &before_positions,
-                                            &working_positions,
-                                        );
-                                        if !removed.is_empty() || !added.is_empty() {
-                                            let mut open_positions =
-                                                state.live.open_positions.write().await;
-                                            for trade_id in removed {
-                                                open_positions.remove(&trade_id);
-                                            }
-                                            for (trade_id, position) in added {
-                                                open_positions.insert(trade_id, position);
-                                            }
-                                        }
-
-                                        if !reports.is_empty() {
-                                            tracing::info!(
-                                                "Strategy evaluation produced {} signals for {} {}",
-                                                reports.len(),
-                                                instrument,
-                                                granularity
-                                            );
-                                            for report in &reports {
-                                                tracing::debug!("[REPORT] {:?}", report);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Strategy evaluation error for {} {}: {}",
+                                Ok(reports) => {
+                                    if !reports.is_empty() {
+                                        tracing::info!(
+                                            "Strategy evaluation produced {} signals for {} {}",
+                                            reports.len(),
                                             instrument,
-                                            granularity,
-                                            e
+                                            granularity
                                         );
+                                        for report in &reports {
+                                            tracing::debug!("[REPORT] {:?}", report);
+
+                                            if let Err(e) =
+                                                record_signal_event(&state.db, report).await
+                                            {
+                                                tracing::warn!(
+                                                    "Failed to record signal_event for {} {}: {}",
+                                                    report.instrument,
+                                                    report.granularity,
+                                                    e
+                                                );
+                                            }
+                                        }
                                     }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Strategy evaluation error for {} {}: {}",
+                                        instrument,
+                                        granularity,
+                                        e
+                                    );
                                 }
                             }
                         }

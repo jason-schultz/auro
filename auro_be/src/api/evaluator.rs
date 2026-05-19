@@ -3,7 +3,7 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::live::{evaluate_strategies, is_trading_enabled, position_key_deltas};
+use crate::engine::live::{evaluate_and_apply, is_trading_enabled};
 use crate::engine::types::{Granularity, SignalReport};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -139,37 +139,8 @@ async fn run_evaluation(
 
         any_evaluated = true;
 
-        // Evaluate
-        let rules_snapshot = state.live.rules.read().await.clone();
-        let before_positions = state.live.open_positions.read().await.clone();
-        let mut working_positions = before_positions.clone();
-
-        match evaluate_strategies(
-            &state.db,
-            &state.oanda,
-            instrument,
-            &granularity,
-            &buffer,
-            quote.mid,
-            &mut working_positions,
-            &rules_snapshot,
-        )
-        .await
-        {
+        match evaluate_and_apply(state, instrument, granularity, &buffer, quote.mid).await {
             Ok(reports) => {
-                // Delta reconciliation is key-based only.
-                // Value mutations for existing keys are not applied here.
-                let (removed, added) = position_key_deltas(&before_positions, &working_positions);
-                if !removed.is_empty() || !added.is_empty() {
-                    let mut open_positions = state.live.open_positions.write().await;
-                    for trade_id in removed {
-                        open_positions.remove(&trade_id);
-                    }
-                    for (trade_id, position) in added {
-                        open_positions.insert(trade_id, position);
-                    }
-                }
-
                 tracing::info!("[EVAL] {} produced {} signals", instrument, reports.len());
                 all_signals.extend(reports);
             }

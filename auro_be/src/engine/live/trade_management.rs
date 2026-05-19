@@ -34,6 +34,15 @@ pub(crate) async fn evaluate_trade_management(
     // Update MAE/MFE extremes and persist if a new extreme is hit.
     update_mae_mfe(state, position, current_price).await;
 
+    // Skip SL management if not eligible or already at terminal state.
+    // Trailing includes nil-TP strategies which open directly in this state.
+    if matches!(
+        position.stop_loss_state,
+        StopLossState::NotApplicable | StopLossState::Trailing
+    ) {
+        return Ok(());
+    }
+
     let take_profit = match fetch_take_profit(&state.db, &position.strategy_id).await {
         Some(tp) => tp,
         None => {
@@ -44,14 +53,6 @@ pub(crate) async fn evaluate_trade_management(
             return Ok(());
         }
     };
-
-    // Skip SL management if not eligible or already at terminal state
-    if matches!(
-        position.stop_loss_state,
-        StopLossState::NotApplicable | StopLossState::Trailing
-    ) {
-        return Ok(());
-    }
 
     // Compute % move from entry, direction-aware
     // Long: profit when price > entry. Short: profit when price < entry.
@@ -94,7 +95,7 @@ pub(crate) async fn evaluate_trade_management(
             let trailing_threshold = calc_trailing_threshold(take_profit);
 
             if pct_in_profit >= trailing_threshold {
-                let distance_price = (current_price * TRAILING_DISTANCE_PCT).min(1.0);
+                let distance_price = current_price * TRAILING_DISTANCE_PCT;
                 let distance_str = format_price(&position.instrument, distance_price);
 
                 tracing::info!(
