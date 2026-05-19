@@ -10,6 +10,8 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use config::Config;
+use engine::live::account_cache::spawn_account_refresher;
+use engine::live::instrument_cache::load_instrument_metadata;
 use engine::live::spawn_live_evaluator;
 use lru::LruCache;
 use oanda::aggregator::spawn_aggregator;
@@ -140,16 +142,24 @@ pub async fn run() -> anyhow::Result<()> {
         db: pool.clone(),
         config: config.clone(),
         oanda: oanda.clone(),
+        start_time: chrono::Utc::now(),
         live: Arc::new(LiveState::new()),
         price_tx: price_tx.clone(),
         eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
     };
+
+    let instrument_metadata = load_instrument_metadata(&state.oanda).await;
+    {
+        let mut cache = state.live.instrument_metadata.write().await;
+        *cache = instrument_metadata;
+    }
 
     let aggregator_rx = price_tx.subscribe();
     spawn_aggregator(aggregator_rx, state.db.clone());
 
     let evaluator_rx = price_tx.subscribe();
     spawn_live_evaluator(evaluator_rx, state.clone());
+    spawn_account_refresher(state.clone());
 
     let stream_instruments: Vec<String> =
         DEFAULT_INSTRUMENTS.iter().map(|s| s.to_string()).collect();

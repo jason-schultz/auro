@@ -274,6 +274,8 @@ pub struct LiveStrategy {
     pub parameters: serde_json::Value,
     pub enabled: bool,
     pub max_position_size: String,
+    pub risk_pct: f64,
+    pub max_units: Option<i64>,
 }
 
 #[derive(Clone, Debug)]

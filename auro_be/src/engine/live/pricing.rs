@@ -37,6 +37,12 @@ pub fn price_precision(instrument: &str) -> usize {
     if instrument == "XCU_USD" {
         return 4;
     }
+    if matches!(instrument, "WHEAT_USD" | "CORN_USD") {
+        return 3;
+    }
+    if instrument == "SOYBN_USD" {
+        return 4;
+    }
     if instrument.starts_with("USB")
         || instrument.starts_with("UK10")
         || instrument.starts_with("DE10")

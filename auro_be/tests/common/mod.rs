@@ -38,6 +38,7 @@ pub fn test_state() -> AppState {
         db,
         config,
         oanda,
+        start_time: chrono::Utc::now(),
         live: Arc::new(LiveState::new()),
         price_tx,
         eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap()))),
