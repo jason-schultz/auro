@@ -81,9 +81,9 @@ fn risk_pct_dynamic_computes_expected_units_range() {
     match compute_units(input) {
         SizingDecision::Place { units, .. } => {
             assert!(
-                units >= 190 && units <= 210,
-                "expected ~200 units, got {units}"
-            )
+                (190..=210).contains(&units),
+                "expected units in range 190-210, got {units}"
+            );
         }
         SizingDecision::Skip { reason, .. } => panic!("unexpected skip: {:?}", reason),
     }
