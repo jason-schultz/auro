@@ -139,7 +139,7 @@ async fn run_evaluation(
 
         any_evaluated = true;
 
-        match evaluate_and_apply(&state, instrument, granularity, &buffer, quote.mid).await {
+        match evaluate_and_apply(state, instrument, granularity, &buffer, quote.mid).await {
             Ok(reports) => {
                 tracing::info!("[EVAL] {} produced {} signals", instrument, reports.len());
                 all_signals.extend(reports);

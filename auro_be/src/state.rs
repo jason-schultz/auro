@@ -32,6 +32,7 @@ pub struct LiveState {
     pub account: Arc<RwLock<Option<AccountSnapshot>>>,
     pub instrument_metadata: RwLock<HashMap<String, InstrumentMeta>>,
     pub open_positions: RwLock<HashMap<String, OpenPosition>>,
+    #[allow(clippy::type_complexity)]
     pub eval_locks: RwLock<HashMap<(String, Granularity), Arc<tokio::sync::Mutex<()>>>>,
     pub last_eval_minute: RwLock<HashMap<String, u32>>,
     pub last_evaluator_run: RwLock<Option<DateTime<Utc>>>,
