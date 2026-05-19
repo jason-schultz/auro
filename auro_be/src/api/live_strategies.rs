@@ -855,6 +855,9 @@ struct TradeDetailRow {
     entry_reason: Option<String>,
     exit_reason: Option<String>,
     status: String,
+    indicators_at_entry: Option<Value>,
+    regime_at_entry: Option<String>,
+    stop_loss_state_at_close: Option<String>,
     // Strategy
     strategy_type: Option<String>,
     parameters: Option<Value>,
@@ -881,7 +884,8 @@ pub async fn get_live_trade_detail(
         r#"
         SELECT lt.id, lt.live_strategy_id, lt.oanda_trade_id, lt.instrument, lt.direction, lt.units,
                lt.entry_price, lt.exit_price, lt.entry_time, lt.exit_time,
-               lt.pnl_percent, lt.entry_reason, lt.exit_reason, lt.status,
+             lt.pnl_percent, lt.entry_reason, lt.exit_reason, lt.status,
+             lt.indicators_at_entry, lt.regime_at_entry, lt.stop_loss_state_at_close,
                ls.strategy_type, ls.parameters, ls.granularity, ls.enabled,
                ls.max_position_size, ls.backtest_run_id,
                br.strategy_name AS bt_strategy_name,
@@ -919,6 +923,9 @@ pub async fn get_live_trade_detail(
         "entry_reason": row.entry_reason,
         "exit_reason": row.exit_reason,
         "status": row.status,
+        "indicators_at_entry": row.indicators_at_entry,
+        "regime_at_entry": row.regime_at_entry,
+        "stop_loss_state_at_close": row.stop_loss_state_at_close,
     });
 
     let strategy = row.live_strategy_id.map(|sid| {

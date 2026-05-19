@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/debug/buffers", get(live_strategies::debug_buffers))
         .route("/api/health", get(health::health))
+        .route("/api/health/live", get(health::live_health))
         .route("/api/account", get(account::get_account))
         .route("/api/instruments", get(account::get_instruments))
         .route("/api/pricing", get(account::get_pricing))

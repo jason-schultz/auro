@@ -8,6 +8,34 @@
             </template>
         </ViewHeader>
 
+        <section
+            v-if="!introDismissed"
+            class="mb-4 rounded-md border border-border bg-background/60 p-3"
+        >
+            <div class="flex items-center justify-between gap-2">
+                <h3 class="text-sm font-semibold text-foreground">How to read this page</h3>
+                <div class="flex items-center gap-2">
+                    <button
+                        type="button"
+                        class="text-xs text-muted-foreground hover:text-foreground"
+                        @click="introOpen = !introOpen"
+                    >
+                        {{ introOpen ? "Collapse" : "Expand" }}
+                    </button>
+                    <button
+                        type="button"
+                        class="text-xs text-muted-foreground hover:text-foreground"
+                        @click="dismissIntro"
+                    >
+                        Dismiss
+                    </button>
+                </div>
+            </div>
+            <p v-if="introOpen" class="mt-2 text-xs leading-5 text-muted-foreground">
+                This page is your closed-trade scoreboard: if total realized P&L trends up with healthy average wins relative to average losses, your strategy has edge; if P&L is flat/down, MAE stays large, or MFE is much bigger than what you actually banked, you are likely cutting winners too early, setting stops poorly, or trading the wrong market regime.
+            </p>
+        </section>
+
         <FilterToolbar>
             <SegmentedFilterGroup
                 v-model="statusFilter"
@@ -55,12 +83,19 @@
                         type="button"
                         class="inline-flex items-center gap-0.5 transition-colors"
                     >
-                        {{ col.label }}
+                        <MetricLabel
+                            :label="col.label"
+                            :explainer="journalMetricExplainers[col.key]"
+                        />
                         <span class="text-[9px] ml-0.5 opacity-50">
                             {{ sortKey === col.key ? (sortDir === "asc" ? "▲" : "▼") : "⇅" }}
                         </span>
                     </button>
-                    <span v-else>{{ col.label }}</span>
+                    <MetricLabel
+                        v-else
+                        :label="col.label"
+                        :explainer="journalMetricExplainers[col.key]"
+                    />
                 </th>
             </template>
 
@@ -135,6 +170,12 @@
                     <!-- Expandable detail row: entry indicators + strategy parameters -->
                     <tr v-if="expandedId === trade.id" :key="trade.id + '-detail'">
                         <td colspan="12" class="px-4 py-3 bg-muted/20 border-b border-border">
+                            <div class="mb-4 rounded-md border border-border bg-background/70 p-3">
+                                <div class="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">What happened on this trade</div>
+                                <p class="text-xs text-muted-foreground leading-5 mb-1">{{ strategyPrimerText(trade) }}</p>
+                                <p class="text-xs text-foreground leading-5 mb-1">{{ tradeEntryNarrativeText(trade) }}</p>
+                                <p class="text-xs text-foreground leading-5">{{ tradeExitNarrativeText(trade) }}</p>
+                            </div>
                             <div class="grid grid-cols-2 gap-6 text-xs">
                                 <div>
                                     <div class="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">Entry Indicators</div>
@@ -195,9 +236,22 @@ import { onMounted } from "vue";
 import DataTableScaffold from "@/components/ui/DataTableScaffold.vue";
 import FilterToolbar from "@/components/ui/FilterToolbar.vue";
 import FilterToolbarDivider from "@/components/ui/FilterToolbarDivider.vue";
+import MetricLabel from "@/components/ui/MetricLabel.vue";
 import SegmentedFilterGroup from "@/components/ui/SegmentedFilterGroup.vue";
 import ViewHeader from "@/components/ui/ViewHeader.vue";
+import { JOURNAL_METRIC_EXPLAINERS } from "@/lib/metricExplainers";
 import { useJournal } from "@/composables/useJournal";
+import { ref } from "vue";
+
+const INTRO_DISMISS_KEY = "journal_intro_dismissed_v1";
+const introOpen = ref(true);
+const introDismissed = ref(false);
+const journalMetricExplainers = JOURNAL_METRIC_EXPLAINERS;
+
+function dismissIntro() {
+    introDismissed.value = true;
+    localStorage.setItem(INTRO_DISMISS_KEY, "true");
+}
 
 const {
     loading,
@@ -225,11 +279,17 @@ const {
     fmtPct,
     fmtDatetime,
     fmtDuration,
+    strategyPrimerText,
+    tradeEntryNarrativeText,
+    tradeExitNarrativeText,
     pnlClass,
     slStateClass,
     formatIndicatorValue,
     strategyTypeLabel,
 } = useJournal();
 
-onMounted(load);
+onMounted(() => {
+    introDismissed.value = localStorage.getItem(INTRO_DISMISS_KEY) === "true";
+    load();
+});
 </script>

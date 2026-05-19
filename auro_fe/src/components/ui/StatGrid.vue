@@ -4,6 +4,7 @@
             v-for="item in items"
             :key="item.label"
             :label="item.label"
+            :explainer="item.explainer"
             :value="item.value"
             :value-class="item.valueClass"
             :meta="item.meta"
