@@ -14,6 +14,9 @@ export interface TradeData {
     entry_reason: string | null;
     exit_reason: string | null;
     status: string;
+    indicators_at_entry: Record<string, unknown> | null;
+    regime_at_entry: string | null;
+    stop_loss_state_at_close: string | null;
 }
 
 export interface StrategyData {

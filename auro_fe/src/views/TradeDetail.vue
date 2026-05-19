@@ -64,6 +64,31 @@
                         </div>
                     </div>
 
+                    <div class="bg-background rounded-md p-3 space-y-2">
+                        <div class="text-[10px] text-muted-foreground mb-1">
+                            Strategy Context (ELI5)
+                        </div>
+                        <p class="text-xs text-muted-foreground leading-5">
+                            {{ strategyPrimerText }}
+                        </p>
+                        <p class="text-xs text-foreground leading-5">
+                            {{ eli5EntryText }}
+                        </p>
+                        <p class="text-xs text-foreground leading-5">
+                            {{ eli5ExitText }}
+                        </p>
+                        <p class="text-xs text-muted-foreground leading-5">
+                            {{ instrumentRegimeText }}
+                        </p>
+                        <p
+                            v-for="line in regimePlaceholderText"
+                            :key="line"
+                            class="text-xs text-muted-foreground leading-5"
+                        >
+                            {{ line }}
+                        </p>
+                    </div>
+
                     <div
                         v-if="detail.trade.oanda_trade_id"
                         class="text-[10px] text-muted-foreground font-mono"
@@ -179,6 +204,11 @@ const {
     error,
     strategyTypeLabel,
     edgeStatus,
+    strategyPrimerText,
+    eli5EntryText,
+    eli5ExitText,
+    instrumentRegimeText,
+    regimePlaceholderText,
     tradeMetricItems,
     strategyMetricItems,
     liveMetricItems,

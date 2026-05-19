@@ -54,3 +54,19 @@ rand = "0.9"
 [[bin]]
 name = "run_backtests"
 path = "src/bin/run_backtests.rs"
+
+[[bin]]
+name = "backfill_pnl"
+path = "src/bin/backfill_pnl.rs"
+
+[[bin]]
+name = "adx_distribution"
+path = "src/bin/adx_distribution.rs"
+
+[[bin]]
+name = "backfill_mfe_mae"
+path = "src/bin/backfill_mfe_mae.rs"
+
+[[bin]]
+name = "backfill_stop_loss_state"
+path = "src/bin/backfill_stop_loss_state.rs"

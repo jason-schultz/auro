@@ -4,6 +4,11 @@ import { formatPercent } from "@/lib/format";
 import { formatDurationCompact } from "@/lib/time";
 import { pnlClass, slStateClass, formatIndicatorValue } from "@/lib/domain-ui";
 import { strategyTypeLabel } from "@/lib/strategy";
+import {
+    buildEntryNarrativeText,
+    buildExitNarrativeText,
+    buildStrategyPrimerText,
+} from "@/lib/tradeNarrative";
 import { ariaSortForColumn, JOURNAL_COLUMNS } from "@/lib/ui";
 import type { JournalTrade, JournalResponse } from "@/types/trade";
 
@@ -148,6 +153,31 @@ export function useJournal() {
         return formatDurationCompact(trade.entry_time, end) ?? "—";
     }
 
+    function strategyPrimerText(trade: JournalTrade): string {
+        return buildStrategyPrimerText(
+            trade.strategy_type ?? "",
+            trade.strategy_parameters,
+        );
+    }
+
+    function tradeEntryNarrativeText(trade: JournalTrade): string {
+        return buildEntryNarrativeText({
+            strategyType: trade.strategy_type ?? "",
+            strategyParameters: trade.strategy_parameters,
+            entryReason: trade.entry_reason,
+        });
+    }
+
+    function tradeExitNarrativeText(trade: JournalTrade): string {
+        return buildExitNarrativeText({
+            exitReason: trade.exit_reason,
+            stopLossStateAtClose: trade.stop_loss_state_at_close,
+            entryPrice: trade.entry_price,
+            exitPrice: trade.exit_price,
+            strategyParameters: trade.strategy_parameters,
+        });
+    }
+
     return {
         trades,
         loading,
@@ -176,6 +206,9 @@ export function useJournal() {
         fmtPct,
         fmtDatetime,
         fmtDuration,
+        strategyPrimerText,
+        tradeEntryNarrativeText,
+        tradeExitNarrativeText,
         // shared helpers re-exported so the view imports from one place
         pnlClass,
         slStateClass,

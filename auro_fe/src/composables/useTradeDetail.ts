@@ -3,7 +3,13 @@ import { useRoute } from "vue-router";
 import { api } from "@/services/api";
 import { formatPercent } from "@/lib/format";
 import { getInstrumentDecimals } from "@/lib/instruments";
+import { TRADE_DETAIL_LABEL_EXPLAINERS } from "@/lib/metricExplainers";
 import { expectancy as calculateExpectancy } from "@/lib/metrics";
+import {
+    buildEntryNarrativeText,
+    buildExitNarrativeText,
+    buildStrategyPrimerText,
+} from "@/lib/tradeNarrative";
 import type { StatGridItem } from "@/lib/ui";
 import type { TradeDetailResponse } from "@/types/trade";
 
@@ -188,27 +194,84 @@ export function useTradeDetail() {
         };
     });
 
+    const eli5EntryText = computed(() => {
+        if (!detail.value) return "";
+        const strategyType = detail.value.strategy?.strategy_type ?? "";
+        const strategyParameters = detail.value.strategy?.parameters as Record<string, unknown> | null;
+        return buildEntryNarrativeText({
+            strategyType,
+            strategyParameters,
+            entryReason: detail.value.trade.entry_reason,
+        });
+    });
+
+    const eli5ExitText = computed(() => {
+        if (!detail.value) return "";
+        const strategyParameters = detail.value.strategy?.parameters as Record<string, unknown> | null;
+        return buildExitNarrativeText({
+            exitReason: detail.value.trade.exit_reason,
+            stopLossStateAtClose: detail.value.trade.stop_loss_state_at_close,
+            entryPrice: detail.value.trade.entry_price,
+            exitPrice: detail.value.trade.exit_price,
+            strategyParameters,
+        });
+    });
+
+    const strategyPrimerText = computed(() => {
+        if (!detail.value) return "";
+        const strategyType = detail.value.strategy?.strategy_type ?? "";
+        const strategyParameters = detail.value.strategy?.parameters as Record<string, unknown> | null;
+        return buildStrategyPrimerText(strategyType, strategyParameters);
+    });
+
+    const instrumentRegimeText = computed(() => {
+        const regime = detail.value?.trade.regime_at_entry;
+        if (!regime || regime === "unknown") {
+            return "Instrument regime at entry: unknown (not captured for this trade).";
+        }
+        return `Instrument regime at entry: ${regime}.`;
+    });
+
+    const regimePlaceholderText = computed(() => {
+        const instrument = detail.value?.trade.instrument ?? "";
+        const category = instrument.endsWith("_USD")
+            ? "cross-asset"
+            : instrument.includes("_")
+                ? "fx"
+                : "unknown";
+
+        return [
+            `Sector regime (placeholder): not wired yet for ${instrument || "this instrument"} (${category}).`,
+            "Market regime (placeholder): not wired yet.",
+            "Exit-time regime (placeholder): will be populated once we capture regime on exit.",
+        ];
+    });
+
     const tradeMetricItems = computed<StatGridItem[]>(() => {
         if (!detail.value) return [];
 
         return [
             {
                 label: "Entry",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS.Entry,
                 value: `$${formatPrice(detail.value.trade.entry_price)}`,
                 meta: formatTime(detail.value.trade.entry_time),
             },
             {
                 label: "Exit",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS.Exit,
                 value: exitDisplay.value,
                 meta: detail.value.trade.exit_time ? formatTime(detail.value.trade.exit_time) : "-",
             },
             {
                 label: "P&L",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["P&L"],
                 value: pnlDisplay.value,
                 valueClass: pnlClass.value,
             },
             {
                 label: "Duration",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS.Duration,
                 value: duration.value || "-",
             },
         ];
@@ -219,10 +282,12 @@ export function useTradeDetail() {
         return [
             {
                 label: "Granularity",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS.Granularity,
                 value: detail.value.strategy.granularity || "-",
             },
             {
                 label: "Max Position",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Max Position"],
                 value: detail.value.strategy.max_position_size || "-",
             },
         ];
@@ -235,22 +300,26 @@ export function useTradeDetail() {
         return [
             {
                 label: "# Trades",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["# Trades"],
                 value: String(live.num_trades),
                 meta: `(${live.wins}W / ${live.losses}L)`,
             },
             {
                 label: "Live Win Rate",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Live Win Rate"],
                 value: formatPct(live.win_rate),
                 meta: winRateDelta.value != null ? `${formatDelta(winRateDelta.value)} vs BT` : undefined,
                 metaClass: deltaClass(winRateDelta.value),
             },
             {
                 label: "Live Total Return",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Live Total Return"],
                 value: formatPct(live.total_return),
                 valueClass: live.total_return >= 0 ? "text-emerald-400" : "text-red-400",
             },
             {
                 label: "Live Expectancy",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Live Expectancy"],
                 value: formatPct(liveExpectancy.value),
                 valueClass: liveExpectancy.value >= 0 ? "text-emerald-400" : "text-red-400",
                 meta: expectancyDelta.value != null ? `${formatDelta(expectancyDelta.value)} vs BT` : undefined,
@@ -258,6 +327,7 @@ export function useTradeDetail() {
             },
             {
                 label: "Live Avg Win",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Live Avg Win"],
                 value: formatPct(live.avg_win),
                 valueClass: "text-emerald-400",
                 meta: avgWinDelta.value != null ? `${formatDelta(avgWinDelta.value)} vs BT` : undefined,
@@ -265,6 +335,7 @@ export function useTradeDetail() {
             },
             {
                 label: "Live Avg Loss",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Live Avg Loss"],
                 value: formatPct(live.avg_loss),
                 valueClass: "text-red-400",
                 meta: avgLossDelta.value != null ? `${formatDelta(avgLossDelta.value)} vs BT` : undefined,
@@ -282,39 +353,47 @@ export function useTradeDetail() {
         return [
             {
                 label: "Sharpe Ratio",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Sharpe Ratio"],
                 value: formatStat(bt.sharpe_ratio, 2),
                 valueClass: sharpeClass(bt.sharpe_ratio),
             },
             {
                 label: "Win Rate",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Win Rate"],
                 value: formatPct(bt.win_rate),
             },
             {
                 label: "Total Return",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Total Return"],
                 value: formatPct(bt.total_return),
                 valueClass: (bt.total_return ?? 0) >= 0 ? "text-emerald-400" : "text-red-400",
             },
             {
                 label: "Max Drawdown",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Max Drawdown"],
                 value: formatPct(bt.max_drawdown),
                 valueClass: "text-red-400",
             },
             {
                 label: "Avg Win",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Avg Win"],
                 value: formatPct(bt.avg_win),
                 valueClass: "text-emerald-400",
             },
             {
                 label: "Avg Loss",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Avg Loss"],
                 value: formatPct(bt.avg_loss),
                 valueClass: "text-red-400",
             },
             {
                 label: "# Trades",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["# Trades"],
                 value: String(bt.num_trades ?? "-"),
             },
             {
                 label: "Trade vs Avg",
+                explainer: TRADE_DETAIL_LABEL_EXPLAINERS["Trade vs Avg"],
                 value: tradeVsAvgLabel.value,
                 valueClass: tradeVsAvgClass.value,
             },
@@ -386,6 +465,11 @@ export function useTradeDetail() {
         error,
         strategyTypeLabel,
         edgeStatus,
+        strategyPrimerText,
+        eli5EntryText,
+        eli5ExitText,
+        instrumentRegimeText,
+        regimePlaceholderText,
         tradeMetricItems,
         strategyMetricItems,
         liveMetricItems,
