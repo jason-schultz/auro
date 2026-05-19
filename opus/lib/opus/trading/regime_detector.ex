@@ -5,12 +5,17 @@ defmodule Opus.Trading.RegimeDetector do
 
   Polls the Auro `/api/indicators` endpoint every 5 minutes for each
   (instrument, granularity) pair with an enabled `live_strategies` row.
-  Classifies each pair as:
+  Granularities polled: D, H4, H1, M15. Classifies each pair as:
 
-    * `:trending`  — ADX >= 25
+    * `:trending`  — ADX >= 30
     * `:choppy`    — ADX < 20
-    * `:uncertain` — 20 <= ADX < 25 (avoid trading either side)
+    * `:uncertain` — 20 <= ADX < 30
     * `:unknown`   — ADX is nil (insufficient data in the buffer)
+
+  Choppy threshold follows Wilder's conventional `< 20` (instead of the
+  stricter `< 15`) since "no trend" is the diagnostic, not "no movement at
+  all." D is polled for diagnostic use even though the current rules engine
+  gates on H4+H1 only.
 
   The classification map is held in GenServer state and read via `get_regime/2`
   or `get_all_regimes/0`. The future rules engine will consume this state to
@@ -29,7 +34,7 @@ defmodule Opus.Trading.RegimeDetector do
   @poll_interval :timer.minutes(5)
   @initial_delay :timer.seconds(15)
 
-  @adx_trending 25.0
+  @adx_trending 30.0
   @adx_choppy 20.0
 
   # -- Public API --
@@ -53,6 +58,9 @@ defmodule Opus.Trading.RegimeDetector do
     GenServer.call(__MODULE__, :get_all_regimes)
   end
 
+  @spec last_run() :: DateTime.t() | nil
+  def last_run, do: GenServer.call(__MODULE__, :last_run)
+
   # -- GenServer Callbacks --
 
   @impl true
@@ -73,6 +81,9 @@ defmodule Opus.Trading.RegimeDetector do
   def handle_call(:get_all_regimes, _from, state) do
     {:reply, state.regimes, state}
   end
+
+  @impl true
+  def handle_call(:last_run, _from, state), do: {:reply, state.last_run, state}
 
   @impl true
   def handle_info(:poll, state) do
@@ -97,7 +108,7 @@ defmodule Opus.Trading.RegimeDetector do
 
   # -- Core logic --
 
-  @poll_granularities ~w[H4 H1 M15]
+  @poll_granularities ~w[D H4 H1 M15]
 
   defp poll do
     case active_strategy_instruments() do

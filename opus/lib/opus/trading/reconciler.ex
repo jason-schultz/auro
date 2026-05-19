@@ -25,6 +25,9 @@ defmodule Opus.Trading.Reconciler do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @spec last_run() :: DateTime.t() | nil
+  def last_run, do: GenServer.call(__MODULE__, :last_run)
+
   # -- GenServer Callbacks --
 
   @impl true
@@ -60,6 +63,9 @@ defmodule Opus.Trading.Reconciler do
 
     {:noreply, new_state}
   end
+
+  @impl true
+  def handle_call(:last_run, _from, state), do: {:reply, state.last_run, state}
 
   # -- Core Reconciliation Logic --
 
@@ -98,6 +104,8 @@ defmodule Opus.Trading.Reconciler do
   defp get_db_open_trades do
     query =
       from(t in "live_trades",
+        left_join: s in "live_strategies",
+        on: s.id == t.live_strategy_id,
         where: t.status == "open",
         select: %{
           id: t.id,
@@ -105,7 +113,8 @@ defmodule Opus.Trading.Reconciler do
           live_strategy_id: t.live_strategy_id,
           instrument: t.instrument,
           direction: t.direction,
-          entry_price: t.entry_price
+          entry_price: t.entry_price,
+          strategy_type: s.strategy_type
         }
       )
 
@@ -130,7 +139,12 @@ defmodule Opus.Trading.Reconciler do
     end
   end
 
-  defp apply_close(trade, %{exit_price: exit_price, exit_reason: exit_reason, pnl: pnl}) do
+  defp apply_close(trade, %{
+         exit_price: exit_price,
+         exit_reason: exit_reason,
+         pnl: pnl,
+         stop_loss_state_at_close: sl_state
+       }) do
     now = DateTime.utc_now()
 
     case from(t in "live_trades",
@@ -142,6 +156,7 @@ defmodule Opus.Trading.Reconciler do
              exit_time: now,
              pnl_percent: pnl,
              exit_reason: exit_reason,
+             stop_loss_state_at_close: sl_state,
              status: "closed",
              updated_at: now
            ]
@@ -149,7 +164,7 @@ defmodule Opus.Trading.Reconciler do
       {1, _} ->
         Logger.info(
           "[Reconciler] Closed #{trade.direction} #{trade.instrument} @ #{Float.round(exit_price, 5)}, " <>
-            "PnL=#{Float.round(pnl * 100, 4)}%, reason=#{exit_reason}"
+            "PnL=#{Float.round(pnl * 100, 4)}%, reason=#{exit_reason}, sl_state=#{sl_state || "nil"}"
         )
 
         Auro.delete_position(trade.oanda_trade_id)
@@ -207,7 +222,14 @@ defmodule Opus.Trading.Reconciler do
             "exit_price=#{exit_price}, pnl=#{Float.round(pnl, 6)}, exit_reason=#{exit_reason}"
         )
 
-        {:ok, %{exit_price: exit_price, exit_reason: exit_reason, pnl: pnl}}
+        # No SL/TP order snapshot available via the transactions fallback path.
+        {:ok,
+         %{
+           exit_price: exit_price,
+           exit_reason: exit_reason,
+           pnl: pnl,
+           stop_loss_state_at_close: nil
+         }}
     end
   end
 
@@ -236,13 +258,21 @@ defmodule Opus.Trading.Reconciler do
 
       true ->
         pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl)
+        sl_state = infer_stop_loss_state(trade, trade_data)
 
         Logger.info(
           "[Reconciler] Trade #{trade.oanda_trade_id}: extracted close details — " <>
-            "exit_price=#{exit_price}, pnl=#{Float.round(pnl, 6)}, exit_reason=#{exit_reason}"
+            "exit_price=#{exit_price}, pnl=#{Float.round(pnl, 6)}, exit_reason=#{exit_reason}, " <>
+            "sl_state=#{sl_state}"
         )
 
-        {:ok, %{exit_price: exit_price, exit_reason: exit_reason, pnl: pnl}}
+        {:ok,
+         %{
+           exit_price: exit_price,
+           exit_reason: exit_reason,
+           pnl: pnl,
+           stop_loss_state_at_close: sl_state
+         }}
     end
   end
 
@@ -258,6 +288,39 @@ defmodule Opus.Trading.Reconciler do
   defp compute_pnl("Long", entry, exit_price, _realized), do: (exit_price - entry) / entry
   defp compute_pnl("Short", entry, exit_price, _realized), do: (entry - exit_price) / entry
   defp compute_pnl(_, entry, _exit_price, realized), do: Number.safe_divide(realized, entry)
+
+  # Infers the trade-management stop-loss state that was active at the moment
+  # OANDA closed the trade. Mirrors the Initial / Breakeven / Trailing /
+  # NotApplicable taxonomy that Rust writes for trades it closes itself
+  # (see auro_be/src/engine/live/trade_management.rs).
+  #
+  # The OANDA trade response keeps the SL/TP/trailing order envelopes around
+  # at close time with their final state (FILLED or CANCELLED). We classify
+  # based on which envelope is present, falling back to comparing the stop
+  # price to the entry price for the Initial-vs-Breakeven split.
+  defp infer_stop_loss_state(trade, trade_data) do
+    cond do
+      trade[:strategy_type] != nil and trade.strategy_type != "trend_following" ->
+        "NotApplicable"
+
+      is_map(trade_data["trailingStopLossOrder"]) ->
+        "Trailing"
+
+      is_map(trade_data["stopLossOrder"]) ->
+        sl_price = Number.parse_float(trade_data["stopLossOrder"]["price"], 0.0)
+        entry = trade.entry_price || 0.0
+        # 0.01% of entry price — same tolerance Rust's prefill uses to detect
+        # a breakeven-shifted SL across instrument precisions.
+        tolerance = entry * 0.0001
+
+        if entry > 0.0 and abs(sl_price - entry) <= tolerance,
+          do: "Breakeven",
+          else: "Initial"
+
+      true ->
+        "NotApplicable"
+    end
+  end
 
   defp determine_exit_reason(trade_data) do
     cond do

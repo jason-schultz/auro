@@ -331,29 +331,30 @@ defmodule Opus.Pipeline.Coordinator do
         {:error, :not_found}
 
       config ->
-        id_bin = Ecto.UUID.dump!(Ecto.UUID.generate())
+        id = Ecto.UUID.generate()
         now = DateTime.utc_now()
 
-        result =
-          Repo.query!(
-            """
-            INSERT INTO live_strategies
-              (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, false, $6, $7, $7)
-            ON CONFLICT (instrument, strategy_type, parameters) DO NOTHING
-            """,
+        {inserted, _rows} =
+          Repo.insert_all(
+            "live_strategies",
             [
-              id_bin,
-              config.strategy_type,
-              config.instrument,
-              config.granularity,
-              config.parameters,
-              max_position_size,
-              now
-            ]
+              %{
+                id: id,
+                strategy_type: config.strategy_type,
+                instrument: config.instrument,
+                granularity: config.granularity,
+                parameters: config.parameters,
+                enabled: false,
+                max_position_size: max_position_size,
+                created_at: now,
+                updated_at: now
+              }
+            ],
+            on_conflict: :nothing,
+            conflict_target: [:instrument, :strategy_type, :parameters]
           )
 
-        if result.num_rows == 1 do
+        if inserted == 1 do
           Logger.info(
             "[Pipeline] Promoted config #{config_id} to live_strategies (disabled) — " <>
               "#{config.strategy_type} #{config.instrument} #{config.granularity}"
