@@ -8,11 +8,6 @@ const routes = [
     component: Dashboard,
   },
   {
-    path: "/markets",
-    name: "markets",
-    component: () => import("@/views/Markets.vue"),
-  },
-  {
     path: "/strategies",
     name: "strategies",
     component: () => import("@/views/Strategies.vue"),
@@ -21,11 +16,6 @@ const routes = [
     path: "/journal",
     name: "journal",
     component: () => import("@/views/Journal.vue"),
-  },
-  {
-    path: "/backtests",
-    name: "backtests",
-    component: () => import("@/views/Backtests.vue"),
   },
   {
     path: "/pipeline",

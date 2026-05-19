@@ -40,7 +40,7 @@
         <DataTableScaffold
             :loading="loading"
             :empty="sortedStrategies.length === 0"
-            :empty-message="strategies.length === 0 ? 'No strategies deployed yet. Deploy from the Backtests page.' : 'No strategies match this filter.'"
+            :empty-message="strategies.length === 0 ? 'No strategies deployed yet.' : 'No strategies match this filter.'"
             card-class="min-h-0"
             content-class="overflow-auto h-full"
             table-class="w-full min-w-max text-sm"

@@ -24,6 +24,7 @@ export function badgePillClasses(params: {
 export interface StatGridItem {
     label: string;
     value: string;
+    explainer?: string;
     valueClass?: string;
     meta?: string;
     metaClass?: string;
@@ -35,54 +36,6 @@ export interface TableColumn {
     sortable: boolean;
 }
 
-export const BACKTEST_COLUMN_SETS = {
-    trendFollowing: [
-        { key: "instrument", label: "Pair", sortable: true },
-        { key: "fast_period", label: "Fast", sortable: true },
-        { key: "slow_period", label: "Slow", sortable: true },
-        { key: "stop_loss", label: "Stop", sortable: true },
-        { key: "take_profit", label: "TP", sortable: true },
-        { key: "num_trades", label: "#", sortable: true },
-        { key: "total_return", label: "Return", sortable: true },
-        { key: "win_rate", label: "Win%", sortable: true },
-        { key: "sharpe_ratio", label: "Sharpe", sortable: true },
-        { key: "max_drawdown", label: "DD", sortable: true },
-        { key: "status", label: "Status", sortable: true },
-    ] satisfies TableColumn[],
-    meanReversion: [
-        { key: "instrument", label: "Pair", sortable: true },
-        { key: "ma_period", label: "MA", sortable: true },
-        { key: "entry_threshold", label: "Entry", sortable: true },
-        { key: "exit_threshold", label: "Exit", sortable: true },
-        { key: "stop_loss", label: "Stop", sortable: true },
-        { key: "num_trades", label: "#", sortable: true },
-        { key: "total_return", label: "Return", sortable: true },
-        { key: "win_rate", label: "Win%", sortable: true },
-        { key: "sharpe_ratio", label: "Sharpe", sortable: true },
-        { key: "max_drawdown", label: "DD", sortable: true },
-        { key: "status", label: "Status", sortable: true },
-    ] satisfies TableColumn[],
-    pipeline: [
-        { key: "instrument", label: "Pair", sortable: true },
-        { key: "strategy_type", label: "Strategy", sortable: true },
-        { key: "granularity", label: "TF", sortable: true },
-        { key: "num_trades", label: "#", sortable: true },
-        { key: "sharpe_ratio", label: "Sharpe", sortable: true },
-        { key: "oos_sharpe", label: "OOS", sortable: true },
-        { key: "max_drawdown", label: "DD", sortable: true },
-        { key: "status", label: "Status", sortable: true },
-    ] satisfies TableColumn[],
-    default: [
-        { key: "instrument", label: "Pair", sortable: true },
-        { key: "strategy_type", label: "Strategy", sortable: true },
-        { key: "num_trades", label: "#", sortable: true },
-        { key: "total_return", label: "Return", sortable: true },
-        { key: "win_rate", label: "Win%", sortable: true },
-        { key: "sharpe_ratio", label: "Sharpe", sortable: true },
-        { key: "max_drawdown", label: "DD", sortable: true },
-        { key: "status", label: "Status", sortable: true },
-    ] satisfies TableColumn[],
-} as const;
 
 export const PIPELINE_COLUMNS = [
     { key: "instrument", label: "Instrument", sortable: true },
@@ -131,25 +84,6 @@ export const JOURNAL_COLUMNS = [
 ] satisfies TableColumn[];
 
 export const TABLE_WIDTH_TOKENS = {
-    backtests: {
-        instrument: "w-[8.5rem] min-w-[8.5rem]",
-        strategy_type: "w-[7.5rem] min-w-[7.5rem]",
-        granularity: "w-[4.5rem] min-w-[4.5rem]",
-        ma_period: "w-[4.5rem] min-w-[4.5rem]",
-        entry_threshold: "w-[5.5rem] min-w-[5.5rem]",
-        exit_threshold: "w-[5.5rem] min-w-[5.5rem]",
-        fast_period: "w-[4.5rem] min-w-[4.5rem]",
-        slow_period: "w-[4.5rem] min-w-[4.5rem]",
-        take_profit: "w-[4.5rem] min-w-[4.5rem]",
-        stop_loss: "w-[4.5rem] min-w-[4.5rem]",
-        num_trades: "w-[3.5rem] min-w-[3.5rem]",
-        total_return: "w-[5.25rem] min-w-[5.25rem]",
-        win_rate: "w-[4.75rem] min-w-[4.75rem]",
-        sharpe_ratio: "w-[4.5rem] min-w-[4.5rem]",
-        oos_sharpe: "w-[4.5rem] min-w-[4.5rem]",
-        max_drawdown: "w-[4.75rem] min-w-[4.75rem]",
-        status: "w-[5rem] min-w-[5rem]",
-    },
     pipeline: {
         instrument: "w-[8.5rem] min-w-[8.5rem]",
         strategy_type: "w-[7.5rem] min-w-[7.5rem]",

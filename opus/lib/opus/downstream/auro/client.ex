@@ -6,9 +6,9 @@ defmodule Opus.Auro.Client do
 
   import Opus.Trading.Granularity, only: [is_valid: 1]
 
-  @base_url Application.compile_env(:opus, :auro_base_url, "http://localhost:3000")
+  @default_base_url "http://localhost:3000"
 
-  def base_url, do: Application.get_env(:opus, :auro_base_url, @base_url)
+  def base_url, do: Application.get_env(:opus, :auro_base_url, @default_base_url)
 
   @doc """
   Trigger evaluation of all strategies at the given granularity for the target slot.
@@ -65,6 +65,14 @@ defmodule Opus.Auro.Client do
     client() |> Req.post(url: "/api/rules", json: payload) |> handle_response()
   end
 
+  @doc "Fetch live engine subsystem freshness from Rust health endpoint."
+  @spec get_live_health() :: {:ok, map()} | {:error, any()}
+  def get_live_health do
+    client()
+    |> Req.get(url: "/api/health/live")
+    |> handle_response()
+  end
+
   @doc """
   Fetch indicator scalars (ADX, ATR%, MA deviation, Bollinger Bands) for an
   (instrument, granularity) pair from Rust's in-memory candle buffer.
@@ -74,6 +82,8 @@ defmodule Opus.Auro.Client do
   """
   @spec get_indicators(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, any()}
   def get_indicators(instrument, granularity, opts \\ [])
+
+  def get_indicators(instrument, granularity, opts)
       when is_valid(granularity) do
     params =
       opts
@@ -84,6 +94,9 @@ defmodule Opus.Auro.Client do
     |> Req.get(url: "/api/indicators/#{instrument}/#{granularity}", params: params)
     |> handle_response()
   end
+
+  def get_indicators(_instrument, granularity, _opts),
+    do: {:error, {:invalid_granularity, granularity}}
 
   @doc """
   Submit a strategy config to the pipeline backtest stage.
