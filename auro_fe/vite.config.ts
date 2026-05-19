@@ -16,6 +16,7 @@ export default defineConfig({
       "/opus": {
         target: "http://localhost:4321",
         changeOrigin: true,
+        ws: true,
         rewrite: (path: string) => path.replace(/^\/opus/, ""),
       },
       "/api": {
