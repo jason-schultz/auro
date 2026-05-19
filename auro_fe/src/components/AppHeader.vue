@@ -51,9 +51,7 @@ const route = useRoute();
 
 const navLinks = [
     { to: "/", label: "Dashboard" },
-    { to: "/markets", label: "Markets" },
     { to: "/strategies", label: "Strategies" },
-    { to: "/backtests", label: "Backtests" },
     { to: "/pipeline", label: "Pipeline" },
     { to: "/journal", label: "Journal" },
 ];

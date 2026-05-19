@@ -8,27 +8,6 @@ function readViewTemplate(fileName: string): string {
 }
 
 describe("view composition contracts", () => {
-    it("keeps Backtests wired to shared shell components", () => {
-        const backtests = readViewTemplate("Backtests.vue");
-
-        expect(backtests).toContain("<ViewHeader title=\"Backtest Results\"");
-        expect(backtests).toContain("<FilterToolbar");
-        expect(backtests).toContain("<SegmentedFilterGroup");
-        expect(backtests).toContain("<FilterSelect");
-        expect(backtests).toContain("<FilterToolbarDivider");
-        expect(backtests).toContain("<DataTableScaffold");
-        expect(backtests).toContain("<StatusBadge");
-    });
-
-    it("keeps Markets wired to shared shell components", () => {
-        const markets = readViewTemplate("Markets.vue");
-
-        expect(markets).toContain("<ViewHeader title=\"Markets\"");
-        expect(markets).toContain("<FilterToolbar");
-        expect(markets).toContain("<SegmentedFilterGroup");
-        expect(markets).toContain("<StateMessage");
-    });
-
     it("keeps Pipeline wired to domain badge atoms", () => {
         const pipeline = readViewTemplate("Pipeline.vue");
 
@@ -42,10 +21,12 @@ describe("view composition contracts", () => {
         expect(strategies).toContain("<StrategyTypeBadge");
     });
 
-    it("keeps Dashboard wired to shared stat value cards", () => {
+    it("keeps Dashboard wired to risk and signal panels", () => {
         const dashboard = readViewTemplate("Dashboard.vue");
 
-        expect(dashboard).toContain("<StatGrid");
+        expect(dashboard).toContain("<SignalFeedPanel");
+        expect(dashboard).toContain("<RegimeHeatmapPanel");
+        expect(dashboard).toContain("<OpenPositionsPanel");
     });
 
     it("keeps TradeDetail wired to shared stat grid component", () => {

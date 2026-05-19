@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import {
-    BACKTEST_COLUMN_SETS,
     PIPELINE_COLUMNS,
     STRATEGIES_COLUMNS,
     ariaSortForColumn,
@@ -58,10 +57,9 @@ describe("datatable ui helpers", () => {
     });
 
     it("returns width tokens with fallback", () => {
-        expect(tableWidthClass("backtests", "instrument")).toContain("w-[8.5rem]");
         expect(tableWidthClass("pipeline", "failure_reason")).toContain("w-[13rem]");
         expect(tableWidthClass("strategies", "enabled")).toContain("w-[4rem]");
-        expect(tableWidthClass("backtests", "unknown_key")).toContain("w-[7rem]");
+        expect(tableWidthClass("pipeline", "unknown_key")).toContain("w-[7rem]");
     });
 
     it("builds sticky first-column variants for header and body", () => {
@@ -89,7 +87,6 @@ describe("datatable ui helpers", () => {
     });
 
     it("keeps shared column contracts non-empty", () => {
-        expect(BACKTEST_COLUMN_SETS.default.length).toBeGreaterThan(0);
         expect(PIPELINE_COLUMNS.length).toBeGreaterThan(0);
         expect(STRATEGIES_COLUMNS.length).toBeGreaterThan(0);
     });

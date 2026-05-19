@@ -13,6 +13,16 @@ defmodule OpusWeb.Router do
     post("/pipeline/:config_id/promote", PipelineController, :promote)
   end
 
+  scope "/", OpusWeb do
+    pipe_through(:api)
+
+    get("/regimes/heatmap", RegimeController, :heatmap)
+    get("/account/equity-curve", AccountController, :equity_curve)
+    get("/journal/kpis", JournalController, :kpis)
+    get("/health/system", HealthController, :system)
+    get("/positions/:trade_id/sparkline", PositionsController, :sparkline)
+  end
+
   # Enable LiveDashboard and Swoosh mailbox preview in development
   if Application.compile_env(:opus, :dev_routes) do
     # If you want to use the LiveDashboard in production, you should put
