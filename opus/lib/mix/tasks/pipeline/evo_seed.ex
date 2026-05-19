@@ -162,12 +162,13 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
 
   defp clean_pipeline do
     Repo.transaction(fn ->
-      Repo.query!("TRUNCATE strategy_evaluations")
-      Repo.query!("TRUNCATE strategy_configs")
+      Repo.delete_all("strategy_evaluations")
+      Repo.delete_all("strategy_configs")
 
-      Repo.query!(
-        "DELETE FROM oban_jobs WHERE queue IN ('pipeline', 'ollama') AND state NOT IN ('completed', 'discarded')"
+      from(j in "oban_jobs",
+        where: j.queue in ["pipeline", "ollama"] and j.state not in ["completed", "discarded"]
       )
+      |> Repo.delete_all()
     end)
 
     Mix.shell().info("  Truncated strategy_configs, strategy_evaluations, pending pipeline jobs.")

@@ -77,12 +77,13 @@ defmodule Mix.Tasks.Pipeline.Reset do
 
   defp truncate_all do
     Repo.transaction(fn ->
-      Repo.query!("TRUNCATE strategy_evaluations")
-      Repo.query!("TRUNCATE strategy_configs")
+      Repo.delete_all("strategy_evaluations")
+      Repo.delete_all("strategy_configs")
 
-      Repo.query!(
-        "DELETE FROM oban_jobs WHERE queue IN ('pipeline', 'ollama') AND state != 'completed'"
+      from(j in "oban_jobs",
+        where: j.queue in ["pipeline", "ollama"] and j.state != "completed"
       )
+      |> Repo.delete_all()
     end)
   end
 

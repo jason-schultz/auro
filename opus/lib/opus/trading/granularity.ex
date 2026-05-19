@@ -3,7 +3,7 @@ defmodule Opus.Trading.Granularity do
   Utility module for working with granularity strings. Central source of truth for
   valid granularities and related helper functions.
   """
-  @all ~w[M1 M5 M15 H1 H4]
+  @all ~w[M1 M5 M15 H1 H4 D]
   @mtf ~w[M15 H1 H4]
 
   defguard is_valid(g) when g in @all
