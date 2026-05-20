@@ -11,6 +11,7 @@ pub mod evaluator;
 pub mod instrument_cache;
 pub mod prefill;
 pub mod pricing;
+pub mod risk_params;
 pub mod sizing;
 pub mod time;
 pub mod trade_management;
@@ -18,9 +19,6 @@ pub mod trade_management;
 pub(crate) use evaluator::{evaluate_and_apply, is_trading_enabled};
 pub use pricing::format_price;
 pub(crate) use time::{compute_slot_time, time_slot};
-
-pub const MOVE_TO_BREAKEVEN_PCT: f64 = 0.015;
-pub const TRAILING_DISTANCE_PCT: f64 = 0.025;
 
 pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: AppState) {
     tokio::spawn(async move {

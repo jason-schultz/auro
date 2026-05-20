@@ -1,9 +1,9 @@
-use crate::engine::indicators::adx;
-use crate::engine::live::{MOVE_TO_BREAKEVEN_PCT, TRAILING_DISTANCE_PCT};
+use crate::engine::indicators::{adx, atr_pct};
 use crate::engine::types::{Candle, Direction, EntryReason, ExitReason, StopLossState, Trade};
 
 const ADX_PERIOD: usize = 14;
 const ADX_CHOPPY: f64 = 20.0;
+const ATR_PERIOD: usize = 14;
 
 pub enum TFSignal {
     EnterLong { fast_ma: f64, slow_ma: f64 },
@@ -20,6 +20,10 @@ pub struct TrendFollowingParams {
     pub take_profit: Option<f64>, // e.g., Some(0.05) or None to ride the trend
     #[serde(default)]
     pub regime_filter: bool, // if true, skip entries when ADX < 20 (choppy market)
+    #[serde(default)]
+    pub confirm_bars: Option<usize>, // N-bar confirmation for trend-reversal exits
+    #[serde(default)]
+    pub trailing_k: Option<f64>, // ATR multiplier for trailing distance in backtest/live parity
 }
 
 pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
@@ -30,6 +34,8 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
         return trades;
     }
 
+    let confirm_bars = params.confirm_bars.unwrap_or(3).max(1);
+    let trailing_k = params.trailing_k.unwrap_or(2.5);
     let mut i = params.slow_period;
 
     // Calculate the initial MA relationship so we can detect the first cross
@@ -78,25 +84,39 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
                 }
             };
 
-            // Trade management state — mirrors evaluate_trade_management in live.rs.
-            // Initial: SL at entry +/- params.stop_loss
-            // Breakeven: SL moves to entry once pct_in_profit >= MOVE_TO_BREAKEVEN_PCT
-            // Trailing: SL trails high-water-mark by TRAILING_DISTANCE_PCT once
-            //           pct_in_profit >= MOVE_TO_BREAKEVEN_PCT + TRAILING_DISTANCE_PCT.
-            let mut sl_state = StopLossState::Initial;
+            // Trade management state — mirrors live management behavior:
+            // fixed TP strategies: Initial -> Breakeven -> Trailing
+            // nil-TP strategies: open directly in Trailing
+            let (mut sl_state, be_threshold, trailing_threshold) =
+                if let Some(tp) = params.take_profit {
+                    (
+                        StopLossState::Initial,
+                        (tp * 0.4).max(0.010),
+                        (tp * 0.75).max(0.025),
+                    )
+                } else {
+                    (StopLossState::Trailing, 0.0, 0.0)
+                };
+
             let mut current_sl_price = match direction {
                 Direction::Long => entry_price * (1.0 + params.stop_loss),
                 Direction::Short => entry_price * (1.0 - params.stop_loss),
             };
             let mut high_water_mark = entry_price;
-            let trailing_trigger = MOVE_TO_BREAKEVEN_PCT + TRAILING_DISTANCE_PCT;
+
+            if matches!(sl_state, StopLossState::Trailing) {
+                let distance = atr_trailing_distance(&candles[..=i], entry_price, trailing_k)
+                    .unwrap_or_else(|| (entry_price - current_sl_price).abs());
+                current_sl_price = match direction {
+                    Direction::Long => entry_price - distance,
+                    Direction::Short => entry_price + distance,
+                };
+            }
 
             // Now scan forward for an exit
             let mut exited = false;
 
             for j in i + 1..candles.len() {
-                let j_fast = ma(candles, j, params.fast_period);
-                let j_slow = ma(candles, j, params.slow_period);
                 let close = candles[j].close;
                 let exit_time = candles[j].time;
 
@@ -108,20 +128,23 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
                 // State transitions based on this bar's close
                 match sl_state {
                     StopLossState::Initial => {
-                        if pct_in_profit >= MOVE_TO_BREAKEVEN_PCT {
+                        if pct_in_profit >= be_threshold {
                             sl_state = StopLossState::Breakeven;
                             current_sl_price = entry_price;
                         }
                     }
                     StopLossState::Breakeven => {
-                        if pct_in_profit >= trailing_trigger {
-                            sl_state = StopLossState::Trailing;
-                            high_water_mark = close;
-                            let distance = close * TRAILING_DISTANCE_PCT;
-                            current_sl_price = match direction {
-                                Direction::Long => close - distance,
-                                Direction::Short => close + distance,
-                            };
+                        if pct_in_profit >= trailing_threshold {
+                            if let Some(distance) =
+                                atr_trailing_distance(&candles[..=j], close, trailing_k)
+                            {
+                                sl_state = StopLossState::Trailing;
+                                high_water_mark = close;
+                                current_sl_price = match direction {
+                                    Direction::Long => close - distance,
+                                    Direction::Short => close + distance,
+                                };
+                            }
                         }
                     }
                     StopLossState::Trailing => {
@@ -130,12 +153,15 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
                             Direction::Short => close < high_water_mark,
                         };
                         if is_more_favorable {
-                            high_water_mark = close;
-                            let distance = close * TRAILING_DISTANCE_PCT;
-                            current_sl_price = match direction {
-                                Direction::Long => close - distance,
-                                Direction::Short => close + distance,
-                            };
+                            if let Some(distance) =
+                                atr_trailing_distance(&candles[..=j], close, trailing_k)
+                            {
+                                high_water_mark = close;
+                                current_sl_price = match direction {
+                                    Direction::Long => close - distance,
+                                    Direction::Short => close + distance,
+                                };
+                            }
                         }
                     }
                     StopLossState::NotApplicable => {}
@@ -152,10 +178,15 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
                     None => false,
                 };
 
-                let trend_reversed = match direction {
-                    Direction::Long => j_fast < j_slow,
-                    Direction::Short => j_fast > j_slow,
-                };
+                // Sister implementation in check_exit(); keep N-bar confirmation logic in sync.
+                let trend_reversed = trend_reversal_confirmed_candles(
+                    &candles[..=j],
+                    params.fast_period,
+                    params.slow_period,
+                    matches!(direction, Direction::Long),
+                    confirm_bars,
+                )
+                .is_some();
 
                 if sl_hit || tp_hit || trend_reversed {
                     // Exit at the actual fill price for the exit type, not the bar's close.
@@ -285,25 +316,73 @@ pub fn check_entry(closes: &[f64], params: &TrendFollowingParams) -> TFSignal {
     }
 }
 
-pub fn check_exit(closes: &[f64], params: &TrendFollowingParams, is_long: bool) -> TFSignal {
-    if closes.len() < params.slow_period {
+pub fn check_exit(
+    closes: &[f64],
+    params: &TrendFollowingParams,
+    is_long: bool,
+    confirm_bars: usize,
+) -> TFSignal {
+    // Sister implementation in backtest loop in run(); keep N-bar confirmation logic in sync.
+    let Some((fast, slow)) = trend_reversal_confirmed_closes(
+        closes,
+        params.fast_period,
+        params.slow_period,
+        is_long,
+        confirm_bars,
+    ) else {
         return TFSignal::None;
+    };
+
+    TFSignal::ExitTrendReversal {
+        fast_ma: fast,
+        slow_ma: slow,
+    }
+}
+
+fn trend_reversal_confirmed_closes(
+    closes: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    is_long: bool,
+    confirm_bars: usize,
+) -> Option<(f64, f64)> {
+    let confirm_bars = confirm_bars.max(1);
+
+    if closes.len() < slow_period + confirm_bars - 1 {
+        return None;
+    }
+
+    for offset in 0..confirm_bars {
+        let end = closes.len() - offset;
+        let fast = closes[end - fast_period..end].iter().sum::<f64>() / fast_period as f64;
+        let slow = closes[end - slow_period..end].iter().sum::<f64>() / slow_period as f64;
+
+        let reversed = if is_long { fast < slow } else { fast > slow };
+        if !reversed {
+            return None;
+        }
     }
 
     let len = closes.len();
-    let fast = closes[len - params.fast_period..].iter().sum::<f64>() / params.fast_period as f64;
-    let slow = closes[len - params.slow_period..].iter().sum::<f64>() / params.slow_period as f64;
+    let fast = closes[len - fast_period..].iter().sum::<f64>() / fast_period as f64;
+    let slow = closes[len - slow_period..].iter().sum::<f64>() / slow_period as f64;
+    Some((fast, slow))
+}
 
-    let reversed = if is_long { fast < slow } else { fast > slow };
+fn trend_reversal_confirmed_candles(
+    candles: &[Candle],
+    fast_period: usize,
+    slow_period: usize,
+    is_long: bool,
+    confirm_bars: usize,
+) -> Option<(f64, f64)> {
+    let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+    trend_reversal_confirmed_closes(&closes, fast_period, slow_period, is_long, confirm_bars)
+}
 
-    if reversed {
-        TFSignal::ExitTrendReversal {
-            fast_ma: fast,
-            slow_ma: slow,
-        }
-    } else {
-        TFSignal::None
-    }
+fn atr_trailing_distance(candles: &[Candle], current_price: f64, trailing_k: f64) -> Option<f64> {
+    let atr_pct_value = atr_pct(candles, ATR_PERIOD)?;
+    Some((atr_pct_value / 100.0) * current_price.abs() * trailing_k)
 }
 
 fn ma(candles: &[Candle], end: usize, period: usize) -> f64 {
@@ -316,8 +395,52 @@ fn ma(candles: &[Candle], end: usize, period: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::iter::repeat_n;
+
     use super::*;
     use chrono::{Duration, Utc};
+
+    fn reversal_flag(
+        closes: &[f64],
+        fast_period: usize,
+        slow_period: usize,
+        is_long: bool,
+        offset: usize,
+    ) -> bool {
+        let end = closes.len() - offset;
+        let fast = closes[end - fast_period..end].iter().sum::<f64>() / fast_period as f64;
+        let slow = closes[end - slow_period..end].iter().sum::<f64>() / slow_period as f64;
+        if is_long {
+            fast < slow
+        } else {
+            fast > slow
+        }
+    }
+
+    fn find_pattern_closes(is_long: bool, pattern: [bool; 3]) -> Vec<f64> {
+        let values = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let total = values.len().pow(6);
+
+        for mut code in 0..total {
+            let mut closes = vec![0.0; 6];
+            for slot in &mut closes {
+                *slot = values[code % values.len()];
+                code /= values.len();
+            }
+
+            let flags = [
+                reversal_flag(&closes, 2, 3, is_long, 0),
+                reversal_flag(&closes, 2, 3, is_long, 1),
+                reversal_flag(&closes, 2, 3, is_long, 2),
+            ];
+
+            if flags == pattern {
+                return closes;
+            }
+        }
+
+        panic!("no close sequence found for requested pattern");
+    }
 
     fn make_candle(price: f64, hours_offset: i64) -> Candle {
         let base = Utc::now();
@@ -361,6 +484,8 @@ mod tests {
             stop_loss: -0.05,
             take_profit: Some(0.03),
             regime_filter: false,
+            confirm_bars: None,
+            trailing_k: None,
         };
 
         let trades = run(&candles, &params);
@@ -406,8 +531,10 @@ mod tests {
             fast_period: 5,
             slow_period: 20,
             stop_loss: -0.15,
-            take_profit: None,
+            take_profit: Some(0.50),
             regime_filter: false,
+            confirm_bars: None,
+            trailing_k: None,
         };
 
         let trades = run(&candles, &params);
@@ -459,8 +586,10 @@ mod tests {
             fast_period: 5,
             slow_period: 20,
             stop_loss: -0.02,
-            take_profit: None,
+            take_profit: Some(0.50),
             regime_filter: false,
+            confirm_bars: None,
+            trailing_k: None,
         };
 
         let trades = run(&candles, &params);
@@ -517,8 +646,10 @@ mod tests {
             fast_period: 5,
             slow_period: 20,
             stop_loss: -0.02,
-            take_profit: None,
+            take_profit: Some(0.50),
             regime_filter: false,
+            confirm_bars: None,
+            trailing_k: None,
         };
 
         let trades = run(&candles, &params);
@@ -566,8 +697,10 @@ mod tests {
             fast_period: 5,
             slow_period: 20,
             stop_loss: -0.05, // wide initial SL — won't get hit before BE/trailing
-            take_profit: None,
+            take_profit: Some(0.04),
             regime_filter: false,
+            confirm_bars: None,
+            trailing_k: None,
         };
 
         let trades = run(&candles, &params);
@@ -622,6 +755,8 @@ mod tests {
             stop_loss: -0.05, // wide initial SL — never reached
             take_profit: None,
             regime_filter: false,
+            confirm_bars: None,
+            trailing_k: None,
         };
 
         let trades = run(&candles, &params);
@@ -644,6 +779,155 @@ mod tests {
             long_trade.pnl_percent > 0.0,
             "Trailing stop should lock in profit, got {}",
             long_trade.pnl_percent
+        );
+    }
+
+    #[test]
+    fn check_exit_requires_all_confirm_bars_for_long() {
+        let params = TrendFollowingParams {
+            fast_period: 2,
+            slow_period: 3,
+            stop_loss: -0.02,
+            take_profit: None,
+            regime_filter: false,
+            confirm_bars: Some(3),
+            trailing_k: None,
+        };
+
+        let one_of_three = find_pattern_closes(true, [true, false, false]);
+        assert!(matches!(
+            check_exit(&one_of_three, &params, true, 3),
+            TFSignal::None
+        ));
+        assert!(matches!(
+            check_exit(&one_of_three, &params, true, 1),
+            TFSignal::ExitTrendReversal { .. }
+        ));
+
+        let two_of_three = find_pattern_closes(true, [true, true, false]);
+        assert!(matches!(
+            check_exit(&two_of_three, &params, true, 3),
+            TFSignal::None
+        ));
+        assert!(matches!(
+            check_exit(&two_of_three, &params, true, 2),
+            TFSignal::ExitTrendReversal { .. }
+        ));
+
+        let three_of_three = find_pattern_closes(true, [true, true, true]);
+        assert!(matches!(
+            check_exit(&three_of_three, &params, true, 3),
+            TFSignal::ExitTrendReversal { .. }
+        ));
+    }
+
+    #[test]
+    fn check_exit_requires_all_confirm_bars_for_short() {
+        let params = TrendFollowingParams {
+            fast_period: 2,
+            slow_period: 3,
+            stop_loss: -0.02,
+            take_profit: None,
+            regime_filter: false,
+            confirm_bars: Some(3),
+            trailing_k: None,
+        };
+
+        let one_of_three = find_pattern_closes(false, [true, false, false]);
+        assert!(matches!(
+            check_exit(&one_of_three, &params, false, 3),
+            TFSignal::None
+        ));
+        assert!(matches!(
+            check_exit(&one_of_three, &params, false, 1),
+            TFSignal::ExitTrendReversal { .. }
+        ));
+
+        let two_of_three = find_pattern_closes(false, [true, true, false]);
+        assert!(matches!(
+            check_exit(&two_of_three, &params, false, 3),
+            TFSignal::None
+        ));
+        assert!(matches!(
+            check_exit(&two_of_three, &params, false, 2),
+            TFSignal::ExitTrendReversal { .. }
+        ));
+
+        let three_of_three = find_pattern_closes(false, [true, true, true]);
+        assert!(matches!(
+            check_exit(&three_of_three, &params, false, 3),
+            TFSignal::ExitTrendReversal { .. }
+        ));
+    }
+
+    #[test]
+    fn backtest_confirm_bars_changes_exit_behavior() {
+        let mut base_prices = Vec::new();
+        base_prices.extend(repeat_n(1.0000, 30));
+        for i in 30..80 {
+            base_prices.push(1.0000 + ((i - 30) as f64 * 0.00025));
+        }
+
+        let params_confirm_1 = TrendFollowingParams {
+            fast_period: 5,
+            slow_period: 20,
+            stop_loss: -1.0,
+            take_profit: None,
+            regime_filter: false,
+            confirm_bars: Some(1),
+            trailing_k: None,
+        };
+
+        let params_confirm_3 = TrendFollowingParams {
+            fast_period: 5,
+            slow_period: 20,
+            stop_loss: -0.10,
+            take_profit: None,
+            regime_filter: false,
+            confirm_bars: Some(3),
+            trailing_k: None,
+        };
+
+        let tail_values = [0.9900, 0.9950, 1.0000, 1.0050, 1.0100, 1.0150];
+        let mut found = None;
+
+        'search: for a in tail_values {
+            for b in tail_values {
+                for c in tail_values {
+                    for d in tail_values {
+                        let mut prices = base_prices.clone();
+                        prices.extend([a, b, c, d]);
+
+                        let candles: Vec<Candle> = prices
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, price)| make_candle(*price, idx as i64))
+                            .collect();
+
+                        let trades_confirm_1 = run(&candles, &params_confirm_1);
+                        let trades_confirm_3 = run(&candles, &params_confirm_3);
+
+                        let exits_1 = trades_confirm_1
+                            .iter()
+                            .map(|t| t.exit_reason)
+                            .collect::<Vec<_>>();
+                        let exits_3 = trades_confirm_3
+                            .iter()
+                            .map(|t| t.exit_reason)
+                            .collect::<Vec<_>>();
+
+                        if exits_1 != exits_3 {
+                            found = Some((exits_1, exits_3));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            found.is_some(),
+            "expected at least one noisy tail where confirm_bars changes backtest exits"
         );
     }
 }

@@ -14,6 +14,7 @@ use crate::state::AppState;
 
 use super::account_cache;
 use super::format_price;
+use super::risk_params;
 use super::sizing::{check_concurrent_exposure, compute_units, SizingDecision, SizingInput};
 use super::CandleBuffer;
 
@@ -321,6 +322,8 @@ async fn evaluate_entry(
                 stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.02),
                 take_profit: params["take_profit"].as_f64(),
                 regime_filter: false, // live path: regime gating handled by Elixir rules engine
+                confirm_bars: params["confirm_bars"].as_u64().map(|v| v as usize),
+                trailing_k: params["trailing_k"].as_f64(),
             };
 
             let closes = buffer.closes();
@@ -594,20 +597,36 @@ async fn execute_entry(
     let tp_str = tp_price.map(|p| format_price(&strategy.instrument, p));
 
     // nil-TP trend-following: open with a trailing stop instead of a fixed SL.
-    // The trailing distance mirrors the stop_loss magnitude so initial risk is identical.
+    // Trailing distance is ATR-adaptive: K * ATR.
     let trailing_dist_str;
     let sl_str;
-    let (use_sl, use_trailing) =
-        if tp_price.is_none() && strategy.strategy_type == "trend_following" {
-            let distance = (current_price - sl_price).abs();
-            trailing_dist_str = format_price(&strategy.instrument, distance);
-            sl_str = String::new();
-            (false, true)
-        } else {
-            sl_str = format_price(&strategy.instrument, sl_price);
-            trailing_dist_str = String::new();
-            (true, false)
-        };
+    let (use_sl, use_trailing) = if tp_price.is_none()
+        && strategy.strategy_type == "trend_following"
+    {
+        let distance =
+                risk_params::trailing_distance_price(
+                    state,
+                    &strategy.instrument,
+                    &strategy.strategy_type,
+                    current_price,
+                )
+                .await
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "[RISK PARAMS] Falling back to SL-derived trailing distance on nil-TP entry for {} {}",
+                        strategy.instrument,
+                        strategy.id
+                    );
+                    (current_price - sl_price).abs()
+                });
+        trailing_dist_str = format_price(&strategy.instrument, distance);
+        sl_str = String::new();
+        (false, true)
+    } else {
+        sl_str = format_price(&strategy.instrument, sl_price);
+        trailing_dist_str = String::new();
+        (true, false)
+    };
 
     let initial_sl_state = if use_trailing {
         StopLossState::Trailing
@@ -770,13 +789,21 @@ async fn evaluate_exit(
                 stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.02),
                 take_profit: params["take_profit"].as_f64(),
                 regime_filter: false, // live path: regime gating handled by Elixir rules engine
+                confirm_bars: params["confirm_bars"].as_u64().map(|v| v as usize),
+                trailing_k: params["trailing_k"].as_f64(),
             };
 
             let is_long = positions_for_strategy[0].direction == Direction::Long;
             let closes = buffer.closes();
+            let risk = risk_params::get_risk_params(
+                &state.db,
+                &strategy.instrument,
+                &strategy.strategy_type,
+            )
+            .await;
 
             if let TFSignal::ExitTrendReversal { fast_ma, slow_ma } =
-                trend_following::check_exit(&closes, &tf_params, is_long)
+                trend_following::check_exit(&closes, &tf_params, is_long, risk.exit_confirm_bars)
             {
                 should_exit = true;
                 exit_reason = format!(
