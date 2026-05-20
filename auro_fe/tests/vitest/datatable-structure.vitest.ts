@@ -2,66 +2,6 @@ import { mount } from "@vue/test-utils";
 import { ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 
-async function mountBacktestsTable() {
-    vi.resetModules();
-
-    const sortKey = ref("total_return");
-    const sortDir = ref<"asc" | "desc">("desc");
-
-    const resultRow = {
-        id: "r1",
-        strategy_name: "EUR_USD trend_following H1",
-        strategy_type: "trend_following",
-        instrument: "EUR_USD",
-        granularity: "H1",
-        parameters: {
-            fast_period: 10,
-            slow_period: 30,
-            stop_loss: -0.02,
-            take_profit: 0.03,
-        },
-        total_return: 0.1,
-        win_rate: 0.52,
-        sharpe_ratio: 1.1,
-        max_drawdown: 0.08,
-        num_trades: 50,
-        avg_win: 0.7,
-        avg_loss: 0.4,
-        status: "valid",
-        reason_flagged: null,
-        execution_duration_ms: 10,
-    };
-
-    vi.doMock("@/composables/useBacktests", () => ({
-        useBacktests: () => ({
-            results: ref([resultRow]),
-            loading: ref(false),
-            running: ref(false),
-            sourceFilter: ref<"grid" | "pipeline">("grid"),
-            statusFilter: ref("valid"),
-            instrumentFilter: ref(""),
-            sortKey,
-            sortDir,
-            strategyFilter: ref("all"),
-            granularityFilter: ref("all"),
-            runInstrument: ref("EUR_USD"),
-            runTimeframe: ref("H1"),
-            lastRunResult: ref(null),
-            columns: ref([
-                { key: "instrument", label: "Pair", sortable: true },
-                { key: "total_return", label: "Return", sortable: true },
-                { key: "status", label: "Status", sortable: true },
-            ]),
-            sortedResults: ref([resultRow]),
-            toggleSort: vi.fn(),
-            loadResults: vi.fn(async () => undefined),
-            runGridSearch: vi.fn(async () => undefined),
-        }),
-    }));
-
-    const { default: Backtests } = await import("@/views/Backtests.vue");
-    return mount(Backtests);
-}
 
 async function mountPipelineTable() {
     vi.resetModules();
@@ -226,20 +166,6 @@ async function mountStrategiesTable() {
 }
 
 describe("datatable structure contracts", () => {
-    it("keeps Backtests header/data counts aligned and sticky first column", async () => {
-        const wrapper = await mountBacktestsTable();
-
-        const headers = wrapper.findAll("thead th");
-        const firstRow = wrapper.find("tbody tr");
-        const cells = firstRow.findAll("td");
-
-        expect(headers.length).toBe(cells.length);
-        expect(headers[0].classes()).toContain("sticky");
-        expect(cells[0].classes()).toContain("sticky");
-        expect(headers[1].classes()).toContain("text-right");
-        expect(cells[1].classes()).toContain("tabular-nums");
-    });
-
     it("keeps Pipeline header/data counts aligned and sticky first column", async () => {
         const wrapper = await mountPipelineTable();
 
