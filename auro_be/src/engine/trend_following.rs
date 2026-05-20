@@ -395,6 +395,8 @@ fn ma(candles: &[Candle], end: usize, period: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::iter::repeat_n;
+
     use super::*;
     use chrono::{Duration, Utc};
 
@@ -861,7 +863,7 @@ mod tests {
     #[test]
     fn backtest_confirm_bars_changes_exit_behavior() {
         let mut base_prices = Vec::new();
-        base_prices.extend(std::iter::repeat(1.0000).take(30));
+        base_prices.extend(repeat_n(1.0000, 30));
         for i in 30..80 {
             base_prices.push(1.0000 + ((i - 30) as f64 * 0.00025));
         }
