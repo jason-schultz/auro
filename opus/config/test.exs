@@ -33,3 +33,4 @@ config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime
 
 config :opus, Oban, testing: :manual
+config :opus, start_scheduled_workers: false

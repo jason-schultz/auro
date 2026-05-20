@@ -61,7 +61,7 @@ defmodule Opus.Trading.RulesEngine do
 
   alias Opus.Auro.Client, as: Auro
   alias Opus.Repo
-  alias Opus.Trading.{Rule, RegimeDetector}
+  alias Opus.Trading.{LiveStrategy, RegimeDetector, Rule, Suspension}
 
   import Ecto.Query
 
@@ -75,8 +75,24 @@ defmodule Opus.Trading.RulesEngine do
   end
 
   @doc "Force an immediate recompute (for testing or manual trigger from FE)."
-  def recompute_now do
+  def recompute do
     GenServer.cast(__MODULE__, :recompute)
+  end
+
+  def recompute_now, do: recompute()
+
+  @doc "Computes decisions once, persists rules, and pushes to Rust."
+  @spec compute_and_push() :: {:ok, list(map())} | {:error, term()}
+  def compute_and_push do
+    strategies = list_enabled_strategies()
+    regimes = RegimeDetector.get_all_regimes()
+    open_suspensions = open_suspensions_by_strategy(strategies)
+    decisions = Enum.map(strategies, &decide(&1, regimes, open_suspensions))
+
+    case persist_and_push(decisions) do
+      :ok -> {:ok, decisions}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @spec last_run() :: DateTime.t() | nil
@@ -122,12 +138,8 @@ defmodule Opus.Trading.RulesEngine do
     #
     # If any step fails, log and return state unchanged so the next tick retries.
 
-    strategies = list_enabled_strategies()
-    regimes = RegimeDetector.get_all_regimes()
-    decisions = Enum.map(strategies, &decide(&1, regimes))
-
-    case persist_and_push(decisions) do
-      :ok ->
+    case compute_and_push() do
+      {:ok, decisions} ->
         Logger.info(
           "[RulesEngine] cycle #{state.poll_count + 1}: #{summarize(decisions)} across #{length(decisions)} strategies"
         )
@@ -143,7 +155,7 @@ defmodule Opus.Trading.RulesEngine do
   # Read all enabled rows from `live_strategies`. Returns a list of maps with
   # the fields we need: `id`, `strategy_type`, `instrument`, `granularity`.
   defp list_enabled_strategies do
-    from(s in "live_strategies",
+    from(s in LiveStrategy,
       where: s.enabled == true,
       select: %{
         id: s.id,
@@ -157,7 +169,22 @@ defmodule Opus.Trading.RulesEngine do
 
   # Derive a single decision from a strategy and the current regime map.
   # Returns a map: `%{live_strategy_id, enabled, reason, computed_at}`.
-  defp decide(strategy, regimes) do
+  defp decide(strategy, regimes, open_suspensions) do
+    case Map.get(open_suspensions, strategy.id) do
+      %{trigger_detail: trigger_detail} ->
+        %{
+          live_strategy_id: strategy.id,
+          enabled: false,
+          reason: "circuit_breaker: #{trigger_detail}",
+          computed_at: DateTime.utc_now()
+        }
+
+      nil ->
+        decide_from_regime(strategy, regimes)
+    end
+  end
+
+  defp decide_from_regime(strategy, regimes) do
     d = Map.get(regimes, {strategy.instrument, "D"}, %{regime: :unknown})
     h4 = Map.get(regimes, {strategy.instrument, "H4"}, %{regime: :unknown})
     h1 = Map.get(regimes, {strategy.instrument, "H1"}, %{regime: :unknown})
@@ -172,6 +199,22 @@ defmodule Opus.Trading.RulesEngine do
       reason: reason,
       computed_at: DateTime.utc_now()
     }
+  end
+
+  defp open_suspensions_by_strategy([]), do: %{}
+
+  defp open_suspensions_by_strategy(strategies) do
+    strategy_ids = Enum.map(strategies, & &1.id)
+
+    from(s in Suspension,
+      where: s.live_strategy_id in ^strategy_ids and is_nil(s.cleared_at),
+      order_by: [desc: s.triggered_at],
+      select: %{live_strategy_id: s.live_strategy_id, trigger_detail: s.trigger_detail}
+    )
+    |> Repo.all()
+    |> Enum.reduce(%{}, fn suspension, acc ->
+      Map.put_new(acc, suspension.live_strategy_id, suspension)
+    end)
   end
 
   # H4 anchors the trend; H1 must agree to lock in trending or choppy. M15 can
