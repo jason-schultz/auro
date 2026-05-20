@@ -4,7 +4,7 @@ use crate::engine::types::{Direction, OpenPosition, StopLossState};
 use crate::state::AppState;
 
 use super::format_price;
-use super::TRAILING_DISTANCE_PCT;
+use super::risk_params;
 
 async fn fetch_take_profit(db: &PgPool, strategy_id: &uuid::Uuid) -> Option<f64> {
     let params: Option<serde_json::Value> =
@@ -16,6 +16,15 @@ async fn fetch_take_profit(db: &PgPool, strategy_id: &uuid::Uuid) -> Option<f64>
             .flatten();
 
     params.and_then(|p| p.get("take_profit").and_then(|v| v.as_f64()))
+}
+
+async fn fetch_strategy_type(db: &PgPool, strategy_id: &uuid::Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT strategy_type FROM live_strategies WHERE id = $1")
+        .bind(strategy_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
 }
 
 fn calc_be_threshold(take_profit: f64) -> f64 {
@@ -95,7 +104,35 @@ pub(crate) async fn evaluate_trade_management(
             let trailing_threshold = calc_trailing_threshold(take_profit);
 
             if pct_in_profit >= trailing_threshold {
-                let distance_price = current_price * TRAILING_DISTANCE_PCT;
+                let strategy_type =
+                    match fetch_strategy_type(&state.db, &position.strategy_id).await {
+                        Some(strategy_type) => strategy_type,
+                        None => {
+                            tracing::warn!(
+                                "[MGMT] Could not fetch strategy_type for strategy {}",
+                                position.strategy_id
+                            );
+                            return Ok(());
+                        }
+                    };
+
+                let Some(distance_price) = risk_params::trailing_distance_price(
+                    state,
+                    &position.instrument,
+                    &strategy_type,
+                    current_price,
+                )
+                .await
+                else {
+                    tracing::warn!(
+                        "[MGMT] {} {} ({}) ATR trailing distance unavailable; keeping Breakeven",
+                        position.direction,
+                        position.instrument,
+                        position.trade_id,
+                    );
+                    return Ok(());
+                };
+
                 let distance_str = format_price(&position.instrument, distance_price);
 
                 tracing::info!(

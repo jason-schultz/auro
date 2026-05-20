@@ -238,6 +238,8 @@ pub fn run_trend_grid(candles: &[Candle], config: &TrendGridConfig) -> Vec<GridS
                         stop_loss,
                         take_profit: *take_profit,
                         regime_filter: true,
+                        confirm_bars: None,
+                        trailing_k: None,
                     };
 
                     let start = Instant::now();
