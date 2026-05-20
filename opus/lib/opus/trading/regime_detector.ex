@@ -61,6 +61,12 @@ defmodule Opus.Trading.RegimeDetector do
   @spec last_run() :: DateTime.t() | nil
   def last_run, do: GenServer.call(__MODULE__, :last_run)
 
+  @doc "Runs one full regime detection sweep and returns the regime map."
+  @spec detect_once() :: map()
+  def detect_once do
+    poll()
+  end
+
   # -- GenServer Callbacks --
 
   @impl true
@@ -87,7 +93,7 @@ defmodule Opus.Trading.RegimeDetector do
 
   @impl true
   def handle_info(:poll, state) do
-    regimes = poll()
+    regimes = detect_once()
 
     Logger.info(
       "[RegimeDetector] Poll #{state.poll_count + 1}: " <>

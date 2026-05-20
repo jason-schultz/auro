@@ -7,19 +7,19 @@ defmodule Opus.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
+    children = base_children() ++ scheduled_workers()
+
+    opts = [strategy: :one_for_one, name: Opus.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+
+  defp base_children do
+    [
       OpusWeb.Telemetry,
       Opus.Repo,
       {DNSCluster, query: Application.get_env(:opus, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Opus.PubSub},
       {Oban, Application.fetch_env!(:opus, Oban)},
-
-      # Trading services
-      # Opus.Trading.EvaluationWorker,
-      Opus.Trading.Reconciler,
-      Opus.Trading.RegimeDetector,
-      Opus.Trading.RulesEngine,
-      Opus.Trading.SignalEventListener,
 
       # Start the Finch HTTP client for sending emails (or other HTTP)
       {Finch, name: Opus.Finch},
@@ -27,11 +27,21 @@ defmodule Opus.Application do
       # Start the Phoenix endpoint (must be last)
       OpusWeb.Endpoint
     ]
+  end
 
-    # See https://hexdocs.pm/elixir/Supervisor.html
-    # for other strategies and supported options
-    opts = [strategy: :one_for_one, name: Opus.Supervisor]
-    Supervisor.start_link(children, opts)
+  defp scheduled_workers do
+    if Application.get_env(:opus, :start_scheduled_workers, true) do
+      [
+        # Trading services
+        Opus.Trading.Reconciler,
+        Opus.Trading.RegimeDetector,
+        Opus.Trading.RulesEngine,
+        Opus.Trading.CircuitBreaker,
+        Opus.Trading.SignalEventListener
+      ]
+    else
+      []
+    end
   end
 
   # Tell Phoenix to update the endpoint configuration

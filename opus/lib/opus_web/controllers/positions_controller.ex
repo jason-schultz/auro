@@ -59,10 +59,15 @@ defmodule OpusWeb.PositionsController do
          )
          |> Repo.one() do
       %{instrument: instrument, entry_time: entry_time} ->
-        {:ok, %{instrument: instrument, entry_time: entry_time}}
+        {:ok, %{instrument: instrument, entry_time: normalize_entry_time(entry_time)}}
 
       nil ->
         {:error, :not_found}
     end
   end
+
+  defp normalize_entry_time(%DateTime{} = entry_time), do: entry_time
+
+  defp normalize_entry_time(%NaiveDateTime{} = entry_time),
+    do: DateTime.from_naive!(entry_time, "Etc/UTC")
 end

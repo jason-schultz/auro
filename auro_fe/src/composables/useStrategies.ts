@@ -1,5 +1,5 @@
 import { computed, ref } from "vue";
-import { api, getApiErrorMessage } from "../services/api";
+import { api, getApiErrorMessage, opusApi } from "../services/api";
 import { expectancy as calculateExpectancy } from "../lib/metrics";
 import { getInstrumentCategory, MARKET_TABS } from "../lib/market";
 import {
@@ -8,6 +8,10 @@ import {
     formatTablePercent,
 } from "../lib/ui";
 import type { LiveStrategy, LiveStrategiesResponse } from "../types/live";
+
+interface OpenSuspensionsResponse {
+    suspensions: Record<string, NonNullable<LiveStrategy["current_suspension"]>>;
+}
 
 export function useStrategies() {
     const strategies = ref<LiveStrategy[]>([]);
@@ -18,6 +22,7 @@ export function useStrategies() {
     const sortKey = ref("instrument");
     const sortDir = ref<"asc" | "desc">("asc");
     const toggling = ref<string | null>(null);
+    const resetting = ref<string | null>(null);
     const deleting = ref<string | null>(null);
     const deleteConfirm = ref<string | null>(null);
     const errorMessage = ref("");
@@ -215,6 +220,11 @@ export function useStrategies() {
     }
 
     async function toggleStrategy(strategy: LiveStrategy) {
+        if (strategy.current_suspension) {
+            showError("Strategy is suspended by circuit breaker. Reset suspension first.");
+            return;
+        }
+
         toggling.value = strategy.id;
         try {
             const data = await api.post<{ id: string; enabled: boolean }>(`/live/strategies/${strategy.id}/toggle`, {});
@@ -224,6 +234,22 @@ export function useStrategies() {
             console.error("Toggle failed:", e);
         } finally {
             toggling.value = null;
+        }
+    }
+
+    async function resetCircuitBreaker(strategy: LiveStrategy) {
+        resetting.value = strategy.id;
+        try {
+            await opusApi.post<{ strategy_id: string; cleared_count: number }>(
+                `/strategies/${strategy.id}/reset-circuit-breaker`,
+                {},
+            );
+            await loadStrategies();
+        } catch (e) {
+            showError(getApiErrorMessage(e, "Failed to reset circuit breaker"));
+            console.error("Reset circuit breaker failed:", e);
+        } finally {
+            resetting.value = null;
         }
     }
 
@@ -244,8 +270,15 @@ export function useStrategies() {
     async function loadStrategies() {
         loading.value = true;
         try {
-            const data = await api.get<LiveStrategiesResponse>("/live/strategies");
-            strategies.value = data.strategies;
+            const [data, suspensionData] = await Promise.all([
+                api.get<LiveStrategiesResponse>("/live/strategies"),
+                opusApi.get<OpenSuspensionsResponse>("/strategy-suspensions/open"),
+            ]);
+
+            strategies.value = data.strategies.map((strategy) => ({
+                ...strategy,
+                current_suspension: suspensionData.suspensions[strategy.id] ?? null,
+            }));
         } catch (e) {
             showError(getApiErrorMessage(e, "Failed to load strategies"));
             console.error("Failed to load strategies:", e);
@@ -263,6 +296,7 @@ export function useStrategies() {
         sortKey,
         sortDir,
         toggling,
+        resetting,
         deleting,
         deleteConfirm,
         errorMessage,
@@ -282,6 +316,7 @@ export function useStrategies() {
         edgeStatus,
         showError,
         toggleStrategy,
+        resetCircuitBreaker,
         deleteStrategy,
         loadStrategies,
     };

@@ -1,47 +1,81 @@
 defmodule OpusWeb.JournalControllerTest do
   use OpusWeb.ConnCase, async: false
 
+  import Ecto.Query
+
   alias Opus.Repo
+  alias Opus.Trading.LiveStrategy
+  alias Opus.Trading.LiveTrade
 
   setup do
-    Repo.query!("""
-    CREATE TABLE IF NOT EXISTS live_strategies (
-      id UUID PRIMARY KEY,
-      strategy_type VARCHAR(50) NOT NULL
-    )
-    """)
+    from(t in LiveTrade) |> Repo.delete_all()
+    from(s in LiveStrategy) |> Repo.delete_all()
 
-    Repo.query!("""
-    CREATE TABLE IF NOT EXISTS live_trades (
-      id UUID PRIMARY KEY,
-      live_strategy_id UUID,
-      instrument VARCHAR(20) NOT NULL,
-      pnl DOUBLE PRECISION,
-      mfe_pct DOUBLE PRECISION,
-      mae_pct DOUBLE PRECISION,
-      regime_at_entry VARCHAR(120),
-      status VARCHAR(20) NOT NULL,
-      exit_time TIMESTAMPTZ
-    )
-    """)
+    now = DateTime.utc_now()
 
-    Repo.query!("DELETE FROM live_trades")
-    Repo.query!("DELETE FROM live_strategies")
+    Repo.insert_all(LiveStrategy, [
+      %{
+        id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        strategy_type: "trend_following",
+        instrument: "XAU_USD",
+        granularity: "H1",
+        parameters: %{},
+        enabled: true,
+        max_position_size: "1000",
+        created_at: now,
+        updated_at: now
+      },
+      %{
+        id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        strategy_type: "mean_reversion",
+        instrument: "XAU_USD",
+        granularity: "H1",
+        parameters: %{},
+        enabled: true,
+        max_position_size: "1000",
+        created_at: now,
+        updated_at: now
+      }
+    ])
 
-    Repo.query!("""
-    INSERT INTO live_strategies (id, strategy_type)
-    VALUES
-      ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'trend_following'),
-      ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'mean_reversion')
-    """)
-
-    Repo.query!("""
-    INSERT INTO live_trades (id, live_strategy_id, instrument, pnl, mfe_pct, mae_pct, regime_at_entry, status, exit_time)
-    VALUES
-      ('00000000-0000-0000-0000-000000000001', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'XAU_USD', 100, 2.0, 0.5, 'trending H4:35.0', 'closed', NOW() - interval '2 hours'),
-      ('00000000-0000-0000-0000-000000000002', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'XAU_USD', -50, 1.2, 0.8, 'choppy H1:14.0', 'closed', NOW() - interval '90 minutes'),
-      ('00000000-0000-0000-0000-000000000003', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'WTICO_USD', 0, 0.4, 0.3, NULL, 'closed', NOW() - interval '1 hour')
-    """)
+    Repo.insert_all(LiveTrade, [
+      %{
+        live_strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        instrument: "XAU_USD",
+        pnl: 100.0,
+        mfe_pct: 2.0,
+        mae_pct: 0.5,
+        regime_at_entry: "trending H4:35.0",
+        status: "closed",
+        exit_time: DateTime.add(now, -2 * 3_600, :second),
+        created_at: now,
+        updated_at: now
+      },
+      %{
+        live_strategy_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        instrument: "XAU_USD",
+        pnl: -50.0,
+        mfe_pct: 1.2,
+        mae_pct: 0.8,
+        regime_at_entry: "choppy H1:14.0",
+        status: "closed",
+        exit_time: DateTime.add(now, -90 * 60, :second),
+        created_at: now,
+        updated_at: now
+      },
+      %{
+        live_strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        instrument: "WTICO_USD",
+        pnl: 0.0,
+        mfe_pct: 0.4,
+        mae_pct: 0.3,
+        regime_at_entry: nil,
+        status: "closed",
+        exit_time: DateTime.add(now, -3_600, :second),
+        created_at: now,
+        updated_at: now
+      }
+    ])
 
     :ok
   end

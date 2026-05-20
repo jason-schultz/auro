@@ -1,32 +1,44 @@
 defmodule OpusWeb.RegimeControllerTest do
   use OpusWeb.ConnCase, async: false
 
+  import Ecto.Query
+
   alias Opus.Repo
+  alias Opus.Trading.LiveStrategy
   alias Opus.Trading.RegimeDetector
 
   setup do
-    Repo.query!("""
-    CREATE TABLE IF NOT EXISTS live_strategies (
-      id UUID PRIMARY KEY,
-      strategy_type VARCHAR(50) NOT NULL,
-      instrument VARCHAR(20) NOT NULL,
-      granularity VARCHAR(5) NOT NULL,
-      parameters JSONB NOT NULL,
-      enabled BOOLEAN NOT NULL DEFAULT false,
-      max_position_size VARCHAR(20) NOT NULL DEFAULT '1000'
-    )
-    """)
+    start_supervised!(RegimeDetector)
 
-    Repo.query!("DELETE FROM live_strategies WHERE instrument IN ('EUR_USD', 'XAU_USD')")
+    from(s in LiveStrategy, where: s.instrument in ["EUR_USD", "XAU_USD"])
+    |> Repo.delete_all()
 
-    Repo.query!("""
-    INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size)
-    VALUES
-      ('11111111-2222-3333-4444-555555555551', 'trend_following', 'EUR_USD', 'H1', '{}'::jsonb, true, '1000'),
-      ('11111111-2222-3333-4444-555555555552', 'trend_following', 'XAU_USD', 'H1', '{}'::jsonb, false, '1000')
-    """)
+    now = DateTime.utc_now()
 
-    previous_state = :sys.get_state(RegimeDetector)
+    Repo.insert_all(LiveStrategy, [
+      %{
+        id: "11111111-2222-3333-4444-555555555551",
+        strategy_type: "trend_following",
+        instrument: "EUR_USD",
+        granularity: "H1",
+        parameters: %{},
+        enabled: true,
+        max_position_size: "1000",
+        created_at: now,
+        updated_at: now
+      },
+      %{
+        id: "11111111-2222-3333-4444-555555555552",
+        strategy_type: "trend_following",
+        instrument: "XAU_USD",
+        granularity: "H1",
+        parameters: %{},
+        enabled: false,
+        max_position_size: "1000",
+        created_at: now,
+        updated_at: now
+      }
+    ])
 
     :sys.replace_state(RegimeDetector, fn state ->
       %{
@@ -44,8 +56,8 @@ defmodule OpusWeb.RegimeControllerTest do
     end)
 
     on_exit(fn ->
-      :sys.replace_state(RegimeDetector, fn _ -> previous_state end)
-      Repo.query!("DELETE FROM live_strategies WHERE instrument IN ('EUR_USD', 'XAU_USD')")
+      from(s in LiveStrategy, where: s.instrument in ["EUR_USD", "XAU_USD"])
+      |> Repo.delete_all()
     end)
 
     :ok

@@ -25,6 +25,12 @@ defmodule Opus.Trading.Reconciler do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @doc "Runs a single reconciliation cycle immediately."
+  @spec reconcile_once() :: {:ok, non_neg_integer()} | {:error, term()}
+  def reconcile_once do
+    reconcile()
+  end
+
   @spec last_run() :: DateTime.t() | nil
   def last_run, do: GenServer.call(__MODULE__, :last_run)
 
@@ -45,7 +51,7 @@ defmodule Opus.Trading.Reconciler do
   @impl true
   def handle_info(:reconcile, state) do
     new_state =
-      case reconcile() do
+      case reconcile_once() do
         {:ok, count} ->
           %{
             state

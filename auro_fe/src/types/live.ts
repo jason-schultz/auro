@@ -124,6 +124,12 @@ export interface OosStats {
     sharpe_retention: number;
 }
 
+export interface CurrentSuspension {
+    trigger_kind: string;
+    trigger_detail: string;
+    triggered_at: string;
+}
+
 export interface LiveStrategy {
     id: string;
     strategy_type: string;
@@ -140,6 +146,7 @@ export interface LiveStrategy {
     backtest_stats: BacktestStats | null;
     oos_stats: OosStats | null;
     live_stats: LiveStats | null;
+    current_suspension?: CurrentSuspension | null;
 }
 
 export interface LiveStrategiesResponse {

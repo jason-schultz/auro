@@ -93,6 +93,13 @@
                                 <div class="flex items-center gap-1">
                                     <StrategyTypeBadge :type="strategy.strategy_type" />
                                     <BadgePill
+                                        v-if="strategy.current_suspension"
+                                        label="SUSPENDED"
+                                        size="2xs"
+                                        :extra-class="'bg-red-500/15 text-red-300 border border-red-500/30'"
+                                        :title="strategy.current_suspension.trigger_detail"
+                                    />
+                                    <BadgePill
                                         v-if="strategy.source === 'evolution'"
                                         label="Evo"
                                         size="2xs"
@@ -107,6 +114,12 @@
                                         title="Promoted via pipeline"
                                     />
                                 </div>
+                                <p
+                                    v-if="strategy.current_suspension"
+                                    class="mt-1 text-[10px] text-red-300/80 font-mono"
+                                >
+                                    {{ strategy.current_suspension.trigger_detail }}
+                                </p>
                             </td>
 
                             <!-- Timeframe -->
@@ -273,6 +286,15 @@
                             <!-- Status toggle -->
                             <td :class="cellClass('enabled', 13)">
                                 <button
+                                    v-if="strategy.current_suspension"
+                                    @click="resetCircuitBreaker(strategy)"
+                                    :disabled="resetting === strategy.id"
+                                    class="text-[10px] px-2 py-1 rounded border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                                >
+                                    {{ resetting === strategy.id ? "..." : "Reset" }}
+                                </button>
+                                <button
+                                    v-else
                                     @click="toggleStrategy(strategy)"
                                     :disabled="toggling === strategy.id"
                                     class="relative w-8 h-4 rounded-full transition-colors"
@@ -360,6 +382,7 @@ const {
     sortKey,
     sortDir,
     toggling,
+    resetting,
     deleting,
     deleteConfirm,
     errorMessage,
@@ -377,6 +400,7 @@ const {
     winRateDeltaClass,
     edgeStatus,
     toggleStrategy,
+    resetCircuitBreaker,
     deleteStrategy,
     loadStrategies,
 } = useStrategies();
