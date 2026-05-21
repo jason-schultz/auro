@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::collections::HashMap;
 
+use crate::engine::rules::Rules;
 use crate::engine::types::{
     BufferKey, Candle, CandleBuffer, Direction, Granularity, OpenPosition, StopLossState,
 };
@@ -21,7 +22,7 @@ pub(crate) async fn run_prefill_rules(state: &AppState) {
     match rows {
         Ok(rows) => {
             let count = rows.len();
-            let cache = crate::engine::rules::Rules::from_db_rows(rows);
+            let cache = Rules::from_db_rows(rows);
             *state.live.rules.write().await = cache;
             tracing::info!("Pre-filled {} rules from database", count);
         }
@@ -35,9 +36,7 @@ pub(crate) async fn run_prefill_rules(state: &AppState) {
 }
 
 pub(crate) async fn run_prefill_buffers(state: &AppState) {
-    let mut buffers = state.live.buffers.write().await;
-
-    match prefill_buffers(&state.db, &mut buffers).await {
+    match prefill_buffers(state).await {
         Ok(count) => {
             tracing::info!(
                 "Pre-filled buffers for {} instrument/granularity pairs",
@@ -53,80 +52,18 @@ pub(crate) async fn run_prefill_buffers(state: &AppState) {
 /// Pre-fill candle buffers from the database for all enabled strategies.
 /// Loads up to 200 candles per (instrument, granularity) pair.
 async fn prefill_buffers(
-    pool: &PgPool,
-    buffers: &mut HashMap<BufferKey, CandleBuffer>,
+    state: &AppState,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     // Get distinct (instrument, granularity) pairs from enabled strategies
     let instruments: Vec<String> =
         sqlx::query_scalar("SELECT DISTINCT instrument FROM live_strategies WHERE enabled = true")
-            .fetch_all(pool)
+            .fetch_all(&state.db)
             .await?;
+
     let mut count = 0;
-    const MTF_GRANULARITIES: &[Granularity] = &[
-        Granularity::M1,
-        Granularity::M5,
-        Granularity::M15,
-        Granularity::H1,
-        Granularity::H4,
-        Granularity::D,
-    ];
 
-    for instrument in &instruments {
-        for granularity in MTF_GRANULARITIES {
-            let rows: Vec<(DateTime<Utc>, f64, f64, f64, f64, i32)> = sqlx::query_as(
-                r#"
-                SELECT timestamp, open, high, low, close, volume
-                FROM candles
-                WHERE instrument = $1 AND granularity = $2
-            ORDER BY timestamp DESC
-            LIMIT $3
-            "#,
-            )
-            .bind(instrument)
-            .bind(granularity.as_str())
-            .bind(granularity.buffer_capacity() as i64)
-            .fetch_all(pool)
-            .await?;
-
-            if rows.is_empty() {
-                tracing::warn!(
-                    "No {} candle data found for {}, skipping pre-fill",
-                    granularity,
-                    instrument
-                );
-                continue;
-            }
-
-            let key = (instrument.clone(), *granularity);
-            let buffer = buffers
-                .entry(key)
-                .or_insert_with(|| CandleBuffer::new(granularity.buffer_capacity()));
-
-            // Rows come in DESC order (newest first), reverse to get chronological order
-            for (time, open, high, low, close, volume) in rows.iter().rev() {
-                buffer.push(Candle {
-                    time: *time,
-                    open: *open,
-                    high: *high,
-                    low: *low,
-                    close: *close,
-                    volume: *volume,
-                });
-            }
-
-            if let Some(last) = buffer.candles.last() {
-                buffer.current_mid = last.close;
-            }
-
-            tracing::info!(
-                "Pre-filled {} {} candles for {}",
-                buffer.candles.len(),
-                granularity,
-                instrument
-            );
-
-            count += 1;
-        }
+    for instrument in instruments {
+        count += load_instrument_buffers(state, &instrument).await?;
     }
 
     Ok(count)
@@ -222,6 +159,112 @@ async fn prefill_open_positions(
     Ok(count)
 }
 
+pub(crate) async fn load_instrument_buffers(
+    state: &AppState,
+    instrument: &str,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    const MTF_GRANULARITIES: &[Granularity] = &[
+        Granularity::M1,
+        Granularity::M5,
+        Granularity::M15,
+        Granularity::H1,
+        Granularity::H4,
+        Granularity::D,
+    ];
+
+    let mut built_buffers: Vec<(BufferKey, CandleBuffer)> = Vec::new();
+
+    for granularity in MTF_GRANULARITIES {
+        let rows: Vec<(DateTime<Utc>, f64, f64, f64, f64, i32)> = sqlx::query_as(
+            r#"
+            SELECT timestamp, open, high, low, close, volume
+            FROM candles
+            WHERE instrument = $1 AND granularity = $2
+            ORDER BY timestamp DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(instrument)
+        .bind(granularity.as_str())
+        .bind(granularity.buffer_capacity() as i64)
+        .fetch_all(&state.db)
+        .await?;
+
+        if rows.is_empty() {
+            continue;
+        }
+
+        let mut buffer = CandleBuffer::new(granularity.buffer_capacity());
+
+        // Rows come in DESC order (newest first), reverse to get chronological order
+        for (time, open, high, low, close, volume) in rows.iter().rev() {
+            buffer.push(Candle {
+                time: *time,
+                open: *open,
+                high: *high,
+                low: *low,
+                close: *close,
+                volume: *volume,
+            });
+        }
+
+        if let Some(last) = buffer.candles.last() {
+            buffer.current_mid = last.close;
+        }
+
+        tracing::info!(
+            "Pre-filled {} {} candles for {}",
+            buffer.candles.len(),
+            granularity,
+            instrument
+        );
+
+        built_buffers.push(((instrument.to_string(), *granularity), buffer));
+    }
+
+    if built_buffers.is_empty() {
+        tracing::warn!("No candle data found for {}, skipping pre-fill", instrument);
+        return Ok(0);
+    }
+
+    let mut buffers = state.live.buffers.write().await;
+    let loaded_count = built_buffers.len();
+    for (key, buffer) in built_buffers {
+        buffers.insert(key, buffer);
+    }
+
+    Ok(loaded_count)
+}
+
+fn remove_instrument_entries<T>(map: &mut HashMap<BufferKey, T>, instrument: &str) -> usize {
+    let before = map.len();
+    map.retain(|(inst, _), _| inst != instrument);
+    before - map.len()
+}
+
+pub(crate) async fn unload_instrument_buffers(state: &AppState, instrument: &str) -> usize {
+    let removed_buffers = {
+        let mut buffers = state.live.buffers.write().await;
+        remove_instrument_entries(&mut buffers, instrument)
+    };
+
+    let removed_accumulators = {
+        let mut accumulators = state.live.accumulators.write().await;
+        remove_instrument_entries(&mut accumulators, instrument)
+    };
+
+    let removed_total = removed_buffers + removed_accumulators;
+    tracing::info!(
+        "Unloaded {} in-memory entries for {} ({} buffers, {} accumulators)",
+        removed_total,
+        instrument,
+        removed_buffers,
+        removed_accumulators
+    );
+
+    removed_total
+}
+
 fn determine_stop_loss_state(
     trade: &serde_json::Value,
     strategy_type: &str,
@@ -249,4 +292,36 @@ fn determine_stop_loss_state(
     }
 
     StopLossState::Initial
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_instrument_entries;
+    use crate::engine::types::{CandleBuffer, Granularity};
+    use std::collections::HashMap;
+
+    #[test]
+    fn remove_instrument_entries_removes_only_target_keys() {
+        let mut buffers = HashMap::new();
+        buffers.insert(
+            ("EUR_USD".to_string(), Granularity::H1),
+            CandleBuffer::new(200),
+        );
+        buffers.insert(
+            ("EUR_USD".to_string(), Granularity::M15),
+            CandleBuffer::new(200),
+        );
+        buffers.insert(
+            ("USD_JPY".to_string(), Granularity::H1),
+            CandleBuffer::new(200),
+        );
+
+        let removed = remove_instrument_entries(&mut buffers, "EUR_USD");
+
+        assert_eq!(removed, 2);
+        assert_eq!(buffers.len(), 1);
+        assert!(buffers
+            .keys()
+            .all(|(instrument, _)| instrument.as_str() == "USD_JPY"));
+    }
 }

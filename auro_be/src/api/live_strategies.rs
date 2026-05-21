@@ -1,11 +1,12 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, map, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::engine::live::prefill::{load_instrument_buffers, unload_instrument_buffers};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
@@ -73,6 +74,40 @@ async fn fetch_live_aggregates(
         .collect();
 
     Ok(map)
+}
+
+async fn instrument_buffers_needed(
+    pool: &PgPool,
+    instrument: &str,
+    exclude_strategy_id: Option<Uuid>,
+) -> AppResult<bool> {
+    // Any other enabled strategy on this instrument?
+    let enabled_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM live_strategies \
+         WHERE instrument = $1 AND enabled = true \
+         AND ($2::uuid IS NULL OR id != $2)",
+    )
+    .bind(instrument)
+    .bind(exclude_strategy_id)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    if enabled_count.0 > 0 {
+        return Ok(true);
+    }
+
+    // Any open position on this instrument?
+    let open_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM live_trades \
+         WHERE instrument = $1 AND status = 'open'",
+    )
+    .bind(instrument)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    Ok(open_count.0 > 0)
 }
 
 #[derive(Deserialize)]
@@ -561,6 +596,19 @@ pub async fn toggle_live_strategy(
 
     match row {
         Some((enabled, stype, instrument)) => {
+            if enabled {
+                load_instrument_buffers(&state, &instrument)
+                    .await
+                    .map_err(|e| {
+                        AppError::Internal(format!(
+                            "Failed to load buffers for {} after enabling strategy {}: {}",
+                            instrument, id, e
+                        ))
+                    })?;
+            } else if !instrument_buffers_needed(&state.db, &instrument, None).await? {
+                unload_instrument_buffers(&state, &instrument).await;
+            }
+
             tracing::info!(
                 "Strategy {} ({} on {}) {}",
                 id,
@@ -593,14 +641,19 @@ pub async fn delete_live_strategy(
         ));
     }
 
-    let result = sqlx::query("DELETE FROM live_strategies WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+    let row: Option<(String,)> =
+        sqlx::query_as("DELETE FROM live_strategies WHERE id = $1 RETURNING instrument")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(AppError::Database)?;
 
-    if result.rows_affected() == 0 {
+    let Some((instrument,)) = row else {
         return Err(AppError::NotFound("Strategy not found".into()));
+    };
+
+    if !instrument_buffers_needed(&state.db, &instrument, Some(id)).await? {
+        unload_instrument_buffers(&state, &instrument).await;
     }
 
     tracing::info!("Deleted live strategy {}", id);
