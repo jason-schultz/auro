@@ -8,7 +8,9 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
 
   Usage:
     mix pipeline.evo_seed                        # H1, dry-run false
+    mix pipeline.evo_seed --granularity H4
     mix pipeline.evo_seed --granularity M15
+    mix pipeline.evo_seed --granularity M5
     mix pipeline.evo_seed --clean                # truncate all pipeline data first
     mix pipeline.evo_seed --clean --granularity H1
 
@@ -55,6 +57,22 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
         "regime_filter" => true
       }
     },
+    "H4" => %{
+      "trend_following" => %{
+        "fast_period" => 10,
+        "slow_period" => 30,
+        "stop_loss" => -0.025,
+        "take_profit" => nil,
+        "regime_filter" => true
+      },
+      "mean_reversion" => %{
+        "ma_period" => 20,
+        "entry_threshold" => -0.008,
+        "exit_threshold" => 0.005,
+        "stop_loss" => -0.015,
+        "regime_filter" => true
+      }
+    },
     "M15" => %{
       "trend_following" => %{
         "fast_period" => 10,
@@ -68,6 +86,22 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
         "entry_threshold" => -0.003,
         "exit_threshold" => 0.002,
         "stop_loss" => -0.008,
+        "regime_filter" => true
+      }
+    },
+    "M5" => %{
+      "trend_following" => %{
+        "fast_period" => 20,
+        "slow_period" => 60,
+        "stop_loss" => -0.01,
+        "take_profit" => nil,
+        "regime_filter" => true
+      },
+      "mean_reversion" => %{
+        "ma_period" => 20,
+        "entry_threshold" => -0.002,
+        "exit_threshold" => 0.0015,
+        "stop_loss" => -0.005,
         "regime_filter" => true
       }
     }
