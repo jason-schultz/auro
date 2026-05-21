@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, map, Value};
+use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
