@@ -120,30 +120,41 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
   # ---------------------------------------------------------------------------
 
   defp spawn_next_generation(parent, lineage_id, next_gen) do
-    1..@children_per_gen
-    |> Enum.each(fn _ ->
-      child_params = mutate_params(parent.strategy_type, parent.parameters, next_gen)
+    case list_generation_configs(lineage_id, next_gen) do
+      [] ->
+        1..@children_per_gen
+        |> Enum.each(fn _ ->
+          child_params = mutate_params(parent.strategy_type, parent.parameters, next_gen)
 
-      attrs = %{
-        instrument: parent.instrument,
-        granularity: parent.granularity,
-        strategy_type: parent.strategy_type,
-        source: "evolution",
-        parent_config_id: to_string(parent.id),
-        depth: 0,
-        parameters: child_params,
-        evo_generation: next_gen,
-        lineage_id: lineage_id
-      }
+          attrs = %{
+            instrument: parent.instrument,
+            granularity: parent.granularity,
+            strategy_type: parent.strategy_type,
+            source: "evolution",
+            parent_config_id: to_string(parent.id),
+            depth: 0,
+            parameters: child_params,
+            evo_generation: next_gen,
+            lineage_id: lineage_id
+          }
 
-      case Coordinator.submit_evo_child(attrs) do
-        {:ok, child} ->
-          Logger.debug("[EvoEngine] Spawned gen #{next_gen} child #{child.id}")
+          case Coordinator.submit_evo_child(attrs) do
+            {:ok, child} ->
+              Logger.debug("[EvoEngine] Spawned gen #{next_gen} child #{child.id}")
 
-        {:error, reason} ->
-          Logger.error("[EvoEngine] Failed to spawn gen #{next_gen} child: #{inspect(reason)}")
-      end
-    end)
+            {:error, reason} ->
+              Logger.error(
+                "[EvoEngine] Failed to spawn gen #{next_gen} child: #{inspect(reason)}"
+              )
+          end
+        end)
+
+      existing ->
+        Logger.warning(
+          "[EvoEngine] gen #{next_gen} for lineage #{lineage_id} already has " <>
+            "#{length(existing)} children — skipping duplicate spawn"
+        )
+    end
   end
 
   # ---------------------------------------------------------------------------
