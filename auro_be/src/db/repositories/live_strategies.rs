@@ -312,6 +312,7 @@ pub(crate) async fn find_backtest_deploy_source(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn insert_deployed_live_strategy(
     pool: &PgPool,
     id: Uuid,
