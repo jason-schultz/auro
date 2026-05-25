@@ -13,6 +13,7 @@ defmodule Opus.Trading.Reconciler do
   alias Opus.Auro.Client, as: Auro
   alias Opus.Oanda.Client, as: Oanda
   alias Opus.Repo
+  alias Opus.Support.Polling
   alias Opus.Utils.Number, as: Number
 
   import Ecto.Query
@@ -43,7 +44,7 @@ defmodule Opus.Trading.Reconciler do
     )
 
     # Schedule the first reconciliation after a short delay
-    Process.send_after(self(), :reconcile, :timer.seconds(10))
+    Polling.schedule(self(), :timer.seconds(10), :reconcile)
 
     {:ok, %{last_run: nil, reconciled_count: 0}}
   end
@@ -65,7 +66,7 @@ defmodule Opus.Trading.Reconciler do
       end
 
     # Schedule next run
-    Process.send_after(self(), :reconcile, @reconcile_interval)
+    Polling.schedule(self(), @reconcile_interval, :reconcile)
 
     {:noreply, new_state}
   end
@@ -79,31 +80,30 @@ defmodule Opus.Trading.Reconciler do
     # Step 1: Get all trades we think are open
     db_open_trades = get_db_open_trades()
 
-    if Enum.empty?(db_open_trades) do
-      {:ok, 0}
-    else
-      # Step 2: Get what OANDA actually has open
-      case Oanda.get_open_trades() do
-        {:ok, oanda_trades} ->
-          oanda_trade_ids =
-            oanda_trades
-            |> Enum.map(& &1["id"])
-            |> MapSet.new()
+    with {:ok, oanda_trades} <- Oanda.get_open_trades() do
+      oanda_trade_ids =
+        oanda_trades
+        |> Enum.map(& &1["id"])
+        |> MapSet.new()
 
-          # Step 3: Find trades open in DB but missing from OANDA
-          stale_trades =
-            Enum.reject(db_open_trades, fn trade ->
-              MapSet.member?(oanda_trade_ids, trade.oanda_trade_id)
-            end)
+      # Step 3: Find trades open in DB but missing from OANDA
+      stale_trades =
+        Enum.reject(db_open_trades, fn trade ->
+          MapSet.member?(oanda_trade_ids, trade.oanda_trade_id)
+        end)
 
-          # Step 4: Close each stale trade
-          Enum.each(stale_trades, &close_stale_trade/1)
+      stale_count = length(stale_trades)
 
-          {:ok, length(stale_trades)}
-
-        {:error, reason} ->
-          {:error, reason}
+      if stale_count > 0 do
+        Logger.info(
+          "[Reconciler] Found #{stale_count} stale trades to close (db_open=#{length(db_open_trades)}, oanda_open=#{length(oanda_trades)})"
+        )
       end
+
+      # Step 4: Close each stale trade
+      Enum.each(stale_trades, &close_stale_trade/1)
+
+      {:ok, stale_count}
     end
   end
 
@@ -128,7 +128,7 @@ defmodule Opus.Trading.Reconciler do
   end
 
   defp close_stale_trade(trade) do
-    Logger.info(
+    Logger.debug(
       "[Reconciler] Trade #{trade.oanda_trade_id} (#{trade.direction} #{trade.instrument}) " <>
         "was closed by OANDA. Fetching close details."
     )
@@ -168,7 +168,7 @@ defmodule Opus.Trading.Reconciler do
            ]
          ) do
       {1, _} ->
-        Logger.info(
+        Logger.debug(
           "[Reconciler] Closed #{trade.direction} #{trade.instrument} @ #{Float.round(exit_price, 5)}, " <>
             "PnL=#{Float.round(pnl * 100, 4)}%, reason=#{exit_reason}, sl_state=#{sl_state || "nil"}"
         )
@@ -208,34 +208,32 @@ defmodule Opus.Trading.Reconciler do
   defp extract_close_from_transaction(trade, close_tx) do
     exit_price = Number.parse_float(close_tx["exit_price"], 0.0)
 
-    cond do
-      exit_price <= 0.0 ->
-        Logger.warning(
-          "[Reconciler] Trade #{trade.oanda_trade_id}: transaction has " <>
-            "exit_price=#{inspect(close_tx["exit_price"])}. " <>
-            "Full data: #{inspect(close_tx)}"
-        )
+    if exit_price <= 0.0 do
+      Logger.warning(
+        "[Reconciler] Trade #{trade.oanda_trade_id}: transaction has " <>
+          "exit_price=#{inspect(close_tx["exit_price"])}. " <>
+          "Full data: #{inspect(close_tx)}"
+      )
 
-        {:error, :zero_exit_price}
+      {:error, :zero_exit_price}
+    else
+      realized_pl = Number.parse_float(close_tx["realized_pl"], 0.0)
+      exit_reason = transaction_reason_to_label(close_tx["reason"])
+      pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl)
 
-      true ->
-        realized_pl = Number.parse_float(close_tx["realized_pl"], 0.0)
-        exit_reason = transaction_reason_to_label(close_tx["reason"])
-        pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl)
+      Logger.debug(
+        "[Reconciler] Trade #{trade.oanda_trade_id}: recovered close from transactions — " <>
+          "exit_price=#{exit_price}, pnl=#{Float.round(pnl, 6)}, exit_reason=#{exit_reason}"
+      )
 
-        Logger.info(
-          "[Reconciler] Trade #{trade.oanda_trade_id}: recovered close from transactions — " <>
-            "exit_price=#{exit_price}, pnl=#{Float.round(pnl, 6)}, exit_reason=#{exit_reason}"
-        )
-
-        # No SL/TP order snapshot available via the transactions fallback path.
-        {:ok,
-         %{
-           exit_price: exit_price,
-           exit_reason: exit_reason,
-           pnl: pnl,
-           stop_loss_state_at_close: nil
-         }}
+      # No SL/TP order snapshot available via the transactions fallback path.
+      {:ok,
+       %{
+         exit_price: exit_price,
+         exit_reason: exit_reason,
+         pnl: pnl,
+         stop_loss_state_at_close: nil
+       }}
     end
   end
 
@@ -251,34 +249,32 @@ defmodule Opus.Trading.Reconciler do
     realized_pl = Number.parse_float(trade_data["realizedPL"], 0.0)
     exit_reason = determine_exit_reason(trade_data)
 
-    cond do
-      exit_price <= 0.0 ->
-        Logger.warning(
-          "[Reconciler] Trade #{trade.oanda_trade_id}: state=CLOSED but " <>
-            "averageClosePrice=#{inspect(trade_data["averageClosePrice"])}, " <>
-            "realizedPL=#{inspect(trade_data["realizedPL"])}, exit_reason=#{exit_reason}. " <>
-            "Full response: #{inspect(trade_data)}"
-        )
+    if exit_price <= 0.0 do
+      Logger.warning(
+        "[Reconciler] Trade #{trade.oanda_trade_id}: state=CLOSED but " <>
+          "averageClosePrice=#{inspect(trade_data["averageClosePrice"])}, " <>
+          "realizedPL=#{inspect(trade_data["realizedPL"])}, exit_reason=#{exit_reason}. " <>
+          "Full response: #{inspect(trade_data)}"
+      )
 
-        {:error, :zero_exit_price}
+      {:error, :zero_exit_price}
+    else
+      pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl)
+      sl_state = infer_stop_loss_state(trade, trade_data)
 
-      true ->
-        pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl)
-        sl_state = infer_stop_loss_state(trade, trade_data)
+      Logger.debug(
+        "[Reconciler] Trade #{trade.oanda_trade_id}: extracted close details — " <>
+          "exit_price=#{exit_price}, pnl=#{Float.round(pnl, 6)}, exit_reason=#{exit_reason}, " <>
+          "sl_state=#{sl_state}"
+      )
 
-        Logger.info(
-          "[Reconciler] Trade #{trade.oanda_trade_id}: extracted close details — " <>
-            "exit_price=#{exit_price}, pnl=#{Float.round(pnl, 6)}, exit_reason=#{exit_reason}, " <>
-            "sl_state=#{sl_state}"
-        )
-
-        {:ok,
-         %{
-           exit_price: exit_price,
-           exit_reason: exit_reason,
-           pnl: pnl,
-           stop_loss_state_at_close: sl_state
-         }}
+      {:ok,
+       %{
+         exit_price: exit_price,
+         exit_reason: exit_reason,
+         pnl: pnl,
+         stop_loss_state_at_close: sl_state
+       }}
     end
   end
 

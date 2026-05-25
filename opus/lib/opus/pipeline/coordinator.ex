@@ -11,6 +11,7 @@ defmodule Opus.Pipeline.Coordinator do
   """
 
   require Logger
+  import Ecto.Query
 
   alias Ecto.Multi
 
@@ -110,23 +111,74 @@ defmodule Opus.Pipeline.Coordinator do
   # Walk the full ancestor chain and return true if revised_params appeared at any depth.
   defp params_seen_in_lineage?(config_id, revised_params) do
     normalized = normalize_params(revised_params)
-    walk_lineage(config_id, normalized)
+
+    case lineage_params_via_cte(config_id) do
+      {:ok, params_list} ->
+        Enum.any?(params_list, &(normalize_params(&1) == normalized))
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Pipeline] lineage CTE failed for #{config_id}, falling back to iterative traversal: #{inspect(reason)}"
+        )
+
+        config_id
+        |> lineage_stream()
+        |> Enum.any?(fn {_id, params} -> normalize_params(params) == normalized end)
+    end
   end
 
-  defp walk_lineage(nil, _normalized), do: false
+  defp lineage_params_via_cte(config_id) do
+    seed_query =
+      from(c in StrategyConfig,
+        where: c.id == ^config_id,
+        select: %{id: c.id, parent_config_id: c.parent_config_id, parameters: c.parameters}
+      )
 
-  defp walk_lineage(config_id, normalized) do
-    case Repo.get(StrategyConfig, config_id) do
-      nil ->
-        false
+    step_query =
+      from(c in StrategyConfig,
+        join: l in "lineage",
+        on: c.id == l.parent_config_id,
+        select: %{id: c.id, parent_config_id: c.parent_config_id, parameters: c.parameters}
+      )
 
-      config ->
-        if normalize_params(config.parameters) == normalized do
-          true
-        else
-          walk_lineage(config.parent_config_id, normalized)
-        end
+    lineage_query = union_all(seed_query, ^step_query)
+
+    query =
+      from(l in "lineage", select: l.parameters)
+      |> recursive_ctes(true)
+      |> with_cte("lineage", as: ^lineage_query)
+
+    case Repo.all(query) do
+      params_list when is_list(params_list) -> {:ok, Enum.map(params_list, &(&1 || %{}))}
+      _ -> {:error, :unexpected_lineage_result}
     end
+  rescue
+    error ->
+      {:error, error}
+  end
+
+  defp lineage_stream(config_id) do
+    Stream.unfold(config_id, fn
+      nil ->
+        nil
+
+      id ->
+        case fetch_lineage_node(id) do
+          nil ->
+            nil
+
+          %{id: node_id, parent_config_id: parent, parameters: params} ->
+            {{node_id, params}, parent}
+        end
+    end)
+  end
+
+  defp fetch_lineage_node(config_id) do
+    from(c in StrategyConfig,
+      where: c.id == ^config_id,
+      select: %{id: c.id, parent_config_id: c.parent_config_id, parameters: c.parameters}
+    )
+    |> Repo.one()
   end
 
   defp normalize_params(params) when is_map(params) do
@@ -331,7 +383,6 @@ defmodule Opus.Pipeline.Coordinator do
         {:error, :not_found}
 
       config ->
-        id = Ecto.UUID.generate()
         now = DateTime.utc_now()
 
         {inserted, _rows} =
@@ -339,7 +390,6 @@ defmodule Opus.Pipeline.Coordinator do
             "live_strategies",
             [
               %{
-                id: id,
                 strategy_type: config.strategy_type,
                 instrument: config.instrument,
                 granularity: config.granularity,

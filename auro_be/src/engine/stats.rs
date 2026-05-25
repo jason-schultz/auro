@@ -1,6 +1,6 @@
 use crate::engine::types::Trade;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct BacktestStats {
     pub total_return: f64,
     pub win_rate: f64,

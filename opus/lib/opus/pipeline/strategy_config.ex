@@ -8,8 +8,8 @@ defmodule Opus.Pipeline.StrategyConfig do
 
   alias Opus.Trading.Granularity
 
-  @primary_key {:id, :binary_id, autogenerate: true}
-  @foreign_key_type :binary_id
+  @primary_key {:id, Ecto.UUID, autogenerate: true}
+  @foreign_key_type Ecto.UUID
 
   schema "strategy_configs" do
     field(:source, :string, default: "ollama")
@@ -17,11 +17,11 @@ defmodule Opus.Pipeline.StrategyConfig do
     field(:granularity, :string)
     field(:strategy_type, :string)
     field(:parameters, :map)
-    field(:parent_config_id, :binary_id)
+    field(:parent_config_id, Ecto.UUID)
     field(:depth, :integer, default: 0)
     field(:generation_prompt, :string)
     field(:evo_generation, :integer)
-    field(:lineage_id, :binary_id)
+    field(:lineage_id, Ecto.UUID)
     field(:score, :float)
 
     timestamps(type: :utc_datetime_usec)

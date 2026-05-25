@@ -2,6 +2,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::db::repositories::{live_queries, live_strategies as live_strategies_repo};
 use crate::engine::indicators;
 use crate::engine::mean_reversion::{self, MRSignal, MeanReversionParams};
 use crate::engine::rules::{entry_gate_report, Rules};
@@ -75,14 +76,8 @@ pub(crate) fn position_key_deltas(
 }
 
 pub(crate) async fn is_trading_enabled(pool: &PgPool) -> bool {
-    let result: Option<(serde_json::Value,)> =
-        sqlx::query_as("SELECT value FROM trading_config WHERE key = 'trading_enabled'")
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-
-    result
-        .and_then(|r| r.0.as_str().map(|s| s == "true"))
+    live_queries::is_trading_enabled(pool)
+        .await
         .unwrap_or(false)
 }
 
@@ -154,14 +149,13 @@ pub(crate) async fn evaluate_strategies(
         return Ok(vec![]);
     }
 
-    let strategies: Vec<LiveStrategy> = sqlx::query_as(
-        "SELECT id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, risk_pct, max_units \
-         FROM live_strategies WHERE instrument = $1 AND granularity = $2 AND enabled = true"
-    )
-    .bind(instrument)
-    .bind(granularity.as_str())
-    .fetch_all(&state.db)
-    .await?;
+    let strategies: Vec<LiveStrategy> =
+        live_strategies_repo::list_enabled_for_instrument_granularity(
+            &state.db,
+            instrument,
+            granularity.as_str(),
+        )
+        .await?;
 
     let mut reports: Vec<SignalReport> = Vec::new();
 
@@ -204,7 +198,9 @@ async fn evaluate_entry(
     let params = &strategy.parameters;
 
     let already_open = open_positions.values().any(|pos| {
-        pos.instrument == strategy.instrument && pos.granularity == strategy.granularity
+        pos.instrument == strategy.instrument
+            && pos.granularity == strategy.granularity
+            && pos.strategy_type == strategy.strategy_type
     });
 
     if already_open {
@@ -221,6 +217,27 @@ async fn evaluate_entry(
             action: SignalAction::EntryRejected,
             price: current_price,
             reason: "position_already_open".to_string(),
+            oanda_trade_id: None,
+        }));
+    }
+
+    if let Some(reason) = reject_incomplete_m5_tf_config(strategy) {
+        tracing::warn!(
+            "[SKIP ENTRY] {} {} {}: {}",
+            strategy.strategy_type,
+            strategy.instrument,
+            strategy.granularity,
+            reason
+        );
+
+        return Ok(Some(SignalReport {
+            strategy_id: strategy.id,
+            strategy_type: strategy.strategy_type.clone(),
+            instrument: strategy.instrument.clone(),
+            granularity: strategy.granularity,
+            action: SignalAction::EntryRejected,
+            price: current_price,
+            reason,
             oanda_trade_id: None,
         }));
     }
@@ -464,6 +481,45 @@ async fn evaluate_entry(
     Ok(None)
 }
 
+fn reject_incomplete_m5_tf_config(strategy: &LiveStrategy) -> Option<String> {
+    if strategy.strategy_type != "trend_following" || strategy.granularity != Granularity::M5 {
+        return None;
+    }
+
+    let confirm_bars = strategy
+        .parameters
+        .get("confirm_bars")
+        .and_then(|v| v.as_u64());
+    let trailing_k = strategy
+        .parameters
+        .get("trailing_k")
+        .and_then(|v| v.as_f64());
+
+    let mut issues: Vec<&str> = Vec::new();
+
+    if strategy.risk_pct <= 0.0 {
+        issues.push("risk_pct must be > 0");
+    }
+
+    if strategy.max_units.is_none() {
+        issues.push("max_units must be set");
+    }
+
+    if confirm_bars.is_none() {
+        issues.push("parameters.confirm_bars missing");
+    }
+
+    if trailing_k.is_none() {
+        issues.push("parameters.trailing_k missing");
+    }
+
+    if issues.is_empty() {
+        None
+    } else {
+        Some(format!("m5_tf_config_incomplete: {}", issues.join(", ")))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_entry(
     state: &AppState,
@@ -483,28 +539,78 @@ async fn execute_entry(
     let mut units_to_use = static_units.to_string();
     let mut sizing_metadata_json: Option<serde_json::Value> = None;
 
+    let instrument_meta = {
+        let cache = state.live.instrument_metadata.read().await;
+        cache.get(&strategy.instrument).cloned()
+    }
+    .ok_or_else(|| {
+        std::io::Error::other(format!(
+            "[SIZING] missing instrument metadata for {}",
+            strategy.instrument
+        ))
+    })?;
+
     if risk_pct == 0.0 {
-        tracing::info!(
-            "[SIZING] {} {} static fallback units={}",
-            strategy.id,
-            strategy.instrument,
-            static_units
-        );
+        let parsed: i64 = static_units.parse().unwrap_or(1000);
+        let parsed_abs = parsed.abs();
+        let policy_cap = instrument_meta.policy_max_units;
+        let oanda_min = instrument_meta.min_trade_size;
+
+        let effective_abs = match policy_cap {
+            Some(cap) => parsed_abs.min(cap),
+            None => parsed_abs,
+        };
+
+        if effective_abs < oanda_min {
+            tracing::warn!(
+                "[SIZING] {} {} skip reason=policy_below_minimum policy_cap={:?} oanda_min={} requested={}",
+                strategy.id,
+                strategy.instrument,
+                policy_cap,
+                oanda_min,
+                parsed
+            );
+            return Ok(Some(SignalReport {
+                strategy_id: strategy.id,
+                strategy_type: strategy.strategy_type.clone(),
+                instrument: strategy.instrument.clone(),
+                granularity: strategy.granularity,
+                action: SignalAction::EntryRejected,
+                price: current_price,
+                reason: "sizing_skip:policy_below_minimum".to_string(),
+                oanda_trade_id: None,
+            }));
+        }
+
+        let effective = if parsed < 0 {
+            -effective_abs
+        } else {
+            effective_abs
+        };
+
+        if effective_abs < parsed_abs {
+            tracing::info!(
+                "[SIZING] {} {} policy_clamp parsed={} -> effective={} policy_cap={:?}",
+                strategy.id,
+                strategy.instrument,
+                parsed,
+                effective,
+                policy_cap
+            );
+        } else {
+            tracing::info!(
+                "[SIZING] {} {} static fallback units={}",
+                strategy.id,
+                strategy.instrument,
+                static_units
+            );
+        }
+
+        units_to_use = effective.to_string();
     } else {
         let account_snapshot = { state.live.account.read().await.clone() };
 
         if let Some(snapshot) = account_snapshot {
-            let instrument_meta = {
-                let cache = state.live.instrument_metadata.read().await;
-                cache.get(&strategy.instrument).cloned()
-            }
-            .ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "[SIZING] missing instrument metadata for {}",
-                    strategy.instrument
-                ))
-            })?;
-
             let decision = compute_units(SizingInput {
                 equity: snapshot.nav,
                 risk_pct,
@@ -513,6 +619,7 @@ async fn execute_entry(
                 instrument: &strategy.instrument,
                 instrument_min_units: instrument_meta.min_trade_size,
                 instrument_max_units: instrument_meta.max_trade_size,
+                instrument_policy_max_units: instrument_meta.policy_max_units,
                 strategy_max_units,
             });
 
@@ -594,7 +701,15 @@ async fn execute_entry(
         }
     }
 
-    let tp_str = tp_price.map(|p| format_price(&strategy.instrument, p));
+    let tp_str = match tp_price {
+        Some(p) => Some(format_price(state, &strategy.instrument, p).await),
+        None => None,
+    };
+
+    let trailing_k_override = strategy
+        .parameters
+        .get("trailing_k")
+        .and_then(|v| v.as_f64());
 
     // nil-TP trend-following: open with a trailing stop instead of a fixed SL.
     // Trailing distance is ATR-adaptive: K * ATR.
@@ -608,7 +723,9 @@ async fn execute_entry(
                     state,
                     &strategy.instrument,
                     &strategy.strategy_type,
+                    strategy.granularity,
                     current_price,
+                    trailing_k_override,
                 )
                 .await
                 .unwrap_or_else(|| {
@@ -619,11 +736,11 @@ async fn execute_entry(
                     );
                     (current_price - sl_price).abs()
                 });
-        trailing_dist_str = format_price(&strategy.instrument, distance);
+        trailing_dist_str = format_price(state, &strategy.instrument, distance).await;
         sl_str = String::new();
         (false, true)
     } else {
-        sl_str = format_price(&strategy.instrument, sl_price);
+        sl_str = format_price(state, &strategy.instrument, sl_price).await;
         trailing_dist_str = String::new();
         (true, false)
     };
@@ -737,6 +854,8 @@ async fn execute_entry(
                     stop_loss_state: initial_sl_state,
                     worst_price: fill_price,
                     best_price: fill_price,
+                    transition_failed_at: None,
+                    strategy_type: strategy.strategy_type.clone(),
                 },
             );
 
@@ -799,12 +918,16 @@ async fn evaluate_exit(
                 &state.db,
                 &strategy.instrument,
                 &strategy.strategy_type,
+                strategy.granularity,
             )
             .await;
 
-            if let TFSignal::ExitTrendReversal { fast_ma, slow_ma } =
-                trend_following::check_exit(&closes, &tf_params, is_long, risk.exit_confirm_bars)
-            {
+            if let TFSignal::ExitTrendReversal { fast_ma, slow_ma } = trend_following::check_exit(
+                &closes,
+                &tf_params,
+                is_long,
+                tf_params.confirm_bars.unwrap_or(risk.exit_confirm_bars),
+            ) {
                 should_exit = true;
                 exit_reason = format!(
                     "TrendReversal: fast_ma={:.5}, slow_ma={:.5}",
@@ -918,7 +1041,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::config::Config;
-    use crate::engine::types::Candle;
+    use crate::engine::types::{Candle, OHLC};
     use crate::oanda::client::OandaClient;
     use crate::state::{AppState, LiveState};
 
@@ -934,6 +1057,8 @@ mod tests {
             stop_loss_state: StopLossState::Initial,
             worst_price: entry_price,
             best_price: entry_price,
+            transition_failed_at: None,
+            strategy_type: "mean_reversion".to_string(),
         }
     }
 
@@ -1117,11 +1242,15 @@ mod tests {
         for (idx, close) in [3.0, 2.0, 1.0, 4.0].iter().enumerate() {
             buffer.push(Candle {
                 time: base + Duration::minutes(idx as i64),
-                open: *close,
-                high: *close,
-                low: *close,
-                close: *close,
+                mid: OHLC {
+                    open: *close,
+                    high: *close,
+                    low: *close,
+                    close: *close,
+                },
                 volume: 1,
+                bid: None,
+                ask: None,
             });
         }
 

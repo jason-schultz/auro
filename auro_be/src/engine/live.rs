@@ -17,14 +17,14 @@ pub mod time;
 pub mod trade_management;
 
 pub(crate) use evaluator::{evaluate_and_apply, is_trading_enabled};
-pub use pricing::format_price;
+pub use pricing::{format_price, format_price_with_precision};
 pub(crate) use time::{compute_slot_time, time_slot};
 
 pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: AppState) {
     tokio::spawn(async move {
         tracing::info!("Live strategy evaluator started (multi-granularity mode)");
 
-        // Pre-fill buffers from the database for all enabled strategies
+        // Pre-fill buffers from the database for all strategy rows in the universe
         prefill::run_prefill_buffers(&state).await;
         prefill::run_prefill_open_positions(&state).await;
         prefill::run_prefill_rules(&state).await;
@@ -124,7 +124,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 let accumulator = accumulators
                                     .entry(key.clone())
                                     .or_insert_with(CandleAccumulator::new);
-                                accumulator.on_minute_close(slot, slot_time, mid)
+                                accumulator.on_minute_close(slot, slot_time, mid, bid, ask)
                             };
 
                             let Some(closed_candle) = maybe_close else {
@@ -144,28 +144,54 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                     "{} candle closed for {}: Open={:.5} High={:.5} Low={:.5} Close={:.5}, buffer_len={}",
                                     granularity,
                                     instrument,
-                                    closed_candle.open,
-                                    closed_candle.high,
-                                    closed_candle.low,
-                                    closed_candle.close,
+                                    closed_candle.mid.open,
+                                    closed_candle.mid.high,
+                                    closed_candle.mid.low,
+                                    closed_candle.mid.close,
                                     buffer.candles.len()
                                 );
                                 buffer.clone()
                             };
 
                             if let Err(e) = sqlx::query(
-                                r#"INSERT INTO candles (instrument, granularity, timestamp, open, high, low, close, volume, complete)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
-                                ON CONFLICT (instrument, granularity, timestamp) DO NOTHING"#
+                                r#"INSERT INTO candles (
+                                    instrument, granularity, timestamp, open, high, low, close, volume, complete,
+                                    bid_open, bid_high, bid_low, bid_close,
+                                    ask_open, ask_high, ask_low, ask_close
+                                )
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $10, $11, $12, $13, $14, $15, $16)
+                                ON CONFLICT (instrument, granularity, timestamp) DO UPDATE SET
+                                    open = EXCLUDED.open,
+                                    high = EXCLUDED.high,
+                                    low = EXCLUDED.low,
+                                    close = EXCLUDED.close,
+                                    volume = EXCLUDED.volume,
+                                    complete = EXCLUDED.complete,
+                                    bid_open = EXCLUDED.bid_open,
+                                    bid_high = EXCLUDED.bid_high,
+                                    bid_low = EXCLUDED.bid_low,
+                                    bid_close = EXCLUDED.bid_close,
+                                    ask_open = EXCLUDED.ask_open,
+                                    ask_high = EXCLUDED.ask_high,
+                                    ask_low = EXCLUDED.ask_low,
+                                    ask_close = EXCLUDED.ask_close"#
                             )
                             .bind(instrument)
                             .bind(granularity.as_str())
                             .bind(closed_candle.time)
-                            .bind(closed_candle.open)
-                            .bind(closed_candle.high)
-                            .bind(closed_candle.low)
-                            .bind(closed_candle.close)
+                            .bind(closed_candle.mid.open)
+                            .bind(closed_candle.mid.high)
+                            .bind(closed_candle.mid.low)
+                            .bind(closed_candle.mid.close)
                             .bind(closed_candle.volume)
+                            .bind(closed_candle.bid.as_ref().map(|o| o.open))
+                            .bind(closed_candle.bid.as_ref().map(|o| o.high))
+                            .bind(closed_candle.bid.as_ref().map(|o| o.low))
+                            .bind(closed_candle.bid.as_ref().map(|o| o.close))
+                            .bind(closed_candle.ask.as_ref().map(|o| o.open))
+                            .bind(closed_candle.ask.as_ref().map(|o| o.high))
+                            .bind(closed_candle.ask.as_ref().map(|o| o.low))
+                            .bind(closed_candle.ask.as_ref().map(|o| o.close))
                             .execute(&state.db)
                             .await
                             {

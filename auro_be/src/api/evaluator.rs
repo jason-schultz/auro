@@ -3,6 +3,7 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::db::repositories::live_queries;
 use crate::engine::live::{evaluate_and_apply, is_trading_enabled};
 use crate::engine::types::{Granularity, SignalReport};
 use crate::error::{AppError, AppResult};
@@ -75,13 +76,13 @@ async fn run_evaluation(
     }
     // Perform evaluation
     // Find instruments with enabled strategies at this granularity
-    let instruments: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT instrument FROM live_strategies WHERE granularity = $1 AND enabled = true",
-    )
-    .bind(granularity.as_str())
-    .fetch_all(&state.db)
-    .await
-    .map_err(AppError::from)?;
+    let instruments =
+        live_queries::enabled_strategy_instruments_for_granularity(&state.db, granularity.as_str())
+            .await
+            .map_err(AppError::from)?
+            .into_iter()
+            .map(|instrument| (instrument,))
+            .collect::<Vec<(String,)>>();
 
     if instruments.is_empty() {
         return Ok(EvaluateResponse {
