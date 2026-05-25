@@ -70,3 +70,15 @@ path = "src/bin/backfill_mfe_mae.rs"
 [[bin]]
 name = "backfill_stop_loss_state"
 path = "src/bin/backfill_stop_loss_state.rs"
+
+[[bin]]
+name = "validate_promotions"
+path = "src/bin/validate_promotions.rs"
+
+[[bin]]
+name = "backfill_bid_ask"
+path = "src/bin/backfill_bid_ask.rs"
+
+[[bin]]
+name = "compare_kfold_results"
+path = "src/bin/compare_kfold_results.rs"
