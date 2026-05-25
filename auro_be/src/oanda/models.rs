@@ -113,7 +113,48 @@ pub struct Instrument {
     pub display_precision: Option<i32>,
     pub minimum_trade_size: Option<String>,
     pub maximum_order_units: Option<String>,
+    pub minimum_trailing_stop_distance: Option<String>,
+    pub maximum_trailing_stop_distance: Option<String>,
     pub trade_units_precision: Option<i32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CandlesResponse;
+
+    #[test]
+    fn parses_bam_candle_payload() {
+        let raw = r#"
+                {
+                    "instrument": "EUR_USD",
+                    "granularity": "H1",
+                    "candles": [
+                        {
+                            "time": "2026-05-20T10:00:00.000000000Z",
+                            "complete": true,
+                            "volume": 1234,
+                            "mid": {"o": "1.1000", "h": "1.1010", "l": "1.0990", "c": "1.1005"},
+                            "bid": {"o": "1.0999", "h": "1.1009", "l": "1.0989", "c": "1.1004"},
+                            "ask": {"o": "1.1001", "h": "1.1011", "l": "1.0991", "c": "1.1006"}
+                        }
+                    ]
+                }
+                "#;
+
+        let parsed: CandlesResponse =
+            serde_json::from_str(raw).expect("BAM payload should deserialize");
+
+        assert_eq!(parsed.instrument, "EUR_USD");
+        assert_eq!(parsed.granularity, "H1");
+        assert_eq!(parsed.candles.len(), 1);
+
+        let candle = &parsed.candles[0];
+        assert!(candle.bid.is_some());
+        assert!(candle.ask.is_some());
+        assert!(candle.mid.is_some());
+        assert_eq!(candle.bid.as_ref().unwrap().c, "1.1004");
+        assert_eq!(candle.ask.as_ref().unwrap().c, "1.1006");
+    }
 }
 
 // pub enum TradeOrderUpdate {

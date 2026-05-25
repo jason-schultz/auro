@@ -1,3 +1,4 @@
+use chrono::{Duration, Utc};
 use sqlx::PgPool;
 
 use crate::engine::types::{Direction, OpenPosition, StopLossState};
@@ -27,12 +28,32 @@ async fn fetch_strategy_type(db: &PgPool, strategy_id: &uuid::Uuid) -> Option<St
         .flatten()
 }
 
+async fn fetch_trailing_k(db: &PgPool, strategy_id: &uuid::Uuid) -> Option<f64> {
+    let params: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT parameters FROM live_strategies WHERE id = $1")
+            .bind(strategy_id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+
+    params.and_then(|p| p.get("trailing_k").and_then(|v| v.as_f64()))
+}
+
 fn calc_be_threshold(take_profit: f64) -> f64 {
     (take_profit * 0.4).max(0.010)
 }
 
 fn calc_trailing_threshold(take_profit: f64) -> f64 {
     (take_profit * 0.75).max(0.025)
+}
+
+fn transition_backoff_active(position: &OpenPosition) -> bool {
+    let Some(failed_at) = position.transition_failed_at else {
+        return false;
+    };
+
+    Utc::now().signed_duration_since(failed_at) < Duration::hours(1)
 }
 
 pub(crate) async fn evaluate_trade_management(
@@ -75,7 +96,11 @@ pub(crate) async fn evaluate_trade_management(
             // Move SL to breakeven (entry price) once trade is up to dynamic BE threshold
             let be_threshold = calc_be_threshold(take_profit);
             if pct_in_profit >= be_threshold {
-                let sl_str = format_price(&position.instrument, position.entry_price);
+                if transition_backoff_active(position) {
+                    return Ok(());
+                }
+
+                let sl_str = format_price(state, &position.instrument, position.entry_price).await;
 
                 tracing::info!(
                     "[MGMT] {} {} ({}) up {:.2}% — moving SL to breakeven @ {}",
@@ -86,15 +111,33 @@ pub(crate) async fn evaluate_trade_management(
                     sl_str
                 );
 
-                state
+                match state
                     .oanda
                     .modify_trade_stop_loss(&position.trade_id, &sl_str)
-                    .await?;
-
-                // Update in-memory state
-                let mut positions = state.live.open_positions.write().await;
-                if let Some(p) = positions.get_mut(&position.trade_id) {
-                    p.stop_loss_state = StopLossState::Breakeven;
+                    .await
+                {
+                    Ok(_) => {
+                        // Update in-memory state
+                        let mut positions = state.live.open_positions.write().await;
+                        if let Some(p) = positions.get_mut(&position.trade_id) {
+                            p.stop_loss_state = StopLossState::Breakeven;
+                            p.transition_failed_at = None;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "[MGMT] {} {} ({}) modify_trade_stop_loss failed: {} — will retry after 1h backoff",
+                            position.direction,
+                            position.instrument,
+                            position.trade_id,
+                            e
+                        );
+                        let mut positions = state.live.open_positions.write().await;
+                        if let Some(p) = positions.get_mut(&position.trade_id) {
+                            p.transition_failed_at = Some(Utc::now());
+                        }
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -104,6 +147,10 @@ pub(crate) async fn evaluate_trade_management(
             let trailing_threshold = calc_trailing_threshold(take_profit);
 
             if pct_in_profit >= trailing_threshold {
+                if transition_backoff_active(position) {
+                    return Ok(());
+                }
+
                 let strategy_type =
                     match fetch_strategy_type(&state.db, &position.strategy_id).await {
                         Some(strategy_type) => strategy_type,
@@ -120,7 +167,9 @@ pub(crate) async fn evaluate_trade_management(
                     state,
                     &position.instrument,
                     &strategy_type,
+                    position.granularity,
                     current_price,
+                    fetch_trailing_k(&state.db, &position.strategy_id).await,
                 )
                 .await
                 else {
@@ -133,7 +182,7 @@ pub(crate) async fn evaluate_trade_management(
                     return Ok(());
                 };
 
-                let distance_str = format_price(&position.instrument, distance_price);
+                let distance_str = format_price(state, &position.instrument, distance_price).await;
 
                 tracing::info!(
                     "[MGMT] {} {} ({}) up {:.2}% — replacing SL with trailing @ distance {}",
@@ -144,14 +193,32 @@ pub(crate) async fn evaluate_trade_management(
                     distance_str
                 );
 
-                state
+                match state
                     .oanda
                     .replace_with_trailing_stop(&position.trade_id, &distance_str)
-                    .await?;
-
-                let mut positions = state.live.open_positions.write().await;
-                if let Some(p) = positions.get_mut(&position.trade_id) {
-                    p.stop_loss_state = StopLossState::Trailing;
+                    .await
+                {
+                    Ok(_) => {
+                        let mut positions = state.live.open_positions.write().await;
+                        if let Some(p) = positions.get_mut(&position.trade_id) {
+                            p.stop_loss_state = StopLossState::Trailing;
+                            p.transition_failed_at = None;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "[MGMT] {} {} ({}) replace_with_trailing_stop failed: {} — will retry after 1h backoff",
+                            position.direction,
+                            position.instrument,
+                            position.trade_id,
+                            e
+                        );
+                        let mut positions = state.live.open_positions.write().await;
+                        if let Some(p) = positions.get_mut(&position.trade_id) {
+                            p.transition_failed_at = Some(Utc::now());
+                        }
+                        return Ok(());
+                    }
                 }
             }
         }

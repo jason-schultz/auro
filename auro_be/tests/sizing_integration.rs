@@ -75,6 +75,7 @@ fn risk_pct_dynamic_computes_expected_units_range() {
         instrument: "XAU_USD",
         instrument_min_units: 1,
         instrument_max_units: None,
+        instrument_policy_max_units: None,
         strategy_max_units: None,
     };
 
@@ -99,6 +100,7 @@ fn below_minimum_units_skips() {
         instrument: "EUR_USD",
         instrument_min_units: 20_000,
         instrument_max_units: None,
+        instrument_policy_max_units: None,
         strategy_max_units: None,
     };
 
@@ -132,6 +134,8 @@ async fn concurrent_exposure_limit_skips() {
                     stop_loss_state: StopLossState::Initial,
                     worst_price: 1.0,
                     best_price: 1.0,
+                    transition_failed_at: None,
+                    strategy_type: "mean_reversion".to_string(),
                 },
             );
         }
