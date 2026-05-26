@@ -4,8 +4,10 @@ defmodule Opus.Trading.RegimeDetector do
   scalars from the Rust engine.
 
   Polls the Auro `/api/indicators` endpoint every 5 minutes for each
-  (instrument, granularity) pair with an enabled `live_strategies` row.
-  Granularities polled: D, H4, H1, M15. Classifies each pair as:
+  (instrument, granularity) pair required by live strategies in the universe.
+  The required granularities are derived from
+  `Opus.Trading.Granularity.regime_frames_for_entry/1` so regime detection is
+  entry-timeframe aware.
 
     * `:trending`  — ADX >= 30
     * `:choppy`    — ADX < 20
@@ -14,8 +16,7 @@ defmodule Opus.Trading.RegimeDetector do
 
   Choppy threshold follows Wilder's conventional `< 20` (instead of the
   stricter `< 15`) since "no trend" is the diagnostic, not "no movement at
-  all." D is polled for diagnostic use even though the current rules engine
-  gates on H4+H1 only.
+  all."
 
   The classification map is held in GenServer state and read via `get_regime/2`
   or `get_all_regimes/0`. The future rules engine will consume this state to
@@ -28,11 +29,15 @@ defmodule Opus.Trading.RegimeDetector do
 
   alias Opus.Auro.Client, as: Auro
   alias Opus.Repo
+  alias Opus.Support.Polling
+  alias Opus.Trading.Granularity
 
   import Ecto.Query
 
   @poll_interval :timer.minutes(5)
   @initial_delay :timer.seconds(15)
+  @fetch_timeout :timer.seconds(8)
+  @fetch_max_concurrency 12
 
   @adx_trending 30.0
   @adx_choppy 20.0
@@ -73,7 +78,7 @@ defmodule Opus.Trading.RegimeDetector do
   def init(_opts) do
     Logger.info("[RegimeDetector] Started (#{div(@poll_interval, 60_000)}min poll interval)")
 
-    Process.send_after(self(), :poll, @initial_delay)
+    Polling.schedule(self(), @initial_delay)
     {:ok, %{last_run: nil, regimes: %{}, poll_count: 0}}
   end
 
@@ -100,7 +105,7 @@ defmodule Opus.Trading.RegimeDetector do
         "#{summarize(regimes)} across #{map_size(regimes)} pairs"
     )
 
-    Process.send_after(self(), :poll, @poll_interval)
+    Polling.schedule(self(), @poll_interval)
 
     new_state = %{
       state
@@ -113,36 +118,58 @@ defmodule Opus.Trading.RegimeDetector do
   end
 
   # -- Core logic --
-
-  @poll_granularities ~w[D H4 H1 M15]
-
   defp poll do
-    case active_strategy_instruments() do
+    case active_strategy_targets() do
       [] ->
         Logger.info("[RegimeDetector] No active strategies to poll")
         %{}
 
-      instruments ->
-        pairs = for i <- instruments, g <- @poll_granularities, do: {i, g}
+      targets ->
+        pairs =
+          targets
+          |> Enum.flat_map(fn {instrument, entry_granularity} ->
+            Granularity.regime_frames_for_entry(entry_granularity)
+            |> Enum.map(fn regime_granularity -> {instrument, regime_granularity} end)
+          end)
+          |> Enum.uniq()
 
-        Enum.reduce(pairs, %{}, fn {instrument, granularity}, acc ->
-          case Auro.get_indicators(instrument, granularity) do
-            {:ok, response} ->
-              Map.put(acc, {instrument, granularity}, classify(response))
+        pairs
+        |> Task.async_stream(
+          &fetch_regime_pair/1,
+          max_concurrency: @fetch_max_concurrency,
+          timeout: @fetch_timeout,
+          on_timeout: :kill_task,
+          ordered: false
+        )
+        |> Enum.reduce(%{}, fn
+          {:ok, {{instrument, granularity}, data}}, acc ->
+            Map.put(acc, {instrument, granularity}, data)
 
-            {:error, _reason} ->
-              # No buffer for this granularity — skip silently
-              acc
-          end
+          {:ok, nil}, acc ->
+            acc
+
+          {:exit, reason}, acc ->
+            Logger.debug("[RegimeDetector] indicator fetch task exited: #{inspect(reason)}")
+            acc
         end)
     end
   end
 
-  defp active_strategy_instruments do
+  defp fetch_regime_pair({instrument, granularity}) do
+    case Auro.get_indicators(instrument, granularity) do
+      {:ok, response} ->
+        {{instrument, granularity}, classify(response)}
+
+      {:error, _reason} ->
+        # No buffer for this granularity — skip silently
+        nil
+    end
+  end
+
+  defp active_strategy_targets do
     from(s in "live_strategies",
-      where: s.enabled == true,
-      distinct: true,
-      select: s.instrument
+      distinct: [s.instrument, s.granularity],
+      select: {s.instrument, s.granularity}
     )
     |> Repo.all()
   end

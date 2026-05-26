@@ -86,7 +86,7 @@ export function useDashboard() {
 
     async function loadAlgoActivity() {
         try {
-            const data = await api.get<LiveTradesResponse>("/live-trades");
+            const data = await api.get<LiveTradesResponse>("/live/trades");
             algoActivity.value = (data.trades || []).slice(0, 12).map(mapTradeToAlgoEntry);
         } catch (e) {
             console.error("Failed to load algo activity:", e);

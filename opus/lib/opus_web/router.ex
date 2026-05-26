@@ -9,8 +9,9 @@ defmodule OpusWeb.Router do
     pipe_through(:api)
 
     get("/regimes", RegimeController, :index)
+    get("/rules/state", RulesController, :state)
     get("/strategy-suspensions/open", CircuitBreakerController, :open)
-    post("/strategies/:id/reset-circuit-breaker", CircuitBreakerController, :reset)
+    post("/strategy-suspensions/:id/reset", CircuitBreakerController, :reset)
     get("/pipeline", PipelineController, :index)
     post("/pipeline/:config_id/promote", PipelineController, :promote)
   end

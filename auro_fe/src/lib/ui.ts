@@ -60,6 +60,7 @@ export const STRATEGIES_COLUMNS = [
     { key: "win_rate", label: "BT Win%", sortable: true },
     { key: "sharpe_ratio", label: "IS Sharpe", sortable: true },
     { key: "oos_sharpe", label: "OOS Sharpe", sortable: true },
+    { key: "kfold", label: "K-Fold", sortable: true },
     { key: "max_drawdown", label: "DD", sortable: true },
     { key: "num_trades", label: "BT #", sortable: true },
     { key: "live_num_trades", label: "Live #", sortable: true },

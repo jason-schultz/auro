@@ -217,6 +217,16 @@
                                 <span v-else class="text-muted-foreground/30">—</span>
                             </td>
 
+                            <!-- K-Fold pass rate -->
+                            <td :class="cellClass('kfold', 8)">
+                                <template v-if="strategy.kfold_stats">
+                                    <span :class="strategy.kfold_stats.pass_rate >= 0.85 ? 'text-emerald-400' : strategy.kfold_stats.pass_rate >= 0.625 ? 'text-amber-400' : 'text-red-400'">
+                                        {{ strategy.kfold_stats.pass_count }}/{{ strategy.kfold_stats.fold_count }}
+                                    </span>
+                                </template>
+                                <span v-else class="text-muted-foreground/30">—</span>
+                            </td>
+
                             <!-- Drawdown -->
                             <td :class="cellClass('max_drawdown', 8, 'text-red-400')">
                                 <template v-if="strategy.backtest_stats">

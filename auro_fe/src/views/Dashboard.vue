@@ -23,6 +23,11 @@
                 <SignalFeedPanel />
             </div>
 
+            <!-- Rules State -->
+            <div class="lg:col-span-3">
+                <RulesStatePanel />
+            </div>
+
             <!-- Regime Heatmap -->
             <div class="lg:col-span-3">
                 <RegimeHeatmapPanel />
@@ -180,6 +185,7 @@ import EquityCurvePanel from "@/components/dashboard/EquityCurvePanel.vue";
 import OpenPositionsPanel from "@/components/dashboard/OpenPositionsPanel.vue";
 import PerformanceKpisPanel from "@/components/dashboard/PerformanceKpisPanel.vue";
 import RegimeHeatmapPanel from "@/components/dashboard/RegimeHeatmapPanel.vue";
+import RulesStatePanel from "@/components/dashboard/RulesStatePanel.vue";
 import SignalFeedPanel from "@/components/dashboard/SignalFeedPanel.vue";
 import SystemPulseStrip from "@/components/dashboard/SystemPulseStrip.vue";
 import ViewHeader from "@/components/ui/ViewHeader.vue";

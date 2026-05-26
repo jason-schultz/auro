@@ -2,9 +2,10 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::collections::HashMap;
 
+use crate::db::repositories::{live_queries, live_trades as live_trades_repo};
 use crate::engine::rules::Rules;
 use crate::engine::types::{
-    BufferKey, Candle, CandleBuffer, Direction, Granularity, OpenPosition, StopLossState,
+    BufferKey, Candle, CandleBuffer, Granularity, OpenPosition, StopLossState, OHLC,
 };
 use crate::oanda::client::OandaClient;
 use crate::state::AppState;
@@ -49,16 +50,13 @@ pub(crate) async fn run_prefill_buffers(state: &AppState) {
     }
 }
 
-/// Pre-fill candle buffers from the database for all enabled strategies.
+/// Pre-fill candle buffers from the database for all strategy rows.
 /// Loads up to 200 candles per (instrument, granularity) pair.
 async fn prefill_buffers(
     state: &AppState,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    // Get distinct (instrument, granularity) pairs from enabled strategies
-    let instruments: Vec<String> =
-        sqlx::query_scalar("SELECT DISTINCT instrument FROM live_strategies WHERE enabled = true")
-            .fetch_all(&state.db)
-            .await?;
+    // Keep buffers warm for the full strategy universe, not only currently enabled rows.
+    let instruments = live_queries::all_strategy_instruments(&state.db).await?;
 
     let mut count = 0;
 
@@ -98,35 +96,10 @@ async fn prefill_open_positions(
         let trade_id = trade["id"].as_str().ok_or("trade missing id")?;
         let units = trade["currentUnits"].as_str().unwrap_or("0").to_string();
 
-        let row: Option<(
-            uuid::Uuid,
-            String,
-            Direction,
-            f64,
-            String,
-            String,
-            Granularity,
-        )> = sqlx::query_as(
-            "SELECT lt.live_strategy_id, lt.instrument, lt.direction, lt.entry_price, \
-            lt.oanda_trade_id, ls.strategy_type, ls.granularity \
-            FROM live_trades lt \
-            JOIN live_strategies ls ON ls.id = lt.live_strategy_id \
-            WHERE lt.oanda_trade_id = $1 AND lt.status = 'open'",
-        )
-        .bind(trade_id)
-        .fetch_optional(pool)
-        .await?;
+        let row =
+            live_trades_repo::find_open_trade_with_strategy_by_oanda_id(pool, trade_id).await?;
 
-        let Some((
-            strategy_id,
-            instrument,
-            direction,
-            entry_price,
-            db_trade_id,
-            strategy_type,
-            granularity,
-        )) = row
-        else {
+        let Some(row) = row else {
             tracing::warn!(
                 "OANDA has open trade {} but no matching live_trades row — skipping",
                 trade_id
@@ -137,20 +110,22 @@ async fn prefill_open_positions(
         open_positions.insert(
             trade_id.to_string(),
             OpenPosition {
-                strategy_id,
-                trade_id: db_trade_id,
-                instrument,
-                granularity,
-                direction,
-                entry_price,
+                strategy_id: row.live_strategy_id,
+                trade_id: row.oanda_trade_id,
+                instrument: row.instrument,
+                granularity: row.granularity,
+                direction: row.direction,
+                entry_price: row.entry_price,
                 units,
                 stop_loss_state: determine_stop_loss_state(
                     trade,
-                    strategy_type.as_str(),
-                    entry_price,
+                    row.strategy_type.as_str(),
+                    row.entry_price,
                 ),
-                worst_price: entry_price,
-                best_price: entry_price,
+                worst_price: row.entry_price,
+                best_price: row.entry_price,
+                transition_failed_at: None,
+                strategy_type: row.strategy_type,
             },
         );
         count += 1;
@@ -163,21 +138,42 @@ pub(crate) async fn load_instrument_buffers(
     state: &AppState,
     instrument: &str,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    const MTF_GRANULARITIES: &[Granularity] = &[
-        Granularity::M1,
-        Granularity::M5,
-        Granularity::M15,
-        Granularity::H1,
-        Granularity::H4,
-        Granularity::D,
-    ];
-
     let mut built_buffers: Vec<(BufferKey, CandleBuffer)> = Vec::new();
 
-    for granularity in MTF_GRANULARITIES {
-        let rows: Vec<(DateTime<Utc>, f64, f64, f64, f64, i32)> = sqlx::query_as(
+    #[allow(clippy::type_complexity)]
+    for granularity in Granularity::ALL {
+        let rows: Vec<(
+            DateTime<Utc>,
+            f64,
+            f64,
+            f64,
+            f64,
+            i32,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+        )> = sqlx::query_as(
             r#"
-            SELECT timestamp, open, high, low, close, volume
+            SELECT
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                bid_open,
+                bid_high,
+                bid_low,
+                bid_close,
+                ask_open,
+                ask_high,
+                ask_low,
+                ask_close
             FROM candles
             WHERE instrument = $1 AND granularity = $2
             ORDER BY timestamp DESC
@@ -197,19 +193,59 @@ pub(crate) async fn load_instrument_buffers(
         let mut buffer = CandleBuffer::new(granularity.buffer_capacity());
 
         // Rows come in DESC order (newest first), reverse to get chronological order
-        for (time, open, high, low, close, volume) in rows.iter().rev() {
+        for (
+            time,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            bid_open,
+            bid_high,
+            bid_low,
+            bid_close,
+            ask_open,
+            ask_high,
+            ask_low,
+            ask_close,
+        ) in rows.iter().rev()
+        {
+            let bid = match (bid_open, bid_high, bid_low, bid_close) {
+                (Some(open), Some(high), Some(low), Some(close)) => Some(OHLC {
+                    open: *open,
+                    high: *high,
+                    low: *low,
+                    close: *close,
+                }),
+                _ => None,
+            };
+
+            let ask = match (ask_open, ask_high, ask_low, ask_close) {
+                (Some(open), Some(high), Some(low), Some(close)) => Some(OHLC {
+                    open: *open,
+                    high: *high,
+                    low: *low,
+                    close: *close,
+                }),
+                _ => None,
+            };
+
             buffer.push(Candle {
                 time: *time,
-                open: *open,
-                high: *high,
-                low: *low,
-                close: *close,
+                mid: OHLC {
+                    open: *open,
+                    high: *high,
+                    low: *low,
+                    close: *close,
+                },
                 volume: *volume,
+                bid,
+                ask,
             });
         }
 
         if let Some(last) = buffer.candles.last() {
-            buffer.current_mid = last.close;
+            buffer.current_mid = last.mid.close;
         }
 
         tracing::info!(
@@ -296,9 +332,60 @@ fn determine_stop_loss_state(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+    use std::sync::{Arc, Mutex};
+
+    use chrono::{TimeZone, Utc};
+    use lru::LruCache;
+    use sqlx::PgPool;
+    use tokio::sync::broadcast;
+
     use super::remove_instrument_entries;
+    use crate::config::Config;
+    use crate::engine::live::prefill::load_instrument_buffers;
     use crate::engine::types::{CandleBuffer, Granularity};
+    use crate::oanda::client::OandaClient;
+    use crate::state::{AppState, LiveState};
     use std::collections::HashMap;
+
+    fn make_state(db: PgPool) -> AppState {
+        let config = Config {
+            database_url: "postgres://unused".to_string(),
+            oanda_api_key: "test-key".to_string(),
+            oanda_account_id: "test-account".to_string(),
+            oanda_base_url: "http://127.0.0.1:1".to_string(),
+            oanda_stream_url: "http://127.0.0.1:1".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 0,
+        };
+
+        let oanda = OandaClient::new(
+            &config.oanda_base_url,
+            &config.oanda_stream_url,
+            &config.oanda_api_key,
+            &config.oanda_account_id,
+        );
+
+        let (price_tx, _) = broadcast::channel(8);
+
+        AppState {
+            db,
+            config,
+            oanda,
+            start_time: Utc::now(),
+            live: Arc::new(LiveState::new()),
+            price_tx,
+            eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap()))),
+        }
+    }
+
+    async fn test_db_pool() -> PgPool {
+        let db_url = std::env::var("AURO_TEST_DATABASE_URL")
+            .expect("AURO_TEST_DATABASE_URL must be set for DB-backed prefill tests");
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed connecting to AURO_TEST_DATABASE_URL")
+    }
 
     #[test]
     fn remove_instrument_entries_removes_only_target_keys() {
@@ -323,5 +410,85 @@ mod tests {
         assert!(buffers
             .keys()
             .all(|(instrument, _)| instrument.as_str() == "USD_JPY"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL and migrated test DB"]
+    async fn load_instrument_buffers_roundtrips_bid_ask_from_db() {
+        let db = test_db_pool().await;
+        let state = make_state(db.clone());
+
+        let instrument = "TEST_PREFILL_BID_ASK";
+        let ts = Utc.with_ymd_and_hms(2026, 5, 25, 12, 0, 0).unwrap();
+
+        sqlx::query("DELETE FROM candles WHERE instrument = $1 AND granularity = 'H1'")
+            .bind(instrument)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            r#"
+            INSERT INTO candles (
+                instrument,
+                granularity,
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                complete,
+                bid_open,
+                bid_high,
+                bid_low,
+                bid_close,
+                ask_open,
+                ask_high,
+                ask_low,
+                ask_close
+            ) VALUES (
+                $1, 'H1', $2,
+                1.1000, 1.1010, 1.0990, 1.1005,
+                100, true,
+                1.0999, 1.1009, 1.0989, 1.1004,
+                1.1001, 1.1011, 1.0991, 1.1006
+            )
+            "#,
+        )
+        .bind(instrument)
+        .bind(ts)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let loaded = load_instrument_buffers(&state, instrument).await.unwrap();
+        assert!(loaded >= 1);
+
+        let buffers = state.live.buffers.read().await;
+        let key = (instrument.to_string(), Granularity::H1);
+        let buffer = buffers.get(&key).expect("H1 buffer should be prefilled");
+        assert!(!buffer.candles.is_empty());
+
+        let candle = buffer.candles.last().unwrap();
+        let bid = candle.bid.as_ref().expect("bid should be populated");
+        let ask = candle.ask.as_ref().expect("ask should be populated");
+
+        assert_eq!(bid.open, 1.0999);
+        assert_eq!(bid.high, 1.1009);
+        assert_eq!(bid.low, 1.0989);
+        assert_eq!(bid.close, 1.1004);
+        assert_eq!(ask.open, 1.1001);
+        assert_eq!(ask.high, 1.1011);
+        assert_eq!(ask.low, 1.0991);
+        assert_eq!(ask.close, 1.1006);
+
+        drop(buffers);
+
+        sqlx::query("DELETE FROM candles WHERE instrument = $1 AND granularity = 'H1'")
+            .bind(instrument)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 }

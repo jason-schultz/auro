@@ -107,6 +107,10 @@ export function useStrategies() {
                     aVal = a.oos_stats?.oos_sharpe ?? -999;
                     bVal = b.oos_stats?.oos_sharpe ?? -999;
                     break;
+                case "kfold":
+                    aVal = a.kfold_stats?.pass_rate ?? -1;
+                    bVal = b.kfold_stats?.pass_rate ?? -1;
+                    break;
                 case "live_num_trades":
                     aVal = a.live_stats?.num_trades ?? -1;
                     bVal = b.live_stats?.num_trades ?? -1;
@@ -241,7 +245,7 @@ export function useStrategies() {
         resetting.value = strategy.id;
         try {
             await opusApi.post<{ strategy_id: string; cleared_count: number }>(
-                `/strategies/${strategy.id}/reset-circuit-breaker`,
+                `/strategy-suspensions/${strategy.id}/reset`,
                 {},
             );
             await loadStrategies();
