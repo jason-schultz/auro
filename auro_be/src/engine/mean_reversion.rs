@@ -36,9 +36,9 @@ pub fn run(candles: &[Candle], params: &MeanReversionParams) -> Vec<Trade> {
     while i < candles.len() {
         let ma = candles[i - params.ma_period..i]
             .iter()
-            .fold(0.0, |acc, c| acc + c.close)
+            .fold(0.0, |acc, c| acc + c.mid.close)
             / params.ma_period as f64;
-        let close = candles[i].close;
+        let close = candles[i].mid.close;
         let pct_below = (close - ma) / ma;
         if pct_below < params.entry_threshold {
             if params.regime_filter {
@@ -50,10 +50,10 @@ pub fn run(candles: &[Candle], params: &MeanReversionParams) -> Vec<Trade> {
                 }
             }
             let entry_time = candles[i].time;
-            let entry_price = close;
+            let entry_price = candles[i].entry_fill_price(Direction::Long);
             let mut in_trade = true;
             for (j, candle) in candles.iter().enumerate().skip(i + 1) {
-                let exit_price = candle.close;
+                let exit_price = candle.exit_fill_price(Direction::Long);
                 let exit_time = candle.time;
                 let pnl = (exit_price - entry_price) / entry_price;
                 if pnl > params.exit_threshold || pnl < params.stop_loss {
@@ -83,10 +83,12 @@ pub fn run(candles: &[Candle], params: &MeanReversionParams) -> Vec<Trade> {
                 trades.push(Trade {
                     direction: Direction::Long,
                     entry_price,
-                    exit_price: candles.last().unwrap().close,
+                    exit_price: candles.last().unwrap().exit_fill_price(Direction::Long),
                     entry_time,
                     exit_time: candles.last().unwrap().time,
-                    pnl_percent: (candles.last().unwrap().close - entry_price) / entry_price,
+                    pnl_percent: (candles.last().unwrap().exit_fill_price(Direction::Long)
+                        - entry_price)
+                        / entry_price,
                     entry_reason: EntryReason::BelowMA {
                         ma_value: ma,
                         deviation_pct: pct_below,
@@ -128,16 +130,50 @@ pub fn check_entry(closes: &[f64], params: &MeanReversionParams) -> MRSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::types::OHLC;
     use chrono::{Duration, Utc};
 
     fn make_candle(price: f64, minutes_offset: i64) -> Candle {
         Candle {
             time: Utc::now() - Duration::minutes(minutes_offset),
-            open: price,
-            high: price,
-            low: price,
-            close: price,
+            mid: OHLC {
+                open: price,
+                high: price,
+                low: price,
+                close: price,
+            },
             volume: 0,
+            bid: None,
+            ask: None,
+        }
+    }
+
+    fn make_candle_with_symmetric_spread(
+        price: f64,
+        minutes_offset: i64,
+        half_spread: f64,
+    ) -> Candle {
+        Candle {
+            time: Utc::now() - Duration::minutes(minutes_offset),
+            mid: OHLC {
+                open: price,
+                high: price,
+                low: price,
+                close: price,
+            },
+            volume: 0,
+            bid: Some(OHLC {
+                open: price - half_spread,
+                high: price - half_spread,
+                low: price - half_spread,
+                close: price - half_spread,
+            }),
+            ask: Some(OHLC {
+                open: price + half_spread,
+                high: price + half_spread,
+                low: price + half_spread,
+                close: price + half_spread,
+            }),
         }
     }
 
@@ -232,6 +268,44 @@ mod tests {
         assert_eq!(trades.len(), 1);
         assert!(trades[0].pnl_percent < 0.0);
         assert!(matches!(trades[0].exit_reason, ExitReason::StopLoss));
+    }
+
+    #[test]
+    fn test_spread_drag_is_reflected_in_round_trip_pnl() {
+        let params = MeanReversionParams {
+            ma_period: 3,
+            entry_threshold: -0.005,
+            exit_threshold: 0.5,
+            stop_loss: -0.5,
+            regime_filter: false,
+        };
+
+        // Entry triggers on the 4th candle (99.0 vs MA 100.0), then exits at EndOfData.
+        let mid_only = vec![
+            make_candle(100.0, 0),
+            make_candle(100.0, 1),
+            make_candle(100.0, 2),
+            make_candle(99.0, 3),
+            make_candle(99.0, 4),
+        ];
+        let spread_aware = vec![
+            make_candle_with_symmetric_spread(100.0, 0, 0.1),
+            make_candle_with_symmetric_spread(100.0, 1, 0.1),
+            make_candle_with_symmetric_spread(100.0, 2, 0.1),
+            make_candle_with_symmetric_spread(99.0, 3, 0.099),
+            make_candle_with_symmetric_spread(99.0, 4, 0.099),
+        ];
+
+        let baseline = run(&mid_only, &params);
+        let with_spread = run(&spread_aware, &params);
+
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(with_spread.len(), 1);
+        assert!(matches!(with_spread[0].exit_reason, ExitReason::EndOfData));
+
+        assert!(baseline[0].pnl_percent.abs() < 1e-12);
+        assert!(with_spread[0].pnl_percent < baseline[0].pnl_percent);
+        assert!((with_spread[0].pnl_percent - (-0.001998001998)).abs() < 1e-9);
     }
 
     #[test]

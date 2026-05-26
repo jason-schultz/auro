@@ -137,7 +137,7 @@ impl OandaClient {
 
         let mut query: Vec<(&str, String)> = vec![
             ("granularity", granularity.to_string()),
-            ("price", "M".to_string()),
+            ("price", "BAM".to_string()),
         ];
 
         if let Some(c) = count {

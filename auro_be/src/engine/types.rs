@@ -19,15 +19,60 @@ pub struct BollingerBands {
 /// Buffer key: (instrument, granularity)
 pub type BufferKey = (String, Granularity);
 
-#[derive(Debug, Clone)]
-pub struct Candle {
-    pub time: DateTime<Utc>,
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct OHLC {
     pub open: f64,
     pub high: f64,
     pub low: f64,
     pub close: f64,
-    pub volume: i32,
 }
+
+#[derive(Debug, Clone)]
+pub struct Candle {
+    pub time: DateTime<Utc>,
+    pub mid: OHLC,
+    pub volume: i32,
+    pub bid: Option<OHLC>,
+    pub ask: Option<OHLC>,
+}
+
+impl Candle {
+    pub fn entry_fill_price(&self, direction: Direction) -> f64 {
+        match direction {
+            Direction::Long => self.ask.as_ref().map(|a| a.close).unwrap_or(self.mid.close),
+            Direction::Short => self.bid.as_ref().map(|b| b.close).unwrap_or(self.mid.close),
+        }
+    }
+
+    pub fn exit_fill_price(&self, direction: Direction) -> f64 {
+        match direction {
+            Direction::Long => self.bid.as_ref().map(|b| b.close).unwrap_or(self.mid.close),
+            Direction::Short => self.ask.as_ref().map(|a| a.close).unwrap_or(self.mid.close),
+        }
+    }
+
+    pub fn sl_check_price(&self, direction: Direction) -> f64 {
+        match direction {
+            Direction::Long => self.bid.as_ref().map(|b| b.low).unwrap_or(self.mid.low),
+            Direction::Short => self.ask.as_ref().map(|a| a.high).unwrap_or(self.mid.high),
+        }
+    }
+
+    pub fn tp_check_price(&self, direction: Direction) -> f64 {
+        match direction {
+            Direction::Long => self.ask.as_ref().map(|a| a.high).unwrap_or(self.mid.high),
+            Direction::Short => self.bid.as_ref().map(|b| b.low).unwrap_or(self.mid.low),
+        }
+    }
+
+    pub fn directional_open(&self, direction: Direction) -> f64 {
+        match direction {
+            Direction::Long => self.bid.as_ref().map(|b| b.open).unwrap_or(self.mid.open),
+            Direction::Short => self.ask.as_ref().map(|a| a.open).unwrap_or(self.mid.open),
+        }
+    }
+}
+
 /// Generic candle accumulator that works for any timeframe.
 /// Tracks time slot boundaries and emits a close when the slot changes.
 #[derive(Debug, Clone)]
@@ -52,17 +97,33 @@ impl CandleAccumulator {
         slot: u32,
         slot_time: DateTime<Utc>,
         mid: f64,
+        bid: f64,
+        ask: f64,
     ) -> Option<Candle> {
         match (self.current_slot, &mut self.current_candle) {
             (Some(prev_slot), Some(_)) if prev_slot != slot => {
                 let completed = self.current_candle.take();
                 self.current_candle = Some(Candle {
                     time: slot_time,
-                    open: mid,
-                    high: mid,
-                    low: mid,
-                    close: mid,
+                    mid: OHLC {
+                        open: mid,
+                        high: mid,
+                        low: mid,
+                        close: mid,
+                    },
                     volume: 1,
+                    bid: Some(OHLC {
+                        open: bid,
+                        high: bid,
+                        low: bid,
+                        close: bid,
+                    }),
+                    ask: Some(OHLC {
+                        open: ask,
+                        high: ask,
+                        low: ask,
+                        close: ask,
+                    }),
                 });
                 self.current_slot = Some(slot);
                 completed
@@ -71,21 +132,46 @@ impl CandleAccumulator {
             (None, _) => {
                 self.current_candle = Some(Candle {
                     time: slot_time,
-                    open: mid,
-                    high: mid,
-                    low: mid,
-                    close: mid,
+                    mid: OHLC {
+                        open: mid,
+                        high: mid,
+                        low: mid,
+                        close: mid,
+                    },
                     volume: 1,
+                    bid: Some(OHLC {
+                        open: bid,
+                        high: bid,
+                        low: bid,
+                        close: bid,
+                    }),
+                    ask: Some(OHLC {
+                        open: ask,
+                        high: ask,
+                        low: ask,
+                        close: ask,
+                    }),
                 });
                 self.current_slot = Some(slot);
                 None
             }
             (Some(_), Some(candle)) => {
                 // Same slot, update current candle
-                candle.high = candle.high.max(mid);
-                candle.low = candle.low.min(mid);
-                candle.close = mid;
+                candle.mid.high = candle.mid.high.max(mid);
+                candle.mid.low = candle.mid.low.min(mid);
+                candle.mid.close = mid;
                 candle.volume += 1;
+
+                if let Some(bid_ohlc) = candle.bid.as_mut() {
+                    bid_ohlc.high = bid_ohlc.high.max(bid);
+                    bid_ohlc.low = bid_ohlc.low.min(bid);
+                    bid_ohlc.close = bid;
+                }
+                if let Some(ask_ohlc) = candle.ask.as_mut() {
+                    ask_ohlc.high = ask_ohlc.high.max(ask);
+                    ask_ohlc.low = ask_ohlc.low.min(ask);
+                    ask_ohlc.close = ask;
+                }
                 None
             }
             // Shouldn't happen but compile time exhaustive
@@ -126,7 +212,7 @@ impl CandleBuffer {
     }
 
     pub fn closes(&self) -> Vec<f64> {
-        self.candles.iter().map(|c| c.close).collect()
+        self.candles.iter().map(|c| c.mid.close).collect()
     }
 }
 
@@ -205,6 +291,17 @@ pub enum Granularity {
 }
 
 impl Granularity {
+    pub const MTF: &'static [Granularity] = &[Granularity::H4, Granularity::H1, Granularity::M15];
+
+    pub const ALL: &'static [Granularity] = &[
+        Granularity::M1,
+        Granularity::M5,
+        Granularity::M15,
+        Granularity::H1,
+        Granularity::H4,
+        Granularity::D,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Granularity::M1 => "M1",
@@ -317,6 +414,8 @@ pub struct OpenPosition {
     pub stop_loss_state: StopLossState,
     pub worst_price: f64,
     pub best_price: f64,
+    pub transition_failed_at: Option<DateTime<Utc>>,
+    pub strategy_type: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -358,6 +457,54 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    #[test]
+    fn fill_helpers_fallback_to_mid_when_bid_ask_missing() {
+        let c = candle(slot_time(0, 0), 100.0);
+
+        assert_eq!(c.entry_fill_price(Direction::Long), 100.0);
+        assert_eq!(c.entry_fill_price(Direction::Short), 100.0);
+        assert_eq!(c.exit_fill_price(Direction::Long), 100.0);
+        assert_eq!(c.exit_fill_price(Direction::Short), 100.0);
+        assert_eq!(c.sl_check_price(Direction::Long), 100.0);
+        assert_eq!(c.sl_check_price(Direction::Short), 100.0);
+        assert_eq!(c.tp_check_price(Direction::Long), 100.0);
+        assert_eq!(c.tp_check_price(Direction::Short), 100.0);
+        assert_eq!(c.directional_open(Direction::Long), 100.0);
+        assert_eq!(c.directional_open(Direction::Short), 100.0);
+    }
+
+    #[test]
+    fn symmetric_spread_round_trip_costs_about_point_two_percent() {
+        let c = Candle {
+            time: slot_time(0, 0),
+            mid: OHLC {
+                open: 100.0,
+                high: 100.0,
+                low: 100.0,
+                close: 100.0,
+            },
+            volume: 1,
+            bid: Some(OHLC {
+                open: 99.9,
+                high: 99.9,
+                low: 99.9,
+                close: 99.9,
+            }),
+            ask: Some(OHLC {
+                open: 100.1,
+                high: 100.1,
+                low: 100.1,
+                close: 100.1,
+            }),
+        };
+
+        let entry = c.entry_fill_price(Direction::Long);
+        let exit = c.exit_fill_price(Direction::Long);
+        let pnl = (exit - entry) / entry;
+
+        assert!((pnl - (-0.001998001998)).abs() < 1e-9);
+    }
+
     fn slot_time(h: u32, m: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 5, 1, h, m, 0).unwrap()
     }
@@ -365,60 +512,111 @@ mod tests {
     fn candle(time: DateTime<Utc>, close: f64) -> Candle {
         Candle {
             time,
-            open: close,
-            high: close,
-            low: close,
-            close,
+            mid: OHLC {
+                open: close,
+                high: close,
+                low: close,
+                close,
+            },
             volume: 1,
+            bid: None,
+            ask: None,
         }
     }
 
     #[test]
     fn accumulator_returns_none_on_first_tick() {
         let mut acc = CandleAccumulator::new();
-        assert!(acc.on_minute_close(10, slot_time(10, 0), 1.2345).is_none());
+        assert!(acc
+            .on_minute_close(10, slot_time(10, 0), 1.2345, 1.2344, 1.2346)
+            .is_none());
     }
 
     #[test]
     fn accumulator_returns_none_within_same_slot() {
         let mut acc = CandleAccumulator::new();
         let t = slot_time(10, 0);
-        acc.on_minute_close(10, t, 1.2345);
-        assert!(acc.on_minute_close(10, t, 1.2350).is_none());
-        assert!(acc.on_minute_close(10, t, 1.2355).is_none());
+        acc.on_minute_close(10, t, 1.2345, 1.2344, 1.2346);
+        assert!(acc.on_minute_close(10, t, 1.2350, 1.2349, 1.2351).is_none());
+        assert!(acc.on_minute_close(10, t, 1.2355, 1.2354, 1.2356).is_none());
     }
 
     #[test]
     fn accumulator_emits_completed_candle_on_slot_change() {
         let mut acc = CandleAccumulator::new();
         let t10 = slot_time(10, 0);
-        acc.on_minute_close(10, t10, 1.2345);
-        acc.on_minute_close(10, t10, 1.2360);
+        acc.on_minute_close(10, t10, 1.2345, 1.2344, 1.2346);
+        acc.on_minute_close(10, t10, 1.2360, 1.2358, 1.2362);
 
-        let result = acc.on_minute_close(11, slot_time(11, 0), 1.2365).unwrap();
+        let result = acc
+            .on_minute_close(11, slot_time(11, 0), 1.2365, 1.2364, 1.2366)
+            .unwrap();
         assert_eq!(result.time, t10);
-        assert_eq!(result.open, 1.2345);
-        assert_eq!(result.high, 1.2360);
-        assert_eq!(result.low, 1.2345);
-        assert_eq!(result.close, 1.2360);
+        assert_eq!(result.mid.open, 1.2345);
+        assert_eq!(result.mid.high, 1.2360);
+        assert_eq!(result.mid.low, 1.2345);
+        assert_eq!(result.mid.close, 1.2360);
         assert_eq!(result.volume, 2);
+
+        let bid = result.bid.unwrap();
+        let ask = result.ask.unwrap();
+        assert_eq!(bid.open, 1.2344);
+        assert_eq!(bid.high, 1.2358);
+        assert_eq!(bid.low, 1.2344);
+        assert_eq!(bid.close, 1.2358);
+        assert_eq!(ask.open, 1.2346);
+        assert_eq!(ask.high, 1.2362);
+        assert_eq!(ask.low, 1.2346);
+        assert_eq!(ask.close, 1.2362);
     }
 
     #[test]
     fn accumulator_tracks_high_and_low_across_ticks() {
         let mut acc = CandleAccumulator::new();
         let t = slot_time(10, 0);
-        acc.on_minute_close(10, t, 1.2345); // open
-        acc.on_minute_close(10, t, 1.2400); // new high
-        acc.on_minute_close(10, t, 1.2300); // new low
-        acc.on_minute_close(10, t, 1.2350); // close
+        acc.on_minute_close(10, t, 1.2345, 1.2343, 1.2347); // open
+        acc.on_minute_close(10, t, 1.2400, 1.2397, 1.2403); // new high
+        acc.on_minute_close(10, t, 1.2300, 1.2298, 1.2302); // new low
+        acc.on_minute_close(10, t, 1.2350, 1.2348, 1.2352); // close
 
-        let result = acc.on_minute_close(11, slot_time(11, 0), 1.2360).unwrap();
-        assert_eq!(result.open, 1.2345);
-        assert_eq!(result.high, 1.2400);
-        assert_eq!(result.low, 1.2300);
-        assert_eq!(result.close, 1.2350);
+        let result = acc
+            .on_minute_close(11, slot_time(11, 0), 1.2360, 1.2358, 1.2362)
+            .unwrap();
+        assert_eq!(result.mid.open, 1.2345);
+        assert_eq!(result.mid.high, 1.2400);
+        assert_eq!(result.mid.low, 1.2300);
+        assert_eq!(result.mid.close, 1.2350);
         assert_eq!(result.volume, 4);
+    }
+
+    #[test]
+    fn accumulator_tracks_bid_and_ask_ohlc_across_ticks() {
+        let mut acc = CandleAccumulator::new();
+        let t = slot_time(10, 0);
+
+        // Tick 1 initializes open for all sides
+        acc.on_minute_close(10, t, 1.2000, 1.1998, 1.2002);
+        // Tick 2 pushes highs
+        acc.on_minute_close(10, t, 1.2020, 1.2019, 1.2024);
+        // Tick 3 pushes lows and final close
+        acc.on_minute_close(10, t, 1.1980, 1.1977, 1.1983);
+
+        let emitted = acc
+            .on_minute_close(11, slot_time(11, 0), 1.2050, 1.2048, 1.2052)
+            .unwrap();
+
+        let bid = emitted.bid.unwrap();
+        let ask = emitted.ask.unwrap();
+
+        assert_eq!(bid.open, 1.1998);
+        assert_eq!(bid.high, 1.2019);
+        assert_eq!(bid.low, 1.1977);
+        assert_eq!(bid.close, 1.1977);
+
+        assert_eq!(ask.open, 1.2002);
+        assert_eq!(ask.high, 1.2024);
+        assert_eq!(ask.low, 1.1983);
+        assert_eq!(ask.close, 1.1983);
     }
 
     #[test]
@@ -428,20 +626,20 @@ mod tests {
         let t1 = slot_time(1, 0);
         let t2 = slot_time(2, 0);
 
-        acc.on_minute_close(0, t0, 1.1000);
-        acc.on_minute_close(0, t0, 1.1050);
+        acc.on_minute_close(0, t0, 1.1000, 1.0999, 1.1001);
+        acc.on_minute_close(0, t0, 1.1050, 1.1049, 1.1051);
 
-        let first = acc.on_minute_close(1, t1, 1.2000).unwrap();
+        let first = acc.on_minute_close(1, t1, 1.2000, 1.1999, 1.2001).unwrap();
         assert_eq!(first.time, t0);
-        assert_eq!(first.open, 1.1000);
-        assert_eq!(first.close, 1.1050);
+        assert_eq!(first.mid.open, 1.1000);
+        assert_eq!(first.mid.close, 1.1050);
 
-        acc.on_minute_close(1, t1, 1.2200);
+        acc.on_minute_close(1, t1, 1.2200, 1.2198, 1.2202);
 
-        let second = acc.on_minute_close(2, t2, 1.3000).unwrap();
+        let second = acc.on_minute_close(2, t2, 1.3000, 1.2999, 1.3001).unwrap();
         assert_eq!(second.time, t1);
-        assert_eq!(second.open, 1.2000);
-        assert_eq!(second.close, 1.2200);
+        assert_eq!(second.mid.open, 1.2000);
+        assert_eq!(second.mid.close, 1.2200);
     }
 
     #[test]

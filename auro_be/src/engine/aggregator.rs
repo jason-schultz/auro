@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Timelike, Utc};
 
-use crate::engine::types::Candle;
+use crate::engine::types::{Candle, OHLC};
 
 pub fn aggregate_candles(candles: &[Candle], minutes: usize) -> Vec<Candle> {
     let mut aggregated = Vec::new();
@@ -16,14 +16,21 @@ pub fn aggregate_candles(candles: &[Candle], minutes: usize) -> Vec<Candle> {
         let last = chunk.last().unwrap();
         aggregated.push(Candle {
             time,
-            open: first.open,
-            high: chunk
-                .iter()
-                .map(|c| c.high)
-                .fold(f64::NEG_INFINITY, f64::max),
-            low: chunk.iter().map(|c| c.low).fold(f64::INFINITY, f64::min),
-            close: last.close,
+            mid: OHLC {
+                open: first.mid.open,
+                high: chunk
+                    .iter()
+                    .map(|c| c.mid.high)
+                    .fold(f64::NEG_INFINITY, f64::max),
+                low: chunk
+                    .iter()
+                    .map(|c| c.mid.low)
+                    .fold(f64::INFINITY, f64::min),
+                close: last.mid.close,
+            },
             volume: chunk.iter().map(|c| c.volume).sum(),
+            bid: None,
+            ask: None,
         });
     }
     aggregated.sort_by_key(|c| c.time);

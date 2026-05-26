@@ -2,7 +2,7 @@ use chrono::{Duration, Utc};
 use sqlx::PgPool;
 
 use crate::db;
-use crate::engine::types::{Candle, CandleRow, Granularity};
+use crate::engine::types::{Candle, CandleRow, Granularity, OHLC};
 use crate::oanda::client::OandaClient;
 
 const BACKFILL_INSTRUMENTS: &[&str] = &[
@@ -68,11 +68,15 @@ async fn backfill_instrument(
                     complete: c.complete,
                     candle: Candle {
                         time,
-                        open: mid.o.parse().ok()?,
-                        high: mid.h.parse().ok()?,
-                        low: mid.l.parse().ok()?,
-                        close: mid.c.parse().ok()?,
+                        mid: OHLC {
+                            open: mid.o.parse().ok()?,
+                            high: mid.h.parse().ok()?,
+                            low: mid.l.parse().ok()?,
+                            close: mid.c.parse().ok()?,
+                        },
                         volume: c.volume,
+                        bid: c.bid.as_ref().and_then(parse_ohlc),
+                        ask: c.ask.as_ref().and_then(parse_ohlc),
                     },
                 })
             })
@@ -97,4 +101,13 @@ async fn backfill_instrument(
     }
 
     Ok(total_count)
+}
+
+fn parse_ohlc(data: &crate::oanda::models::CandlestickData) -> Option<OHLC> {
+    Some(OHLC {
+        open: data.o.parse().ok()?,
+        high: data.h.parse().ok()?,
+        low: data.l.parse().ok()?,
+        close: data.c.parse().ok()?,
+    })
 }

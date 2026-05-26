@@ -26,7 +26,12 @@ pub struct TrendFollowingParams {
     pub trailing_k: Option<f64>, // ATR multiplier for trailing distance in backtest/live parity
 }
 
-pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
+pub fn run(
+    candles: &[Candle],
+    params: &TrendFollowingParams,
+    effective_confirm_bars: usize,
+    effective_trailing_k: f64,
+) -> Vec<Trade> {
     let mut trades: Vec<Trade> = Vec::new();
     // We need at least slow_period + 1 candles to detect a crossover
     // (we compare current vs previous candles MA relationship)
@@ -34,8 +39,8 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
         return trades;
     }
 
-    let confirm_bars = params.confirm_bars.unwrap_or(3).max(1);
-    let trailing_k = params.trailing_k.unwrap_or(2.5);
+    let confirm_bars = effective_confirm_bars.max(1);
+    let trailing_k = effective_trailing_k;
     let mut i = params.slow_period;
 
     // Calculate the initial MA relationship so we can detect the first cross
@@ -70,7 +75,7 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
             } else {
                 Direction::Short
             };
-            let entry_price = candles[i].close;
+            let entry_price = candles[i].entry_fill_price(direction);
             let entry_time = candles[i].time;
             let entry_reason = if bullish_cross {
                 EntryReason::CrossAbove {
@@ -102,6 +107,10 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
                 Direction::Long => entry_price * (1.0 + params.stop_loss),
                 Direction::Short => entry_price * (1.0 - params.stop_loss),
             };
+            let take_profit_price = params.take_profit.map(|tp| match direction {
+                Direction::Long => entry_price * (1.0 + tp),
+                Direction::Short => entry_price * (1.0 - tp),
+            });
             let mut high_water_mark = entry_price;
 
             if matches!(sl_state, StopLossState::Trailing) {
@@ -117,7 +126,7 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
             let mut exited = false;
 
             for j in i + 1..candles.len() {
-                let close = candles[j].close;
+                let close = candles[j].mid.close;
                 let exit_time = candles[j].time;
 
                 let pct_in_profit = match direction {
@@ -168,14 +177,18 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
                 }
 
                 // SL hit (close-based, against the current dynamic SL price)
+                let sl_trigger_price = candles[j].sl_check_price(direction);
+                let tp_trigger_price = candles[j].tp_check_price(direction);
+
                 let sl_hit = match direction {
-                    Direction::Long => close <= current_sl_price,
-                    Direction::Short => close >= current_sl_price,
+                    Direction::Long => sl_trigger_price <= current_sl_price,
+                    Direction::Short => sl_trigger_price >= current_sl_price,
                 };
 
-                let tp_hit = match params.take_profit {
-                    Some(tp) => pct_in_profit >= tp,
-                    None => false,
+                let tp_hit = match (direction, take_profit_price) {
+                    (Direction::Long, Some(tp_price)) => tp_trigger_price >= tp_price,
+                    (Direction::Short, Some(tp_price)) => tp_trigger_price <= tp_price,
+                    (_, None) => false,
                 };
 
                 // Sister implementation in check_exit(); keep N-bar confirmation logic in sync.
@@ -197,7 +210,7 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
                     //     reached during the gap).
                     // TP: always fills at TP price (we don't claim gap upside — also
                     //     pessimistic).
-                    let bar_open = candles[j].open;
+                    let bar_open = candles[j].directional_open(direction);
                     let (exit_price, exit_reason) = if sl_hit {
                         let reason = match sl_state {
                             StopLossState::Trailing => ExitReason::TrailingStop,
@@ -214,14 +227,12 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
                         };
                         (fill_price, reason)
                     } else if tp_hit {
-                        let tp = params.take_profit.unwrap();
-                        let tp_price = match direction {
-                            Direction::Long => entry_price * (1.0 + tp),
-                            Direction::Short => entry_price * (1.0 - tp),
-                        };
-                        (tp_price, ExitReason::TakeProfit)
+                        (take_profit_price.unwrap(), ExitReason::TakeProfit)
                     } else {
-                        (close, ExitReason::TrendReversal)
+                        (
+                            candles[j].exit_fill_price(direction),
+                            ExitReason::TrendReversal,
+                        )
                     };
 
                     let pnl = match direction {
@@ -246,7 +257,7 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
             }
 
             if !exited {
-                let exit_price = candles[candles.len() - 1].close;
+                let exit_price = candles[candles.len() - 1].exit_fill_price(direction);
                 let exit_time = candles[candles.len() - 1].time;
                 let exit_reason = ExitReason::EndOfData;
                 let pnl = match direction {
@@ -256,10 +267,7 @@ pub fn run(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
                 trades.push(Trade {
                     direction,
                     pnl_percent: pnl,
-                    entry_reason: EntryReason::CrossAbove {
-                        fast_ma: prev_fast,
-                        slow_ma: prev_slow,
-                    },
+                    entry_reason,
                     entry_price,
                     entry_time,
                     exit_price,
@@ -376,7 +384,7 @@ fn trend_reversal_confirmed_candles(
     is_long: bool,
     confirm_bars: usize,
 ) -> Option<(f64, f64)> {
-    let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+    let closes: Vec<f64> = candles.iter().map(|c| c.mid.close).collect();
     trend_reversal_confirmed_closes(&closes, fast_period, slow_period, is_long, confirm_bars)
 }
 
@@ -388,7 +396,7 @@ fn atr_trailing_distance(candles: &[Candle], current_price: f64, trailing_k: f64
 fn ma(candles: &[Candle], end: usize, period: usize) -> f64 {
     candles[end - period..end]
         .iter()
-        .map(|c| c.close)
+        .map(|c| c.mid.close)
         .sum::<f64>()
         / period as f64
 }
@@ -398,6 +406,7 @@ mod tests {
     use std::iter::repeat_n;
 
     use super::*;
+    use crate::engine::types::OHLC;
     use chrono::{Duration, Utc};
 
     fn reversal_flag(
@@ -446,12 +455,51 @@ mod tests {
         let base = Utc::now();
         Candle {
             time: base + Duration::hours(hours_offset),
-            open: price,
-            high: price,
-            low: price,
-            close: price,
+            mid: OHLC {
+                open: price,
+                high: price,
+                low: price,
+                close: price,
+            },
             volume: 100,
+            bid: None,
+            ask: None,
         }
+    }
+
+    fn with_symmetric_spread(candles: &[Candle], half_spread_ratio: f64) -> Vec<Candle> {
+        candles
+            .iter()
+            .map(|c| {
+                let half = c.mid.close * half_spread_ratio;
+                Candle {
+                    time: c.time,
+                    mid: c.mid.clone(),
+                    volume: c.volume,
+                    bid: Some(OHLC {
+                        open: c.mid.open - half,
+                        high: c.mid.high - half,
+                        low: c.mid.low - half,
+                        close: c.mid.close - half,
+                    }),
+                    ask: Some(OHLC {
+                        open: c.mid.open + half,
+                        high: c.mid.high + half,
+                        low: c.mid.low + half,
+                        close: c.mid.close + half,
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    fn run_with_effective(candles: &[Candle], params: &TrendFollowingParams) -> Vec<Trade> {
+        run(
+            candles,
+            params,
+            params.confirm_bars.unwrap_or(3),
+            params.trailing_k.unwrap_or(2.5),
+        )
     }
 
     #[test]
@@ -488,7 +536,7 @@ mod tests {
             trailing_k: None,
         };
 
-        let trades = run(&candles, &params);
+        let trades = run_with_effective(&candles, &params);
         assert!(!trades.is_empty(), "Should have at least one trade");
 
         // Find the first long trade
@@ -537,7 +585,7 @@ mod tests {
             trailing_k: None,
         };
 
-        let trades = run(&candles, &params);
+        let trades = run_with_effective(&candles, &params);
         assert!(!trades.is_empty(), "Should have at least one trade");
 
         let long_reversal = trades.iter().find(|t| {
@@ -575,11 +623,15 @@ mod tests {
         let base_time = Utc::now();
         candles.push(Candle {
             time: base_time + Duration::hours(65),
-            open: 1.265, // above the ~1.2348 SL
-            high: 1.265,
-            low: 1.20,
-            close: 1.20, // bar closed below SL
+            mid: OHLC {
+                open: 1.265, // above the ~1.2348 SL
+                high: 1.265,
+                low: 1.20,
+                close: 1.20, // bar closed below SL
+            },
             volume: 100,
+            bid: None,
+            ask: None,
         });
 
         let params = TrendFollowingParams {
@@ -592,7 +644,7 @@ mod tests {
             trailing_k: None,
         };
 
-        let trades = run(&candles, &params);
+        let trades = run_with_effective(&candles, &params);
 
         let stop_trade = trades.iter().find(|t| {
             matches!(t.direction, Direction::Long) && matches!(t.exit_reason, ExitReason::StopLoss)
@@ -635,11 +687,15 @@ mod tests {
         let base_time = Utc::now();
         candles.push(Candle {
             time: base_time + Duration::hours(65),
-            open: 1.20,
-            high: 1.20,
-            low: 1.18,
-            close: 1.19,
+            mid: OHLC {
+                open: 1.20,
+                high: 1.20,
+                low: 1.18,
+                close: 1.19,
+            },
             volume: 100,
+            bid: None,
+            ask: None,
         });
 
         let params = TrendFollowingParams {
@@ -652,7 +708,7 @@ mod tests {
             trailing_k: None,
         };
 
-        let trades = run(&candles, &params);
+        let trades = run_with_effective(&candles, &params);
 
         let stop_trade = trades
             .iter()
@@ -671,6 +727,42 @@ mod tests {
             "Gap fill should be worse than -2% SL, got {}",
             stop_trade.pnl_percent
         );
+    }
+
+    #[test]
+    fn test_spread_drag_is_reflected_in_end_of_data_pnl() {
+        // Sequence is crafted to create a bullish cross on the last candle.
+        // With no spread, entry and EndOfData exit happen on the same mid price (flat PnL).
+        // With spread, entry uses ask and exit uses bid, creating a small negative drag.
+        let closes = [1.0, 1.0, 1.0, 1.0, 2.0, 2.0];
+        let mid_only: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| make_candle(*p, i as i64))
+            .collect();
+        let spread_aware = with_symmetric_spread(&mid_only, 0.001); // 10 bps half-spread
+
+        let params = TrendFollowingParams {
+            fast_period: 2,
+            slow_period: 3,
+            stop_loss: -0.50,
+            take_profit: None,
+            regime_filter: false,
+            confirm_bars: None,
+            trailing_k: None,
+        };
+
+        let baseline = run_with_effective(&mid_only, &params);
+        let with_spread = run_with_effective(&spread_aware, &params);
+
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(with_spread.len(), 1);
+        assert!(matches!(baseline[0].exit_reason, ExitReason::EndOfData));
+        assert!(matches!(with_spread[0].exit_reason, ExitReason::EndOfData));
+
+        assert!(baseline[0].pnl_percent.abs() < 1e-12);
+        assert!(with_spread[0].pnl_percent < baseline[0].pnl_percent);
+        assert!((with_spread[0].pnl_percent - (-0.001998001998)).abs() < 1e-9);
     }
 
     #[test]
@@ -703,7 +795,7 @@ mod tests {
             trailing_k: None,
         };
 
-        let trades = run(&candles, &params);
+        let trades = run_with_effective(&candles, &params);
 
         let long_trade = trades
             .iter()
@@ -759,7 +851,7 @@ mod tests {
             trailing_k: None,
         };
 
-        let trades = run(&candles, &params);
+        let trades = run_with_effective(&candles, &params);
 
         let long_trade = trades
             .iter()
@@ -904,8 +996,8 @@ mod tests {
                             .map(|(idx, price)| make_candle(*price, idx as i64))
                             .collect();
 
-                        let trades_confirm_1 = run(&candles, &params_confirm_1);
-                        let trades_confirm_3 = run(&candles, &params_confirm_3);
+                        let trades_confirm_1 = run_with_effective(&candles, &params_confirm_1);
+                        let trades_confirm_3 = run_with_effective(&candles, &params_confirm_3);
 
                         let exits_1 = trades_confirm_1
                             .iter()
@@ -929,5 +1021,54 @@ mod tests {
             found.is_some(),
             "expected at least one noisy tail where confirm_bars changes backtest exits"
         );
+    }
+
+    #[test]
+    fn backtest_and_live_use_same_confirm_bars_for_same_buffer() {
+        let mut candles = Vec::new();
+
+        for i in 0..50 {
+            candles.push(make_candle(1.3000 - (i as f64 * 0.001), i));
+        }
+
+        for i in 50..80 {
+            candles.push(make_candle(1.2500 + ((i - 50) as f64 * 0.0008), i));
+        }
+
+        for i in 80..130 {
+            candles.push(make_candle(1.2740 - ((i - 80) as f64 * 0.0008), i));
+        }
+
+        let params = TrendFollowingParams {
+            fast_period: 5,
+            slow_period: 20,
+            stop_loss: -0.15,
+            take_profit: Some(0.50),
+            regime_filter: false,
+            confirm_bars: Some(5),
+            trailing_k: Some(2.5),
+        };
+
+        let trades = run_with_effective(&candles, &params);
+        let trade = trades
+            .iter()
+            .find(|t| matches!(t.direction, Direction::Long))
+            .expect("expected a long trade");
+
+        let exit_idx = candles
+            .iter()
+            .position(|c| c.time == trade.exit_time)
+            .expect("expected exit candle to be present in input");
+
+        let closes: Vec<f64> = candles[..=exit_idx].iter().map(|c| c.mid.close).collect();
+        let live_signal = check_exit(
+            &closes,
+            &params,
+            true,
+            params.confirm_bars.expect("confirm_bars must be set"),
+        );
+
+        assert!(matches!(trade.exit_reason, ExitReason::TrendReversal));
+        assert!(matches!(live_signal, TFSignal::ExitTrendReversal { .. }));
     }
 }

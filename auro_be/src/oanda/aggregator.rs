@@ -4,36 +4,63 @@ use std::collections::HashMap;
 use tokio::sync::broadcast;
 
 use crate::db;
-use crate::engine::types::{Candle, CandleRow, Granularity};
+use crate::engine::types::{Candle, CandleRow, Granularity, OHLC};
 use crate::oanda::models::StreamMessage;
 
 struct BarBuilder {
     instrument: String,
     timestamp: chrono::DateTime<chrono::Utc>,
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
+    mid: OHLC,
+    bid: OHLC,
+    ask: OHLC,
     tick_count: i32,
 }
 
 impl BarBuilder {
-    fn new(instrument: &str, timestamp: chrono::DateTime<chrono::Utc>, price: f64) -> Self {
+    fn new(
+        instrument: &str,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        mid: f64,
+        bid: f64,
+        ask: f64,
+    ) -> Self {
         Self {
             instrument: instrument.to_string(),
             timestamp,
-            open: price,
-            high: price,
-            low: price,
-            close: price,
+            mid: OHLC {
+                open: mid,
+                high: mid,
+                low: mid,
+                close: mid,
+            },
+            bid: OHLC {
+                open: bid,
+                high: bid,
+                low: bid,
+                close: bid,
+            },
+            ask: OHLC {
+                open: ask,
+                high: ask,
+                low: ask,
+                close: ask,
+            },
             tick_count: 1,
         }
     }
 
-    fn update(&mut self, price: f64) {
-        self.high = self.high.max(price);
-        self.low = self.low.min(price);
-        self.close = price;
+    fn update(&mut self, mid: f64, bid: f64, ask: f64) {
+        self.mid.high = self.mid.high.max(mid);
+        self.mid.low = self.mid.low.min(mid);
+        self.mid.close = mid;
+
+        self.bid.high = self.bid.high.max(bid);
+        self.bid.low = self.bid.low.min(bid);
+        self.bid.close = bid;
+
+        self.ask.high = self.ask.high.max(ask);
+        self.ask.low = self.ask.low.min(ask);
+        self.ask.close = ask;
         self.tick_count += 1;
     }
 
@@ -44,11 +71,10 @@ impl BarBuilder {
             complete: true,
             candle: Candle {
                 time: self.timestamp,
-                open: self.open,
-                high: self.high,
-                low: self.low,
-                close: self.close,
+                mid: self.mid.clone(),
                 volume: self.tick_count,
+                bid: Some(self.bid.clone()),
+                ask: Some(self.ask.clone()),
             },
         }
     }
@@ -93,7 +119,7 @@ pub fn spawn_aggregator(mut rx: broadcast::Receiver<StreamMessage>, pool: PgPool
 
                     match bars.get_mut(&price.instrument) {
                         Some(bar) if bar.timestamp == minute => {
-                            bar.update(mid);
+                            bar.update(mid, bid, ask);
                         }
                         Some(bar) => {
                             // Minute rolled over — save the completed bar
@@ -113,12 +139,12 @@ pub fn spawn_aggregator(mut rx: broadcast::Receiver<StreamMessage>, pool: PgPool
                             }
 
                             // Start new bar
-                            *bar = BarBuilder::new(&price.instrument, minute, mid);
+                            *bar = BarBuilder::new(&price.instrument, minute, mid, bid, ask);
                         }
                         None => {
                             bars.insert(
                                 price.instrument.clone(),
-                                BarBuilder::new(&price.instrument, minute, mid),
+                                BarBuilder::new(&price.instrument, minute, mid, bid, ask),
                             );
                         }
                     }

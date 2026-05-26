@@ -25,31 +25,31 @@ for instrument in "${INSTRUMENTS[@]}"; do
     curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=D&days=2920" > /dev/null
 done
 
-# echo "=== Backfilling H1 candles (8 years) ==="
-# for instrument in "${INSTRUMENTS[@]}"; do
-#     echo "--- ${instrument} H1 ---"
-#     curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=H1&days=2920" > /dev/null
-# done
+echo "=== Backfilling H1 candles (8 years) ==="
+for instrument in "${INSTRUMENTS[@]}"; do
+    echo "--- ${instrument} H1 ---"
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=H1&days=2920" > /dev/null
+done
 
-# echo "=== Backfilling H4 candles (8 years) ==="
-# for instrument in "${INSTRUMENTS[@]}"; do
-#     echo "--- ${instrument} H4 ---"
-#     curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=H4&days=2920" > /dev/null
-# done
+echo "=== Backfilling H4 candles (8 years) ==="
+for instrument in "${INSTRUMENTS[@]}"; do
+    echo "--- ${instrument} H4 ---"
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=H4&days=2920" > /dev/null
+done
 
-# echo ""
-# echo "=== Backfilling M15 candles (2 years) ==="
-# for instrument in "${INSTRUMENTS[@]}"; do
-#     echo "--- ${instrument} M15 ---"
-#     curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=M15&days=730" > /dev/null
-# done
+echo ""
+echo "=== Backfilling M15 candles (2 years) ==="
+for instrument in "${INSTRUMENTS[@]}"; do
+    echo "--- ${instrument} M15 ---"
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=M15&days=730" > /dev/null
+done
 
-# echo ""
-# echo "=== Backfilling M5 candles (2 years) ==="
-# for instrument in "${INSTRUMENTS[@]}"; do
-#     echo "--- ${instrument} M5 ---"
-#     curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=M5&days=730" > /dev/null
-# done
+echo ""
+echo "=== Backfilling M5 candles (2 years) ==="
+for instrument in "${INSTRUMENTS[@]}"; do
+    echo "--- ${instrument} M5 ---"
+    curl -s -X POST "http://localhost:3000/api/backtest/backfill?instrument=${instrument}&granularity=M5&days=730" > /dev/null
+done
 
 echo ""
 echo "=== Backfill complete ==="

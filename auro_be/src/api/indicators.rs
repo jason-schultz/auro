@@ -92,7 +92,7 @@ pub async fn get_indicators(
         instrument,
         granularity,
         buffer_size: candles.len(),
-        last_close: last_candle.map(|c| c.close),
+        last_close: last_candle.map(|c| c.mid.close),
         last_close_time: last_candle.map(|c| c.time),
         current_mid: buffer.current_mid,
         indicators: scalars,

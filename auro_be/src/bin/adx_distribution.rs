@@ -2,7 +2,7 @@ use anyhow::Context;
 use auro::config::Config;
 use auro::db::create_pool;
 use auro::engine::indicators::adx;
-use auro::engine::types::Candle;
+use auro::engine::types::{Candle, OHLC};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::collections::BTreeMap;
@@ -92,11 +92,15 @@ async fn load_candles(
         .into_iter()
         .map(|(time, open, high, low, close, volume)| Candle {
             time,
-            open,
-            high,
-            low,
-            close,
+            mid: OHLC {
+                open,
+                high,
+                low,
+                close,
+            },
             volume,
+            bid: None,
+            ask: None,
         })
         .collect())
 }
