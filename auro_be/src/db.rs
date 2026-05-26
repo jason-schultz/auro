@@ -3,6 +3,8 @@ use sqlx::PgPool;
 
 use crate::engine::types::{CandleRow, SignalAction, SignalReport};
 
+pub mod repositories;
+
 pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -19,10 +21,23 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
 }
 
 pub async fn upsert_candle(pool: &PgPool, row: &CandleRow) -> Result<(), sqlx::Error> {
+    let bid_open = row.candle.bid.as_ref().map(|o| o.open);
+    let bid_high = row.candle.bid.as_ref().map(|o| o.high);
+    let bid_low = row.candle.bid.as_ref().map(|o| o.low);
+    let bid_close = row.candle.bid.as_ref().map(|o| o.close);
+    let ask_open = row.candle.ask.as_ref().map(|o| o.open);
+    let ask_high = row.candle.ask.as_ref().map(|o| o.high);
+    let ask_low = row.candle.ask.as_ref().map(|o| o.low);
+    let ask_close = row.candle.ask.as_ref().map(|o| o.close);
+
     sqlx::query(
         r#"
-        INSERT INTO candles (instrument, granularity, timestamp, open, high, low, close, volume, complete)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO candles (
+            instrument, granularity, timestamp, open, high, low, close, volume, complete,
+            bid_open, bid_high, bid_low, bid_close,
+            ask_open, ask_high, ask_low, ask_close
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         ON CONFLICT (instrument, granularity, timestamp)
         DO UPDATE SET
             open = EXCLUDED.open,
@@ -30,18 +45,34 @@ pub async fn upsert_candle(pool: &PgPool, row: &CandleRow) -> Result<(), sqlx::E
             low = EXCLUDED.low,
             close = EXCLUDED.close,
             volume = EXCLUDED.volume,
-            complete = EXCLUDED.complete
+            complete = EXCLUDED.complete,
+            bid_open = EXCLUDED.bid_open,
+            bid_high = EXCLUDED.bid_high,
+            bid_low = EXCLUDED.bid_low,
+            bid_close = EXCLUDED.bid_close,
+            ask_open = EXCLUDED.ask_open,
+            ask_high = EXCLUDED.ask_high,
+            ask_low = EXCLUDED.ask_low,
+            ask_close = EXCLUDED.ask_close
         "#,
     )
     .bind(&row.instrument)
     .bind(row.granularity.as_str())
     .bind(row.candle.time)
-    .bind(row.candle.open)
-    .bind(row.candle.high)
-    .bind(row.candle.low)
-    .bind(row.candle.close)
+    .bind(row.candle.mid.open)
+    .bind(row.candle.mid.high)
+    .bind(row.candle.mid.low)
+    .bind(row.candle.mid.close)
     .bind(row.candle.volume)
     .bind(row.complete)
+    .bind(bid_open)
+    .bind(bid_high)
+    .bind(bid_low)
+    .bind(bid_close)
+    .bind(ask_open)
+    .bind(ask_high)
+    .bind(ask_low)
+    .bind(ask_close)
     .execute(pool)
     .await?;
 

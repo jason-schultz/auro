@@ -1,9 +1,11 @@
 pub mod aggregator;
 pub mod grid;
 pub mod indicators;
+pub mod kfold;
 pub mod live;
 pub mod mean_reversion;
 pub mod pipeline;
+pub mod risk_defaults;
 pub mod rules;
 pub mod stats;
 pub mod trend_following;

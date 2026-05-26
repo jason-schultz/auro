@@ -40,6 +40,7 @@ defmodule OpusWeb.JournalControllerTest do
 
     Repo.insert_all(LiveTrade, [
       %{
+        id: "cccccccc-cccc-cccc-cccc-ccccccccccc1",
         live_strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         instrument: "XAU_USD",
         pnl: 100.0,
@@ -52,6 +53,7 @@ defmodule OpusWeb.JournalControllerTest do
         updated_at: now
       },
       %{
+        id: "cccccccc-cccc-cccc-cccc-ccccccccccc2",
         live_strategy_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
         instrument: "XAU_USD",
         pnl: -50.0,
@@ -64,6 +66,7 @@ defmodule OpusWeb.JournalControllerTest do
         updated_at: now
       },
       %{
+        id: "cccccccc-cccc-cccc-cccc-ccccccccccc3",
         live_strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         instrument: "WTICO_USD",
         pnl: 0.0,

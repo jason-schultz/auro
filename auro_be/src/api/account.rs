@@ -153,6 +153,26 @@ pub async fn get_open_trades(State(state): State<AppState>) -> AppResult<Json<Va
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<f64>().ok());
 
+            let trailing_stop_loss_price = t.get("trailingStopLossOrder").and_then(|tso| {
+                // OANDA sometimes provides the current trigger value directly
+                tso.get("trailingStopValue")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    // Fall back to computing from distance + current price
+                    .or_else(|| {
+                        let distance = tso
+                            .get("distance")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<f64>().ok())?;
+                        let cp = current_price?;
+                        Some(if direction == "Long" {
+                            cp - distance
+                        } else {
+                            cp + distance
+                        })
+                    })
+            });
+
             let stop_loss_state = open_pos_map
                 .get(&trade_id)
                 .map(|p| p.stop_loss_state.as_str().to_string())
@@ -184,6 +204,7 @@ pub async fn get_open_trades(State(state): State<AppState>) -> AppResult<Json<Va
                 "stop_loss_state": stop_loss_state,
                 "stop_loss_price": stop_loss_price,
                 "take_profit_price": take_profit_price,
+                "trailing_stop_loss_price": trailing_stop_loss_price,
                 "entry_time": entry_time,
                 "strategy_id": strategy_id,
                 "granularity": granularity,

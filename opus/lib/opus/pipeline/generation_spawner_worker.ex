@@ -124,7 +124,13 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
       [] ->
         1..@children_per_gen
         |> Enum.each(fn _ ->
-          child_params = mutate_params(parent.strategy_type, parent.parameters, next_gen)
+          child_params =
+            mutate_params(
+              parent.strategy_type,
+              parent.parameters,
+              parent.granularity,
+              next_gen
+            )
 
           attrs = %{
             instrument: parent.instrument,
@@ -161,7 +167,7 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
   # Mutation — Gaussian with linearly-decaying sigma
   # ---------------------------------------------------------------------------
 
-  defp mutate_params("mean_reversion", params, generation) do
+  defp mutate_params("mean_reversion", params, _granularity, generation) do
     sf = sigma_fraction(generation)
 
     %{
@@ -173,20 +179,32 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
     }
   end
 
-  defp mutate_params("trend_following", params, generation) do
+  defp mutate_params("trend_following", params, granularity, generation) do
     sf = sigma_fraction(generation)
     fast = mutate_integer(params["fast_period"], sf, 3, 50)
     # Ensure slow > fast by at least 2
     slow = max(mutate_integer(params["slow_period"], sf, 10, 200), fast + 2)
+    default_confirm = default_exit_confirm_bars_for(granularity)
 
     %{
       "fast_period" => fast,
       "slow_period" => slow,
       "stop_loss" => mutate_float(params["stop_loss"], sf, -0.10, -0.001),
       "take_profit" => mutate_optional_float(params["take_profit"], sf, 0.005, 0.20),
+      "confirm_bars" => mutate_integer(params["confirm_bars"] || default_confirm, sf, 1, 60),
+      "trailing_k" => mutate_float(params["trailing_k"] || 2.5, sf, 1.0, 5.0),
       "regime_filter" => true
     }
   end
+
+  # Keep in sync with auro_be/src/engine/risk_defaults.rs default_exit_confirm_bars/1.
+  defp default_exit_confirm_bars_for("M1"), do: 60
+  defp default_exit_confirm_bars_for("M5"), do: 24
+  defp default_exit_confirm_bars_for("M15"), do: 12
+  defp default_exit_confirm_bars_for("H1"), do: 4
+  defp default_exit_confirm_bars_for("H4"), do: 3
+  defp default_exit_confirm_bars_for("D"), do: 2
+  defp default_exit_confirm_bars_for(_), do: 4
 
   # sigma decays linearly: 20% at gen 1 → 4% at gen 5
   defp sigma_fraction(generation) do
@@ -278,7 +296,7 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
     if oos_sharpe <= 0.0 do
       0.0
     else
-      retention_capped = min(retention, 1.5)
+      retention_capped = max(0.0, min(retention, 1.5))
       oos_sharpe * retention_capped * :math.log(oos_trades + 1) * profitable_pct
     end
   end

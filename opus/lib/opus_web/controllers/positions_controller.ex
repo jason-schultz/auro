@@ -8,30 +8,10 @@ defmodule OpusWeb.PositionsController do
   def sparkline(conn, %{"trade_id" => trade_id} = params) do
     bars = parse_bars(Map.get(params, "bars"))
 
-    with {:ok, %{instrument: instrument, entry_time: entry_time}} <- fetch_trade_context(trade_id) do
-      rows =
-        from(c in "candles",
-          where:
-            c.instrument == ^instrument and c.granularity == "M1" and c.timestamp >= ^entry_time,
-          order_by: [desc: c.timestamp],
-          limit: ^bars,
-          select: [c.timestamp, c.open, c.high, c.low, c.close, c.volume]
-        )
-        |> Repo.all()
-        |> Enum.reverse()
-
-      candles =
-        Enum.map(rows, fn [timestamp, open, high, low, close, volume] ->
-          %{
-            timestamp: timestamp,
-            open: open,
-            high: high,
-            low: low,
-            close: close,
-            volume: volume
-          }
-        end)
-
+    with {:ok, %{instrument: instrument, entry_time: entry_time}} <-
+           fetch_trade_context(trade_id),
+         rows <- fetch_candles(instrument, entry_time, bars),
+         candles <- Enum.map(rows, &row_to_candle/1) do
       json(conn, %{trade_id: trade_id, instrument: instrument, bars: bars, candles: candles})
     else
       {:error, :not_found} ->
@@ -39,6 +19,28 @@ defmodule OpusWeb.PositionsController do
         |> put_status(404)
         |> json(%{error: "trade not found"})
     end
+  end
+
+  defp fetch_candles(instrument, entry_time, bars) do
+    from(c in "candles",
+      where: c.instrument == ^instrument and c.granularity == "M1" and c.timestamp >= ^entry_time,
+      order_by: [desc: c.timestamp],
+      limit: ^bars,
+      select: [c.timestamp, c.open, c.high, c.low, c.close, c.volume]
+    )
+    |> Repo.all()
+    |> Enum.reverse()
+  end
+
+  defp row_to_candle([timestamp, open, high, low, close, volume]) do
+    %{
+      timestamp: timestamp,
+      open: open,
+      high: high,
+      low: low,
+      close: close,
+      volume: volume
+    }
   end
 
   defp parse_bars(nil), do: 60

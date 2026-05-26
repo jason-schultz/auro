@@ -4,7 +4,7 @@ defmodule Opus.Pipeline.MonteCarloWorker do
 
   Non-evo configs (no lineage_id in args):
     - pass → promote to live_strategies
-    - fail → enqueue OllamaIterationWorker
+    - fail → terminal (no follow-up job)
 
   Evo configs (lineage_id present):
     - pass → compute + save score, insert GenerationSpawnerWorker
@@ -69,17 +69,6 @@ defmodule Opus.Pipeline.MonteCarloWorker do
                 evo_generation: evo_generation
               })
             )
-        else
-          :ok
-          # {:ok, _job} = :ok
-          # Oban.insert(
-          #   OllamaIterationWorker.new(%{
-          #     config_id: config_id,
-          #     depth: depth,
-          #     failure_reason: reason,
-          #     stats: stats
-          #   })
-          # )
         end
 
         :ok

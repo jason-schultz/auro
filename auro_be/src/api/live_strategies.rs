@@ -6,20 +6,12 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::db::repositories::{
+    live_queries, live_strategies as live_strategies_repo, live_trades as live_trades_repo,
+};
 use crate::engine::live::prefill::{load_instrument_buffers, unload_instrument_buffers};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
-
-#[derive(sqlx::FromRow)]
-struct LiveAggregateRow {
-    strategy_id: Uuid,
-    num_trades: i64,
-    wins: i64,
-    losses: i64,
-    total_return: f64,
-    avg_win: f64,
-    avg_loss: f64,
-}
 
 /// Aggregate closed-trade stats for the given strategy ids. Returns a map keyed by
 /// strategy id; strategies with no closed trades are absent from the map.
@@ -27,28 +19,7 @@ async fn fetch_live_aggregates(
     pool: &PgPool,
     strategy_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Value>, sqlx::Error> {
-    if strategy_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let rows: Vec<LiveAggregateRow> = sqlx::query_as(
-        r#"
-        SELECT
-            live_strategy_id AS strategy_id,
-            COUNT(*)::BIGINT AS num_trades,
-            COUNT(*) FILTER (WHERE pnl_percent > 0)::BIGINT AS wins,
-            COUNT(*) FILTER (WHERE pnl_percent <= 0)::BIGINT AS losses,
-            COALESCE(SUM(pnl_percent), 0)::FLOAT8 AS total_return,
-            COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent > 0), 0)::FLOAT8 AS avg_win,
-            COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent <= 0), 0)::FLOAT8 AS avg_loss
-        FROM live_trades
-        WHERE status = 'closed' AND live_strategy_id = ANY($1)
-        GROUP BY live_strategy_id
-        "#,
-    )
-    .bind(strategy_ids)
-    .fetch_all(pool)
-    .await?;
+    let rows = live_trades_repo::fetch_live_aggregates(pool, strategy_ids).await?;
 
     let map = rows
         .into_iter()
@@ -81,33 +52,25 @@ async fn instrument_buffers_needed(
     instrument: &str,
     exclude_strategy_id: Option<Uuid>,
 ) -> AppResult<bool> {
-    // Any other enabled strategy on this instrument?
-    let enabled_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM live_strategies \
-         WHERE instrument = $1 AND enabled = true \
-         AND ($2::uuid IS NULL OR id != $2)",
+    // Any other strategy row on this instrument?
+    let strategy_count = live_queries::strategy_count_for_instrument_excluding(
+        pool,
+        instrument,
+        exclude_strategy_id,
     )
-    .bind(instrument)
-    .bind(exclude_strategy_id)
-    .fetch_one(pool)
     .await
     .map_err(AppError::Database)?;
 
-    if enabled_count.0 > 0 {
+    if strategy_count > 0 {
         return Ok(true);
     }
 
     // Any open position on this instrument?
-    let open_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM live_trades \
-         WHERE instrument = $1 AND status = 'open'",
-    )
-    .bind(instrument)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
+    let open_count = live_queries::open_trade_count_for_instrument(pool, instrument)
+        .await
+        .map_err(AppError::Database)?;
 
-    Ok(open_count.0 > 0)
+    Ok(open_count > 0)
 }
 
 #[derive(Deserialize)]
@@ -163,38 +126,15 @@ pub async fn list_live_strategies(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
 ) -> AppResult<Json<Value>> {
-    // Query 1: fetch live strategies (10 columns, well under sqlx tuple limit of 16)
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            String,
-            String,
-            String,
-            Value,
-            bool,
-            String,
-            chrono::DateTime<chrono::Utc>,
-            chrono::DateTime<chrono::Utc>,
-            Option<Uuid>,
-        ),
-    >(
-        r#"
-        SELECT id, strategy_type, instrument, granularity, parameters,
-               enabled, max_position_size, created_at, updated_at, backtest_run_id
-        FROM live_strategies
-        ORDER BY instrument, strategy_type
-        "#,
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(AppError::Database)?;
+    let rows = live_strategies_repo::list_live_strategies(&state.db)
+        .await
+        .map_err(AppError::Database)?;
 
     // Collect backtest_run_ids that need stats
-    let backtest_ids: Vec<Uuid> = rows.iter().filter_map(|r| r.9).collect();
+    let backtest_ids: Vec<Uuid> = rows.iter().filter_map(|r| r.backtest_run_id).collect();
 
     // Query 2a: batch-fetch live aggregate stats for the strategies we have
-    let strategy_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+    let strategy_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
     let live_stats_map = fetch_live_aggregates(&state.db, &strategy_ids)
         .await
         .map_err(AppError::Database)?;
@@ -202,32 +142,21 @@ pub async fn list_live_strategies(
     // Query 2: batch-fetch grid-search backtest stats for strategies that have a backtest_run_id
     let mut stats_map: HashMap<Uuid, Value> = HashMap::new();
     if !backtest_ids.is_empty() {
-        let stat_rows = sqlx::query_as::<_, (Uuid, f64, f64, f64, f64, i32, f64, f64)>(
-            r#"
-            SELECT id, total_return, win_rate, sharpe_ratio, max_drawdown,
-                   num_trades, avg_win, avg_loss
-            FROM backtest_runs
-            WHERE id = ANY($1)
-            "#,
-        )
-        .bind(&backtest_ids)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+        let stat_rows = live_strategies_repo::fetch_backtest_run_stats(&state.db, &backtest_ids)
+            .await
+            .map_err(AppError::Database)?;
 
-        for (id, total_return, win_rate, sharpe, drawdown, num_trades, avg_win, avg_loss) in
-            stat_rows
-        {
+        for row in stat_rows {
             stats_map.insert(
-                id,
+                row.id,
                 json!({
-                    "total_return": total_return,
-                    "win_rate": win_rate,
-                    "sharpe_ratio": sharpe,
-                    "max_drawdown": drawdown,
-                    "num_trades": num_trades,
-                    "avg_win": avg_win,
-                    "avg_loss": avg_loss,
+                    "total_return": row.total_return,
+                    "win_rate": row.win_rate,
+                    "sharpe_ratio": row.sharpe_ratio,
+                    "max_drawdown": row.max_drawdown,
+                    "num_trades": row.num_trades,
+                    "avg_win": row.avg_win,
+                    "avg_loss": row.avg_loss,
                 }),
             );
         }
@@ -236,45 +165,20 @@ pub async fn list_live_strategies(
     // Query 3: for pipeline strategies (no backtest_run_id), look up stats from
     // strategy_configs + strategy_evaluations matched by (instrument, strategy_type, parameters).
     // DISTINCT ON picks the highest-scoring config when multiple pipeline runs share the same params.
-    let pipeline_ids: Vec<Uuid> = rows.iter().filter(|r| r.9.is_none()).map(|r| r.0).collect();
+    let pipeline_ids: Vec<Uuid> = rows
+        .iter()
+        .filter(|r| r.backtest_run_id.is_none())
+        .map(|r| r.id)
+        .collect();
     let mut pipeline_stats_map: HashMap<Uuid, Value> = HashMap::new();
     if !pipeline_ids.is_empty() {
         let pipeline_rows =
-            sqlx::query_as::<_, (Uuid, String, Option<f64>, Option<Value>, Option<Value>)>(
-                r#"
-            SELECT DISTINCT ON (ls.id)
-                ls.id,
-                sc.source,
-                sc.score,
-                bt.stats  AS bt_stats,
-                wf.stats  AS wf_stats
-            FROM live_strategies ls
-            JOIN strategy_configs sc
-                ON  sc.instrument    = ls.instrument
-                AND sc.strategy_type = ls.strategy_type
-                AND sc.parameters    = ls.parameters
-            LEFT JOIN strategy_evaluations bt
-                ON  bt.strategy_config_id = sc.id
-                AND bt.stage   = 'backtest'
-                AND bt.status  = 'passed'
-            LEFT JOIN strategy_evaluations wf
-                ON  wf.strategy_config_id = sc.id
-                AND wf.stage   = 'walk_forward'
-                AND wf.status  = 'passed'
-            WHERE ls.id = ANY($1)
-            ORDER BY ls.id, sc.score DESC NULLS LAST
-            "#,
-            )
-            .bind(&pipeline_ids)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?;
+            live_strategies_repo::fetch_pipeline_strategy_stats(&state.db, &pipeline_ids)
+                .await
+                .map_err(AppError::Database)?;
 
-        for (live_id, source, score, bt_stats, wf_stats) in pipeline_rows {
-            // Map pipeline bt_stats fields to the same shape as grid-search backtest_stats.
-            // Pipeline uses "sharpe" / "total_return" etc; grid search uses "sharpe_ratio".
-            // avg_win / avg_loss not available from pipeline — set to null.
-            let backtest_stats = bt_stats.as_ref().map(|b| {
+        for row in pipeline_rows {
+            let backtest_stats = row.bt_stats.as_ref().map(|b| {
                 json!({
                     "sharpe_ratio": b["sharpe"],
                     "win_rate":     b["win_rate"],
@@ -286,7 +190,7 @@ pub async fn list_live_strategies(
                 })
             });
 
-            let oos_stats = wf_stats.as_ref().map(|w| {
+            let oos_stats = row.wf_stats.as_ref().map(|w| {
                 json!({
                     "oos_sharpe":     w["oos_sharpe"],
                     "oos_num_trades": w["oos_num_trades"],
@@ -296,10 +200,10 @@ pub async fn list_live_strategies(
             });
 
             pipeline_stats_map.insert(
-                live_id,
+                row.id,
                 json!({
-                    "source":         source,
-                    "pipeline_score": score,
+                    "source":         row.source,
+                    "pipeline_score": row.score,
                     "backtest_stats": backtest_stats,
                     "oos_stats":      oos_stats,
                 }),
@@ -307,62 +211,76 @@ pub async fn list_live_strategies(
         }
     }
 
+    // Query 4: latest k-fold validation per strategy (if any). We take the most
+    // recent row per live_strategy_id; older rows are kept as history but the UI
+    // shows the latest.
+    let mut kfold_map: HashMap<Uuid, Value> = HashMap::new();
+    if !strategy_ids.is_empty() {
+        let kfold_rows = live_strategies_repo::fetch_latest_kfold_stats(&state.db, &strategy_ids)
+            .await
+            .map_err(AppError::Database)?;
+
+        for row in kfold_rows {
+            kfold_map.insert(
+                row.live_strategy_id,
+                json!({
+                    "fold_count": row.fold_count,
+                    "pass_count": row.pass_count,
+                    "pass_rate": row.pass_rate,
+                    "median_sharpe": row.median_sharpe,
+                }),
+            );
+        }
+    }
+
     let mut strategies: Vec<Value> = rows
         .iter()
-        .map(
-            |(
-                id,
-                stype,
-                instrument,
-                granularity,
-                params,
-                enabled,
-                max_size,
-                created,
-                updated,
-                backtest_run_id,
-            )| {
-                // Strategies with a backtest_run_id came from the grid-search / Backtests page.
-                // Everything else came through the pipeline (Ollama, evo, manual promote).
-                let source = if backtest_run_id.is_some() {
-                    "grid_search"
-                } else {
-                    "pipeline"
-                };
+        .map(|row| {
+            // Strategies with a backtest_run_id came from the grid-search / Backtests page.
+            // Everything else came through the pipeline (Ollama, evo, manual promote).
+            let source = if row.backtest_run_id.is_some() {
+                "grid_search"
+            } else {
+                "pipeline"
+            };
 
-                let mut obj = json!({
-                    "id": id,
-                    "strategy_type": stype,
-                    "instrument": instrument,
-                    "granularity": granularity,
-                    "parameters": params,
-                    "enabled": enabled,
-                    "max_position_size": max_size,
-                    "created_at": created,
-                    "updated_at": updated,
-                    "backtest_run_id": backtest_run_id,
-                    "source": source,
-                });
+            let mut obj = json!({
+                "id": row.id,
+                "strategy_type": row.strategy_type,
+                "instrument": row.instrument,
+                "granularity": row.granularity,
+                "parameters": row.parameters,
+                "enabled": row.enabled,
+                "curator_mode": row.curator_mode,
+                "max_position_size": row.max_position_size,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+                "backtest_run_id": row.backtest_run_id,
+                "source": source,
+            });
 
-                if let Some(bt_id) = backtest_run_id {
-                    if let Some(stats) = stats_map.get(bt_id) {
-                        obj["backtest_stats"] = stats.clone();
-                    }
-                } else if let Some(pipeline) = pipeline_stats_map.get(id) {
-                    // Refine source from the strategy_config if available (e.g. "evolution")
-                    obj["source"] = pipeline["source"].clone();
-                    obj["pipeline_score"] = pipeline["pipeline_score"].clone();
-                    obj["backtest_stats"] = pipeline["backtest_stats"].clone();
-                    obj["oos_stats"] = pipeline["oos_stats"].clone();
+            if let Some(bt_id) = row.backtest_run_id {
+                if let Some(stats) = stats_map.get(&bt_id) {
+                    obj["backtest_stats"] = stats.clone();
                 }
+            } else if let Some(pipeline) = pipeline_stats_map.get(&row.id) {
+                // Refine source from the strategy_config if available (e.g. "evolution")
+                obj["source"] = pipeline["source"].clone();
+                obj["pipeline_score"] = pipeline["pipeline_score"].clone();
+                obj["backtest_stats"] = pipeline["backtest_stats"].clone();
+                obj["oos_stats"] = pipeline["oos_stats"].clone();
+            }
 
-                if let Some(live) = live_stats_map.get(id) {
-                    obj["live_stats"] = live.clone();
-                }
+            if let Some(live) = live_stats_map.get(&row.id) {
+                obj["live_stats"] = live.clone();
+            }
 
-                obj
-            },
-        )
+            if let Some(kfold) = kfold_map.get(&row.id) {
+                obj["kfold_stats"] = kfold.clone();
+            }
+
+            obj
+        })
         .collect();
 
     // Filter in application if params provided
@@ -388,23 +306,30 @@ pub async fn create_live_strategy(
         .max_position_size
         .unwrap_or_else(|| "1000".to_string());
 
-    let result = sqlx::query(
-        r#"
-        INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size)
-        VALUES ($1, $2, $3, $4, $5, false, $6)
-        "#,
+    let result = live_strategies_repo::insert_live_strategy(
+        &state.db,
+        id,
+        &payload.strategy_type,
+        &payload.instrument,
+        &payload.granularity,
+        &payload.parameters,
+        &max_size,
     )
-    .bind(id)
-    .bind(&payload.strategy_type)
-    .bind(&payload.instrument)
-    .bind(&payload.granularity)
-    .bind(&payload.parameters)
-    .bind(&max_size)
-    .execute(&state.db)
     .await;
 
     match result {
         Ok(_) => {
+            if !instrument_buffers_needed(&state.db, &payload.instrument, Some(id)).await? {
+                load_instrument_buffers(&state, &payload.instrument)
+                    .await
+                    .map_err(|e| {
+                        AppError::Internal(format!(
+                            "Failed to load buffers for {} after creating strategy {}: {}",
+                            payload.instrument, id, e
+                        ))
+                    })?;
+            }
+
             tracing::info!(
                 "Created live strategy: {} {} on {} (disabled)",
                 payload.strategy_type,
@@ -419,6 +344,7 @@ pub async fn create_live_strategy(
                 "granularity": payload.granularity,
                 "parameters": payload.parameters,
                 "enabled": false,
+                "curator_mode": "auto",
                 "max_position_size": max_size,
             })))
         }
@@ -438,100 +364,49 @@ pub async fn get_live_strategy(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    let row = sqlx::query_as::<_, (Uuid, String, String, String, Value, bool, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
-        "SELECT id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, created_at, updated_at FROM live_strategies WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(AppError::Database)?;
+    let row = live_strategies_repo::get_live_strategy_by_id(&state.db, id)
+        .await
+        .map_err(AppError::Database)?;
 
     match row {
-        Some((id, stype, instrument, granularity, params, enabled, max_size, created, updated)) => {
-            // Also fetch live trades for this strategy
-            let trades = sqlx::query_as::<
-                _,
-                (
-                    Uuid,
-                    Option<String>,
-                    String,
-                    String,
-                    String,
-                    Option<f64>,
-                    Option<f64>,
-                    chrono::DateTime<chrono::Utc>,
-                    Option<chrono::DateTime<chrono::Utc>>,
-                    Option<f64>,
-                    Option<f64>,
-                    Option<String>,
-                    Option<String>,
-                    String,
-                ),
-            >(
-                r#"
-                SELECT id, oanda_trade_id, instrument, direction, units,
-                       entry_price, exit_price, entry_time, exit_time,
-                       stop_loss_price, take_profit_price, entry_reason, exit_reason, status
-                FROM live_trades
-                WHERE live_strategy_id = $1
-                ORDER BY entry_time DESC
-                LIMIT 50
-                "#,
-            )
-            .bind(id)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?;
+        Some(row) => {
+            let trades = live_trades_repo::list_recent_for_strategy(&state.db, row.id, 50)
+                .await
+                .map_err(AppError::Database)?;
 
             let trade_list: Vec<Value> = trades
                 .iter()
-                .map(
-                    |(
-                        tid,
-                        oanda_id,
-                        inst,
-                        dir,
-                        units,
-                        entry_p,
-                        exit_p,
-                        entry_t,
-                        exit_t,
-                        sl,
-                        tp,
-                        entry_r,
-                        exit_r,
-                        status,
-                    )| {
-                        json!({
-                            "id": tid,
-                            "oanda_trade_id": oanda_id,
-                            "instrument": inst,
-                            "direction": dir,
-                            "units": units,
-                            "entry_price": entry_p,
-                            "exit_price": exit_p,
-                            "entry_time": entry_t,
-                            "exit_time": exit_t,
-                            "stop_loss_price": sl,
-                            "take_profit_price": tp,
-                            "entry_reason": entry_r,
-                            "exit_reason": exit_r,
-                            "status": status,
-                        })
-                    },
-                )
+                .map(|trade| {
+                    json!({
+                        "id": trade.id,
+                        "oanda_trade_id": trade.oanda_trade_id,
+                        "instrument": trade.instrument,
+                        "direction": trade.direction,
+                        "units": trade.units,
+                        "entry_price": trade.entry_price,
+                        "exit_price": trade.exit_price,
+                        "entry_time": trade.entry_time,
+                        "exit_time": trade.exit_time,
+                        "stop_loss_price": trade.stop_loss_price,
+                        "take_profit_price": trade.take_profit_price,
+                        "entry_reason": trade.entry_reason,
+                        "exit_reason": trade.exit_reason,
+                        "status": trade.status,
+                    })
+                })
                 .collect();
 
             Ok(Json(json!({
-                "id": id,
-                "strategy_type": stype,
-                "instrument": instrument,
-                "granularity": granularity,
-                "parameters": params,
-                "enabled": enabled,
-                "max_position_size": max_size,
-                "created_at": created,
-                "updated_at": updated,
+                "id": row.id,
+                "strategy_type": row.strategy_type,
+                "instrument": row.instrument,
+                "granularity": row.granularity,
+                "parameters": row.parameters,
+                "enabled": row.enabled,
+                "curator_mode": row.curator_mode,
+                "max_position_size": row.max_position_size,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
                 "trades": trade_list,
             })))
         }
@@ -548,25 +423,19 @@ pub async fn update_live_strategy(
         .max_position_size
         .unwrap_or_else(|| "1000".to_string());
 
-    let result = sqlx::query(
-        r#"
-        UPDATE live_strategies
-        SET strategy_type = $1, instrument = $2, granularity = $3, parameters = $4,
-            max_position_size = $5, updated_at = NOW()
-        WHERE id = $6
-        "#,
+    let rows_affected = live_strategies_repo::update_live_strategy(
+        &state.db,
+        id,
+        &payload.strategy_type,
+        &payload.instrument,
+        &payload.granularity,
+        &payload.parameters,
+        &max_size,
     )
-    .bind(&payload.strategy_type)
-    .bind(&payload.instrument)
-    .bind(&payload.granularity)
-    .bind(&payload.parameters)
-    .bind(&max_size)
-    .bind(id)
-    .execute(&state.db)
     .await
     .map_err(AppError::Database)?;
 
-    if result.rows_affected() == 0 {
+    if rows_affected == 0 {
         return Err(AppError::NotFound("Strategy not found".into()));
     }
 
@@ -586,37 +455,49 @@ pub async fn toggle_live_strategy(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    let row = sqlx::query_as::<_, (bool, String, String)>(
-        "UPDATE live_strategies SET enabled = NOT enabled, updated_at = NOW() WHERE id = $1 RETURNING enabled, strategy_type, instrument",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(AppError::Database)?;
+    let row = live_strategies_repo::toggle_live_strategy(&state.db, id)
+        .await
+        .map_err(AppError::Database)?;
 
     match row {
-        Some((enabled, stype, instrument)) => {
-            if enabled {
-                load_instrument_buffers(&state, &instrument)
-                    .await
-                    .map_err(|e| {
-                        AppError::Internal(format!(
-                            "Failed to load buffers for {} after enabling strategy {}: {}",
-                            instrument, id, e
-                        ))
-                    })?;
-            } else if !instrument_buffers_needed(&state.db, &instrument, None).await? {
-                unload_instrument_buffers(&state, &instrument).await;
-            }
-
+        Some(row) => {
             tracing::info!(
-                "Strategy {} ({} on {}) {}",
+                "Strategy {} ({} on {}) {} with curator_mode={}",
                 id,
-                stype,
-                instrument,
-                if enabled { "ENABLED" } else { "DISABLED" }
+                row.strategy_type,
+                row.instrument,
+                if row.enabled { "ENABLED" } else { "DISABLED" },
+                row.curator_mode
             );
-            Ok(Json(json!({ "id": id, "enabled": enabled })))
+            Ok(Json(
+                json!({ "id": id, "enabled": row.enabled, "curator_mode": row.curator_mode }),
+            ))
+        }
+        None => Err(AppError::NotFound("Strategy not found".into())),
+    }
+}
+
+pub async fn reset_live_strategy_curator_auto(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let row = live_strategies_repo::set_live_strategy_curator_auto(&state.db, id)
+        .await
+        .map_err(AppError::Database)?;
+
+    match row {
+        Some(row) => {
+            tracing::info!(
+                "Strategy {} ({} on {}) set to curator_mode=auto (enabled={})",
+                id,
+                row.strategy_type,
+                row.instrument,
+                row.enabled
+            );
+
+            Ok(Json(
+                json!({ "id": id, "enabled": row.enabled, "curator_mode": row.curator_mode }),
+            ))
         }
         None => Err(AppError::NotFound("Strategy not found".into())),
     }
@@ -627,28 +508,21 @@ pub async fn delete_live_strategy(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     // Check if there are open trades
-    let open_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM live_trades WHERE live_strategy_id = $1 AND status = 'open'",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(AppError::Database)?;
+    let open_count = live_queries::open_trade_count_for_strategy(&state.db, id)
+        .await
+        .map_err(AppError::Database)?;
 
-    if open_count.0 > 0 {
+    if open_count > 0 {
         return Err(AppError::BadRequest(
             "Cannot delete strategy with open trades. Close all positions first.".into(),
         ));
     }
 
-    let row: Option<(String,)> =
-        sqlx::query_as("DELETE FROM live_strategies WHERE id = $1 RETURNING instrument")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(AppError::Database)?;
+    let row = live_strategies_repo::delete_live_strategy_returning_instrument(&state.db, id)
+        .await
+        .map_err(AppError::Database)?;
 
-    let Some((instrument,)) = row else {
+    let Some(instrument) = row else {
         return Err(AppError::NotFound("Strategy not found".into()));
     };
 
@@ -668,54 +542,58 @@ pub async fn deploy_from_backtest(
     Json(payload): Json<DeployParams>,
 ) -> AppResult<Json<Value>> {
     // Fetch the backtest run
-    let row = sqlx::query_as::<_, (String, String, String, Value)>(
-        "SELECT strategy_type, instrument, granularity, parameters FROM backtest_runs WHERE id = $1",
-    )
-    .bind(backtest_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(AppError::Database)?;
+    let row = live_strategies_repo::find_backtest_deploy_source(&state.db, backtest_id)
+        .await
+        .map_err(AppError::Database)?;
 
     match row {
-        Some((strategy_type, instrument, granularity, parameters)) => {
+        Some(row) => {
             let id = Uuid::new_v4();
             let max_size = payload
                 .max_position_size
                 .unwrap_or_else(|| "1000".to_string());
 
-            let result = sqlx::query(
-                r#"
-                INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, backtest_run_id)
-                VALUES ($1, $2, $3, $4, $5, false, $6, $7)
-                "#,
+            let result = live_strategies_repo::insert_deployed_live_strategy(
+                &state.db,
+                id,
+                &row.strategy_type,
+                &row.instrument,
+                &row.granularity,
+                &row.parameters,
+                &max_size,
+                backtest_id,
             )
-            .bind(id)
-            .bind(&strategy_type)
-            .bind(&instrument)
-            .bind(&granularity)
-            .bind(&parameters)
-            .bind(&max_size)
-            .bind(backtest_id)
-            .execute(&state.db)
             .await;
 
             match result {
                 Ok(_) => {
+                    if !instrument_buffers_needed(&state.db, &row.instrument, Some(id)).await? {
+                        load_instrument_buffers(&state, &row.instrument)
+                            .await
+                            .map_err(|e| {
+                                AppError::Internal(format!(
+                                    "Failed to load buffers for {} after deploying strategy {}: {}",
+                                    row.instrument, id, e
+                                ))
+                            })?;
+                    }
+
                     tracing::info!(
                         "Deployed backtest {} as live strategy {}: {} on {} (disabled)",
                         backtest_id,
                         id,
-                        strategy_type,
-                        instrument
+                        row.strategy_type,
+                        row.instrument
                     );
 
                     Ok(Json(json!({
                         "id": id,
-                        "strategy_type": strategy_type,
-                        "instrument": instrument,
-                        "granularity": granularity,
-                        "parameters": parameters,
+                        "strategy_type": row.strategy_type,
+                        "instrument": row.instrument,
+                        "granularity": row.granularity,
+                        "parameters": row.parameters,
                         "enabled": false,
+                        "curator_mode": "auto",
                         "max_position_size": max_size,
                         "deployed_from": backtest_id,
                     })))
@@ -750,13 +628,12 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
 
 // Trading config endpoints
 pub async fn get_trading_config(State(state): State<AppState>) -> AppResult<Json<Value>> {
-    let rows =
-        sqlx::query_as::<_, (String, Value)>("SELECT key, value FROM trading_config ORDER BY key")
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?;
+    let rows = live_strategies_repo::list_trading_config(&state.db)
+        .await
+        .map_err(AppError::Database)?;
 
-    let config: serde_json::Map<String, Value> = rows.into_iter().collect();
+    let config: serde_json::Map<String, Value> =
+        rows.into_iter().map(|row| (row.key, row.value)).collect();
 
     Ok(Json(json!({ "config": config })))
 }
@@ -767,47 +644,15 @@ pub async fn update_trading_config(
 ) -> AppResult<Json<Value>> {
     if let Some(obj) = payload.as_object() {
         for (key, value) in obj {
-            sqlx::query(
-                "INSERT INTO trading_config (key, value, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()"
-            )
-            .bind(key)
-            .bind(value)
-            .execute(&state.db)
-            .await
-            .map_err(AppError::Database)?;
+            live_strategies_repo::upsert_trading_config(&state.db, key, value)
+                .await
+                .map_err(AppError::Database)?;
         }
     }
 
     tracing::info!("Trading config updated: {:?}", payload);
 
     get_trading_config(State(state)).await
-}
-
-// Live trades endpoint
-#[derive(sqlx::FromRow)]
-struct LiveTradeRow {
-    id: Uuid,
-    live_strategy_id: Option<Uuid>,
-    oanda_trade_id: Option<String>,
-    instrument: String,
-    direction: String,
-    units: String,
-    entry_price: Option<f64>,
-    exit_price: Option<f64>,
-    entry_time: chrono::DateTime<chrono::Utc>,
-    exit_time: Option<chrono::DateTime<chrono::Utc>>,
-    pnl_percent: Option<f64>,
-    entry_reason: Option<String>,
-    exit_reason: Option<String>,
-    status: String,
-    strategy_type: Option<String>,
-    parameters: Option<Value>,
-    granularity: Option<String>,
-    indicators_at_entry: Option<Value>,
-    regime_at_entry: Option<String>,
-    mae_pct: Option<f64>,
-    mfe_pct: Option<f64>,
-    stop_loss_state_at_close: Option<String>,
 }
 
 pub async fn get_live_trades(
@@ -817,37 +662,17 @@ pub async fn get_live_trades(
     let status = params.status.unwrap_or_else(|| "all".to_string());
     let limit = params.limit.unwrap_or(50);
 
-    let select_cols = r#"
-        SELECT lt.id, lt.live_strategy_id, lt.oanda_trade_id, lt.instrument, lt.direction, lt.units,
-               lt.entry_price, lt.exit_price, lt.entry_time, lt.exit_time,
-               lt.pnl_percent, lt.entry_reason, lt.exit_reason, lt.status,
-               ls.strategy_type, ls.parameters, ls.granularity,
-               lt.indicators_at_entry, lt.regime_at_entry,
-               lt.mae_pct, lt.mfe_pct, lt.stop_loss_state_at_close
-        FROM live_trades lt
-        LEFT JOIN live_strategies ls ON ls.id = lt.live_strategy_id
-    "#;
-
-    let rows: Vec<LiveTradeRow> = if status == "all" {
-        sqlx::query_as::<_, LiveTradeRow>(&format!(
-            "{} ORDER BY lt.entry_time DESC LIMIT $1",
-            select_cols
-        ))
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?
-    } else {
-        sqlx::query_as::<_, LiveTradeRow>(&format!(
-            "{} WHERE lt.status = $1 ORDER BY lt.entry_time DESC LIMIT $2",
-            select_cols
-        ))
-        .bind(&status)
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?
-    };
+    let rows = live_trades_repo::list_live_trades(
+        &state.db,
+        if status == "all" {
+            None
+        } else {
+            Some(status.as_str())
+        },
+        limit,
+    )
+    .await
+    .map_err(AppError::Database)?;
 
     let trades: Vec<Value> = rows
         .iter()
@@ -891,74 +716,13 @@ pub struct LiveTradesParams {
     pub limit: Option<i64>,
 }
 
-#[derive(sqlx::FromRow)]
-struct TradeDetailRow {
-    // Trade
-    id: Uuid,
-    live_strategy_id: Option<Uuid>,
-    oanda_trade_id: Option<String>,
-    instrument: String,
-    direction: String,
-    units: String,
-    entry_price: Option<f64>,
-    exit_price: Option<f64>,
-    entry_time: chrono::DateTime<chrono::Utc>,
-    exit_time: Option<chrono::DateTime<chrono::Utc>>,
-    pnl_percent: Option<f64>,
-    entry_reason: Option<String>,
-    exit_reason: Option<String>,
-    status: String,
-    indicators_at_entry: Option<Value>,
-    regime_at_entry: Option<String>,
-    stop_loss_state_at_close: Option<String>,
-    // Strategy
-    strategy_type: Option<String>,
-    parameters: Option<Value>,
-    granularity: Option<String>,
-    enabled: Option<bool>,
-    max_position_size: Option<String>,
-    backtest_run_id: Option<Uuid>,
-    // Backtest run
-    bt_strategy_name: Option<String>,
-    bt_total_return: Option<f64>,
-    bt_win_rate: Option<f64>,
-    bt_sharpe_ratio: Option<f64>,
-    bt_max_drawdown: Option<f64>,
-    bt_num_trades: Option<i32>,
-    bt_avg_win: Option<f64>,
-    bt_avg_loss: Option<f64>,
-}
-
 pub async fn get_live_trade_detail(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    let row: Option<TradeDetailRow> = sqlx::query_as(
-        r#"
-        SELECT lt.id, lt.live_strategy_id, lt.oanda_trade_id, lt.instrument, lt.direction, lt.units,
-               lt.entry_price, lt.exit_price, lt.entry_time, lt.exit_time,
-             lt.pnl_percent, lt.entry_reason, lt.exit_reason, lt.status,
-             lt.indicators_at_entry, lt.regime_at_entry, lt.stop_loss_state_at_close,
-               ls.strategy_type, ls.parameters, ls.granularity, ls.enabled,
-               ls.max_position_size, ls.backtest_run_id,
-               br.strategy_name AS bt_strategy_name,
-               br.total_return AS bt_total_return,
-               br.win_rate AS bt_win_rate,
-               br.sharpe_ratio AS bt_sharpe_ratio,
-               br.max_drawdown AS bt_max_drawdown,
-               br.num_trades AS bt_num_trades,
-               br.avg_win AS bt_avg_win,
-               br.avg_loss AS bt_avg_loss
-        FROM live_trades lt
-        LEFT JOIN live_strategies ls ON ls.id = lt.live_strategy_id
-        LEFT JOIN backtest_runs br ON br.id = ls.backtest_run_id
-        WHERE lt.id = $1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(AppError::Database)?;
+    let row = live_trades_repo::find_live_trade_detail(&state.db, id)
+        .await
+        .map_err(AppError::Database)?;
 
     let row = row.ok_or_else(|| AppError::NotFound(format!("Trade {} not found", id)))?;
 

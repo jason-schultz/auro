@@ -24,7 +24,7 @@ defmodule OpusWeb.CircuitBreakerControllerTest do
     })
     |> Repo.insert!()
 
-    conn = post(conn, "/api/strategies/#{strategy_id}/reset-circuit-breaker")
+    conn = post(conn, "/api/strategy-suspensions/#{strategy_id}/reset")
 
     assert %{"strategy_id" => ^strategy_id, "cleared_count" => 1} = json_response(conn, 200)
 
@@ -41,13 +41,14 @@ defmodule OpusWeb.CircuitBreakerControllerTest do
   test "returns 404 when there is no active suspension", %{conn: conn} do
     strategy_id = "55555555-5555-5555-5555-555555555555"
 
-    conn = post(conn, "/api/strategies/#{strategy_id}/reset-circuit-breaker")
+    conn = post(conn, "/api/strategy-suspensions/#{strategy_id}/reset")
 
     assert %{"error" => "No active suspension found"} = json_response(conn, 404)
   end
 
   test "returns 400 for invalid strategy id", %{conn: conn} do
-    conn = post(conn, "/api/strategies/not-a-uuid/reset-circuit-breaker")
+    strategy_id = "not-a-uuid"
+    conn = post(conn, "/api/strategy-suspensions/#{strategy_id}/reset")
 
     assert %{"error" => "Invalid strategy id"} = json_response(conn, 400)
   end

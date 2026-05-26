@@ -47,6 +47,8 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
         "slow_period" => 50,
         "stop_loss" => -0.02,
         "take_profit" => nil,
+        "confirm_bars" => 4,
+        "trailing_k" => 2.5,
         "regime_filter" => true
       },
       "mean_reversion" => %{
@@ -63,6 +65,8 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
         "slow_period" => 30,
         "stop_loss" => -0.025,
         "take_profit" => nil,
+        "confirm_bars" => 3,
+        "trailing_k" => 2.5,
         "regime_filter" => true
       },
       "mean_reversion" => %{
@@ -79,6 +83,8 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
         "slow_period" => 30,
         "stop_loss" => -0.015,
         "take_profit" => nil,
+        "confirm_bars" => 12,
+        "trailing_k" => 2.5,
         "regime_filter" => true
       },
       "mean_reversion" => %{
@@ -95,6 +101,8 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
         "slow_period" => 60,
         "stop_loss" => -0.01,
         "take_profit" => nil,
+        "confirm_bars" => 24,
+        "trailing_k" => 2.5,
         "regime_filter" => true
       },
       "mean_reversion" => %{

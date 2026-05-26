@@ -86,6 +86,10 @@ pub fn router() -> Router<AppState> {
             post(live_strategies::toggle_live_strategy),
         )
         .route(
+            "/api/live/strategies/{id}/curator/auto",
+            post(live_strategies::reset_live_strategy_curator_auto),
+        )
+        .route(
             "/api/live/strategies/{id}",
             delete(live_strategies::delete_live_strategy),
         )

@@ -3,8 +3,10 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::db::repositories::pipeline as pipeline_repo;
 use crate::engine::grid::load_candles;
 use crate::engine::mean_reversion::{run as run_mean_reversion, MeanReversionParams};
+use crate::engine::risk_defaults::{default_exit_confirm_bars, default_trailing_k};
 use crate::engine::stats::{calculate_backtest_stats, BacktestStats};
 use crate::engine::trend_following::{run as run_trend_following, TrendFollowingParams};
 use crate::engine::types::{Candle, Granularity, Trade};
@@ -64,12 +66,59 @@ fn run_strategy(candles: &[Candle], config: &StrategyConfig) -> AppResult<Vec<Tr
                 .map_err(|e| {
                     AppError::BadRequest(format!("invalid trend_following parameters: {}", e))
                 })?;
-            Ok(run_trend_following(candles, &params))
+            let effective_confirm_bars = params
+                .confirm_bars
+                .unwrap_or_else(|| default_exit_confirm_bars(config.granularity));
+            let effective_trailing_k = params
+                .trailing_k
+                .unwrap_or_else(|| default_trailing_k("trend_following"));
+
+            Ok(run_trend_following(
+                candles,
+                &params,
+                effective_confirm_bars,
+                effective_trailing_k,
+            ))
         }
         other => Err(AppError::BadRequest(format!(
             "unknown strategy_type: {}",
             other
         ))),
+    }
+}
+
+pub fn run_backtest_stats(
+    candles: &[Candle],
+    config: &StrategyConfig,
+    active_start_idx: Option<usize>,
+) -> AppResult<BacktestStats> {
+    if candles.is_empty() {
+        let empty: Vec<Trade> = Vec::new();
+        return Ok(calculate_backtest_stats(&empty));
+    }
+
+    if let Some(idx) = active_start_idx {
+        if idx >= candles.len() {
+            return Err(AppError::BadRequest(format!(
+                "active_start_idx {} out of range for {} candles",
+                idx,
+                candles.len()
+            )));
+        }
+    }
+
+    let trades = run_strategy(candles, config)?;
+
+    match active_start_idx {
+        None | Some(0) => Ok(calculate_backtest_stats(&trades)),
+        Some(idx) => {
+            let active_start_time = candles[idx].time;
+            let filtered: Vec<Trade> = trades
+                .into_iter()
+                .filter(|t| t.entry_time >= active_start_time)
+                .collect();
+            Ok(calculate_backtest_stats(&filtered))
+        }
     }
 }
 
@@ -134,26 +183,22 @@ fn evaluate_thresholds(
 // ---------------------------------------------------------------------------
 
 pub async fn load_strategy_config(pool: &PgPool, config_id: Uuid) -> AppResult<StrategyConfig> {
-    let row = sqlx::query_as::<_, (String, String, String, Value)>(
-        "SELECT instrument, granularity, strategy_type, parameters FROM strategy_configs WHERE id = $1",
-    )
-    .bind(config_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Database)?
-    .ok_or_else(|| AppError::NotFound(format!("strategy_config {}", config_id)))?;
+    let row = pipeline_repo::find_strategy_config(pool, config_id)
+        .await
+        .map_err(AppError::Database)?
+        .ok_or_else(|| AppError::NotFound(format!("strategy_config {}", config_id)))?;
 
-    let (instrument, granularity_str, strategy_type, parameters) = row;
-    let granularity: Granularity = granularity_str
+    let granularity: Granularity = row
+        .granularity
         .parse()
         .map_err(|e| AppError::BadRequest(format!("invalid granularity: {}", e)))?;
 
     Ok(StrategyConfig {
         id: config_id,
-        instrument,
+        instrument: row.instrument,
         granularity,
-        strategy_type,
-        parameters,
+        strategy_type: row.strategy_type,
+        parameters: row.parameters,
     })
 }
 
@@ -164,80 +209,30 @@ async fn load_thresholds(
     instrument_class: &str,
     strategy_type: &str,
 ) -> AppResult<Vec<ThresholdRow>> {
-    let to_rows = |rows: Vec<(String, String, f64)>| {
-        rows.into_iter()
-            .map(|(metric, operator, value)| ThresholdRow {
-                metric,
-                operator,
-                value,
-            })
-            .collect::<Vec<_>>()
-    };
-
-    // Level 1: instrument_class + strategy_type specific.
-    let rows = sqlx::query_as::<_, (String, String, f64)>(
-        "SELECT metric, operator, value FROM validation_thresholds \
-         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = $3 AND strategy_type = $4",
+    let rows = pipeline_repo::load_validation_thresholds(
+        pool,
+        stage,
+        timeframe_class,
+        instrument_class,
+        strategy_type,
     )
-    .bind(stage)
-    .bind(timeframe_class)
-    .bind(instrument_class)
-    .bind(strategy_type)
-    .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
 
-    if !rows.is_empty() {
-        return Ok(to_rows(rows));
-    }
-
-    // Level 2: instrument_class + strategy_type='all' (strategy-agnostic instrument thresholds).
-    let rows = sqlx::query_as::<_, (String, String, f64)>(
-        "SELECT metric, operator, value FROM validation_thresholds \
-         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = $3 AND strategy_type = 'all'",
-    )
-    .bind(stage)
-    .bind(timeframe_class)
-    .bind(instrument_class)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    if !rows.is_empty() {
-        return Ok(to_rows(rows));
-    }
-
-    // Level 3: catch-all (instrument_class='all', strategy_type='all').
-    let rows = sqlx::query_as::<_, (String, String, f64)>(
-        "SELECT metric, operator, value FROM validation_thresholds \
-         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = 'all' AND strategy_type = 'all'",
-    )
-    .bind(stage)
-    .bind(timeframe_class)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    Ok(to_rows(rows))
+    Ok(rows
+        .into_iter()
+        .map(|row| ThresholdRow {
+            metric: row.metric,
+            operator: row.operator,
+            value: row.value,
+        })
+        .collect())
 }
 
 async fn upsert_evaluation_running(pool: &PgPool, config_id: Uuid, stage: &str) -> AppResult<Uuid> {
-    let row = sqlx::query_as::<_, (Uuid,)>(
-        r#"
-        INSERT INTO strategy_evaluations (id, strategy_config_id, stage, status, inserted_at, updated_at)
-        VALUES (gen_random_uuid(), $1, $2, 'running', NOW(), NOW())
-        ON CONFLICT (strategy_config_id, stage)
-        DO UPDATE SET status = 'running', stats = NULL, failure_reason = NULL, evaluated_at = NULL, updated_at = NOW()
-        RETURNING id
-        "#,
-    )
-    .bind(config_id)
-    .bind(stage)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    Ok(row.0)
+    pipeline_repo::upsert_evaluation_running(pool, config_id, stage)
+        .await
+        .map_err(AppError::Database)
 }
 
 async fn finalize_evaluation(
@@ -247,22 +242,9 @@ async fn finalize_evaluation(
     stats: &Value,
     failure_reason: Option<&str>,
 ) -> AppResult<()> {
-    sqlx::query(
-        r#"
-        UPDATE strategy_evaluations
-        SET status = $1, stats = $2, failure_reason = $3, evaluated_at = NOW(), updated_at = NOW()
-        WHERE id = $4
-        "#,
-    )
-    .bind(status)
-    .bind(stats)
-    .bind(failure_reason)
-    .bind(evaluation_id)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    Ok(())
+    pipeline_repo::finalize_evaluation(pool, evaluation_id, status, stats, failure_reason)
+        .await
+        .map_err(AppError::Database)
 }
 
 async fn fail_stage(
@@ -311,15 +293,14 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
         return fail_stage(pool, evaluation_id, failure).await;
     }
 
-    let trades = match run_strategy(&candles, config) {
-        Ok(t) => t,
+    let bt_stats = match run_backtest_stats(&candles, config, None) {
+        Ok(stats) => stats,
         Err(e) => {
             let failure = e.to_string();
             return fail_stage(pool, evaluation_id, failure).await;
         }
     };
 
-    let bt_stats = calculate_backtest_stats(&trades);
     let stats_json = backtest_stats_to_json(&bt_stats);
     let timeframe_class = config.granularity.timeframe_class();
     let instrument_class = instrument_to_class(&config.instrument);

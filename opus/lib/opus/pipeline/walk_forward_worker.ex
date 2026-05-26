@@ -4,7 +4,7 @@ defmodule Opus.Pipeline.WalkForwardWorker do
 
   Non-evo configs (no lineage_id in args):
     - pass → MonteCarloWorker
-    - fail → OllamaIterationWorker
+    - fail → terminal (no follow-up job)
 
   Evo configs (lineage_id present):
     - pass → MonteCarloWorker (with lineage args forwarded)
@@ -60,17 +60,6 @@ defmodule Opus.Pipeline.WalkForwardWorker do
                 evo_generation: evo_generation
               })
             )
-        else
-          :ok
-          # {:ok, _job} =
-          # Oban.insert(
-          #   OllamaIterationWorker.new(%{
-          #     config_id: config_id,
-          #     depth: depth,
-          #     failure_reason: reason,
-          #     stats: stats
-          #   })
-          # )
         end
 
         :ok
