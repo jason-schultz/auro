@@ -4,9 +4,10 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::engine::mean_reversion::{run as run_mean_reversion, MeanReversionParams};
+use crate::engine::risk_defaults::{default_exit_confirm_bars, default_trailing_k};
 use crate::engine::stats::{self, BacktestStats};
 use crate::engine::trend_following::{run as run_trend_following, TrendFollowingParams};
-use crate::engine::types::{Candle, EntryReason, ExitReason, Trade};
+use crate::engine::types::{Candle, EntryReason, ExitReason, Granularity, Trade, OHLC};
 
 #[derive(Debug, Clone)]
 pub struct GridSearchConfig {
@@ -136,9 +137,30 @@ pub async fn load_candles(
     instrument: &str,
     granularity: &str,
 ) -> Result<Vec<Candle>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (chrono::DateTime<Utc>, f64, f64, f64, f64, i32)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            chrono::DateTime<Utc>,
+            f64,
+            f64,
+            f64,
+            f64,
+            i32,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+        ),
+    >(
         r#"
-        SELECT timestamp, open, high, low, close, volume
+        SELECT
+            timestamp, open, high, low, close, volume,
+            bid_open, bid_high, bid_low, bid_close,
+            ask_open, ask_high, ask_low, ask_close
         FROM candles
         WHERE instrument = $1 AND granularity = $2 AND complete = true
         ORDER BY timestamp ASC
@@ -151,14 +173,57 @@ pub async fn load_candles(
 
     let candles = rows
         .into_iter()
-        .map(|(time, open, high, low, close, volume)| Candle {
-            time,
-            open,
-            high,
-            low,
-            close,
-            volume,
-        })
+        .map(
+            |(
+                time,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                bid_open,
+                bid_high,
+                bid_low,
+                bid_close,
+                ask_open,
+                ask_high,
+                ask_low,
+                ask_close,
+            )| {
+                let bid = match (bid_open, bid_high, bid_low, bid_close) {
+                    (Some(open), Some(high), Some(low), Some(close)) => Some(OHLC {
+                        open,
+                        high,
+                        low,
+                        close,
+                    }),
+                    _ => None,
+                };
+
+                let ask = match (ask_open, ask_high, ask_low, ask_close) {
+                    (Some(open), Some(high), Some(low), Some(close)) => Some(OHLC {
+                        open,
+                        high,
+                        low,
+                        close,
+                    }),
+                    _ => None,
+                };
+
+                Candle {
+                    time,
+                    mid: OHLC {
+                        open,
+                        high,
+                        low,
+                        close,
+                    },
+                    volume,
+                    bid,
+                    ask,
+                }
+            },
+        )
         .collect();
 
     Ok(candles)
@@ -243,7 +308,16 @@ pub fn run_trend_grid(candles: &[Candle], config: &TrendGridConfig) -> Vec<GridS
                     };
 
                     let start = Instant::now();
-                    let trades = run_trend_following(candles, &params);
+                    let granularity = config
+                        .granularity
+                        .parse::<Granularity>()
+                        .unwrap_or(Granularity::H1);
+                    let trades = run_trend_following(
+                        candles,
+                        &params,
+                        default_exit_confirm_bars(granularity),
+                        default_trailing_k("trend_following"),
+                    );
                     let duration_ms = start.elapsed().as_millis();
 
                     let bt_stats = stats::calculate_backtest_stats(&trades);

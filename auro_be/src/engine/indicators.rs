@@ -14,11 +14,11 @@ pub fn adx(candles: &[Candle], period: usize) -> Option<f64> {
     let mut minus_dms: Vec<f64> = Vec::with_capacity(n - 1);
 
     for i in 1..n {
-        let high = candles[i].high;
-        let low = candles[i].low;
-        let prev_high = candles[i - 1].high;
-        let prev_low = candles[i - 1].low;
-        let prev_close = candles[i - 1].close;
+        let high = candles[i].mid.high;
+        let low = candles[i].mid.low;
+        let prev_high = candles[i - 1].mid.high;
+        let prev_low = candles[i - 1].mid.low;
+        let prev_close = candles[i - 1].mid.close;
 
         let tr = (high - low)
             .max((high - prev_close).abs())
@@ -99,9 +99,9 @@ pub fn atr_pct(candles: &[Candle], period: usize) -> Option<f64> {
 
     let trs: Vec<f64> = (1..candles.len())
         .map(|i| {
-            let high = candles[i].high;
-            let low = candles[i].low;
-            let prev_close = candles[i - 1].close;
+            let high = candles[i].mid.high;
+            let low = candles[i].mid.low;
+            let prev_close = candles[i - 1].mid.close;
             (high - low)
                 .max((high - prev_close).abs())
                 .max((low - prev_close).abs())
@@ -114,7 +114,7 @@ pub fn atr_pct(candles: &[Candle], period: usize) -> Option<f64> {
         atr = (atr * (p_f - 1.0) + *tr) / p_f;
     }
 
-    let last_close = candles.last()?.close;
+    let last_close = candles.last()?.mid.close;
     if last_close <= 0.0 {
         return None;
     }
@@ -132,11 +132,11 @@ pub fn bollinger(candles: &[Candle], period: usize, std_dev_mult: f64) -> Option
 
     let window = &candles[candles.len() - period..];
     let p_f = period as f64;
-    let middle: f64 = window.iter().map(|c| c.close).sum::<f64>() / p_f;
+    let middle: f64 = window.iter().map(|c| c.mid.close).sum::<f64>() / p_f;
     let variance: f64 = window
         .iter()
         .map(|c| {
-            let diff = c.close - middle;
+            let diff = c.mid.close - middle;
             diff * diff
         })
         .sum::<f64>()
@@ -145,7 +145,7 @@ pub fn bollinger(candles: &[Candle], period: usize, std_dev_mult: f64) -> Option
 
     let upper = middle + std_dev_mult * std_dev;
     let lower = middle - std_dev_mult * std_dev;
-    let last_close = candles.last()?.close;
+    let last_close = candles.last()?.mid.close;
 
     let bandwidth_pct = if middle != 0.0 {
         (upper - lower) / middle * 100.0
@@ -175,28 +175,34 @@ pub fn ma_deviation_pct(candles: &[Candle], period: usize) -> Option<f64> {
     }
 
     let window = &candles[candles.len() - period..];
-    let ma: f64 = window.iter().map(|c| c.close).sum::<f64>() / period as f64;
+    let ma: f64 = window.iter().map(|c| c.mid.close).sum::<f64>() / period as f64;
     if ma <= 0.0 {
         return None;
     }
 
-    let last_close = candles.last()?.close;
+    let last_close = candles.last()?.mid.close;
     Some((last_close - ma) / ma * 100.0)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::engine::types::OHLC;
+
     use super::*;
     use chrono::{Duration, TimeZone, Utc};
 
     fn ohlc(open: f64, high: f64, low: f64, close: f64, idx: i64) -> Candle {
         Candle {
             time: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap() + Duration::hours(idx),
-            open,
-            high,
-            low,
-            close,
+            mid: OHLC {
+                open,
+                high,
+                low,
+                close,
+            },
             volume: 1,
+            bid: None,
+            ask: None,
         }
     }
 
