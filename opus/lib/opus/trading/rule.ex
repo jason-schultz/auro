@@ -17,6 +17,7 @@ defmodule Opus.Trading.Rule do
   schema "rules" do
     field(:enabled, :boolean)
     field(:reason, :string)
+    field(:regime_inputs, :map)
     field(:computed_at, :utc_datetime_usec)
 
     timestamps(type: :utc_datetime_usec)
@@ -28,7 +29,7 @@ defmodule Opus.Trading.Rule do
   """
   def changeset(rule, attrs) do
     rule
-    |> cast(attrs, [:live_strategy_id, :enabled, :reason, :computed_at])
+    |> cast(attrs, [:live_strategy_id, :enabled, :reason, :regime_inputs, :computed_at])
     |> validate_required([:live_strategy_id, :enabled, :computed_at])
   end
 end

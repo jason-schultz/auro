@@ -18,8 +18,26 @@ defmodule Opus.Trading.RulesEngine do
   classifies the ADX scalar at each timeframe: trending if ADX >= 30, choppy
   if ADX < 20, uncertain in between, unknown if the buffer is too short.
 
-  Multi-timeframe regime classification (H4 anchor + H1 confirmation, M15
-  vetoes):
+    Regime classification is strategy-granularity aware (dual-frame by default):
+
+      | Entry granularity | Context frame | Execution frame |
+      | ----------------- | ------------- | --------------- |
+      | M1                | M5            | M1              |
+      | M5                | M15           | M5              |
+      | M15               | H1            | M15             |
+      | H1                | H4            | H1              |
+      | H4                | D             | H4              |
+
+    Classification rule for dual-frame inputs:
+
+      | Context | Execution | Composite |
+      | ------- | --------- | --------- |
+      | same trend state    | same      | that state |
+      | mismatch            | mismatch  | uncertain  |
+      | any unknown         | any       | unknown    |
+
+    Legacy 3-frame majority (H4/H1/M15) remains available in
+    `RegimeClassifier.classify_mtf/3` for back-compat tests and optional callers.
 
       | H4 regime  | H1 regime  | M15 regime    | composite |
       | ---------- | ---------- | ------------- | --------- |
@@ -41,14 +59,8 @@ defmodule Opus.Trading.RulesEngine do
 
       | strategy_type    | trending  | choppy    | uncertain | unknown   |
       | ---------------- | --------- | --------- | --------- | --------- |
-      | trend_following  | enabled   | disabled  | enabled   | disabled  |
-      | mean_reversion   | disabled  | enabled   | enabled   | disabled  |
-
-  `:uncertain` defaults to enabled. Most ADX readings fall in the 20-30
-  uncertain band; disabling there starves the strategies of trades without
-  fixing the root cause of poor outcomes (which is usually exit logic, not
-  entry filtering). When dynamic position sizing lands, `:uncertain` should
-  scale to reduced size rather than full size.
+        | trend_following  | enabled   | disabled  | disabled  | disabled  |
+        | mean_reversion   | disabled  | enabled   | disabled  | disabled  |
 
   `:unknown` fails closed — missing regime data is treated as no signal.
   Rust's `Rules::decision` fails open on an empty rules map as the bootstrap
@@ -61,7 +73,8 @@ defmodule Opus.Trading.RulesEngine do
 
   alias Opus.Auro.Client, as: Auro
   alias Opus.Repo
-  alias Opus.Trading.{LiveStrategy, RegimeDetector, Rule, Suspension}
+  alias Opus.Support.Polling
+  alias Opus.Trading.{LiveStrategy, RegimeClassifier, RegimeDetector, Rule, Suspension}
 
   import Ecto.Query
 
@@ -84,7 +97,7 @@ defmodule Opus.Trading.RulesEngine do
   @doc "Computes decisions once, persists rules, and pushes to Rust."
   @spec compute_and_push() :: {:ok, list(map())} | {:error, term()}
   def compute_and_push do
-    strategies = list_enabled_strategies()
+    strategies = list_live_strategies()
     regimes = RegimeDetector.get_all_regimes()
     open_suspensions = open_suspensions_by_strategy(strategies)
     decisions = Enum.map(strategies, &decide(&1, regimes, open_suspensions))
@@ -104,14 +117,14 @@ defmodule Opus.Trading.RulesEngine do
   def init(_opts) do
     Logger.info("[RulesEngine] Started (#{div(@poll_interval, 60_000)}min poll interval)")
 
-    Process.send_after(self(), :poll, @initial_delay)
+    Polling.schedule(self(), @initial_delay)
     {:ok, %{last_run: nil, poll_count: 0}}
   end
 
   @impl true
   def handle_info(:poll, state) do
     new_state = run_cycle(state)
-    Process.send_after(self(), :poll, @poll_interval)
+    Polling.schedule(self(), @poll_interval)
     {:noreply, new_state}
   end
 
@@ -129,7 +142,7 @@ defmodule Opus.Trading.RulesEngine do
   defp run_cycle(state) do
     # Skeleton of the cycle. Each step is a defp — fill in the bodies in order.
     #
-    # 1. Read all enabled live_strategies (we only compute rules for active ones).
+    # 1. Read all live_strategies rows in the universe.
     # 2. Read current regime map from RegimeDetector.
     # 3. For each strategy, derive a decision (enabled?, reason).
     # 4. Persist each decision to the `rules` table (upsert).
@@ -152,11 +165,10 @@ defmodule Opus.Trading.RulesEngine do
     end
   end
 
-  # Read all enabled rows from `live_strategies`. Returns a list of maps with
+  # Read all rows from `live_strategies`. Returns a list of maps with
   # the fields we need: `id`, `strategy_type`, `instrument`, `granularity`.
-  defp list_enabled_strategies do
+  defp list_live_strategies do
     from(s in LiveStrategy,
-      where: s.enabled == true,
       select: %{
         id: s.id,
         strategy_type: s.strategy_type,
@@ -170,34 +182,57 @@ defmodule Opus.Trading.RulesEngine do
   # Derive a single decision from a strategy and the current regime map.
   # Returns a map: `%{live_strategy_id, enabled, reason, computed_at}`.
   defp decide(strategy, regimes, open_suspensions) do
+    inputs = regime_inputs_for_strategy(strategy, regimes)
+    composite = RegimeClassifier.classify_for_inputs(inputs)
+    regime_inputs = to_structured_regime_inputs(composite, inputs)
+
     case Map.get(open_suspensions, strategy.id) do
       %{trigger_detail: trigger_detail} ->
         %{
           live_strategy_id: strategy.id,
           enabled: false,
           reason: "circuit_breaker: #{trigger_detail}",
+          regime_inputs: regime_inputs,
           computed_at: DateTime.utc_now()
         }
 
       nil ->
-        decide_from_regime(strategy, regimes)
+        decide_from_regime(strategy, inputs, composite, regime_inputs)
     end
   end
 
-  defp decide_from_regime(strategy, regimes) do
-    d = Map.get(regimes, {strategy.instrument, "D"}, %{regime: :unknown})
-    h4 = Map.get(regimes, {strategy.instrument, "H4"}, %{regime: :unknown})
-    h1 = Map.get(regimes, {strategy.instrument, "H1"}, %{regime: :unknown})
-    m15 = Map.get(regimes, {strategy.instrument, "M15"}, %{regime: :unknown})
-
-    regime = classify_mtf(h4, h1, m15)
-    {enabled, reason} = policy(strategy.strategy_type, regime, d, h4, h1, m15)
+  defp decide_from_regime(strategy, inputs, composite, regime_inputs) do
+    {enabled, reason} =
+      RegimeClassifier.policy_for_inputs(strategy.strategy_type, composite, inputs)
 
     %{
       live_strategy_id: strategy.id,
       enabled: enabled,
       reason: reason,
+      regime_inputs: regime_inputs,
       computed_at: DateTime.utc_now()
+    }
+  end
+
+  defp regime_inputs_for_strategy(strategy, regimes) do
+    strategy.granularity
+    |> Opus.Trading.Granularity.regime_frames_for_entry()
+    |> Enum.map(fn frame ->
+      {frame, Map.get(regimes, {strategy.instrument, frame}, %{regime: :unknown})}
+    end)
+  end
+
+  defp to_structured_regime_inputs(composite, frame_inputs) do
+    %{
+      composite: composite,
+      frames:
+        Enum.map(frame_inputs, fn {frame, frame_data} ->
+          %{
+            frame: frame,
+            regime: Map.get(frame_data, :regime),
+            adx: Map.get(frame_data, :adx)
+          }
+        end)
     }
   end
 
@@ -217,75 +252,31 @@ defmodule Opus.Trading.RulesEngine do
     end)
   end
 
-  # H4 anchors the trend; H1 must agree to lock in trending or choppy. M15 can
-  # veto: if it contradicts H4 and H1, downgrade to :uncertain. If either
-  # anchor is unknown, the whole composite is unknown (fail-closed).
-  defp classify_mtf(h4, h1, m15) do
-    h4_regime = h4[:regime] || :unknown
-    h1_regime = h1[:regime] || :unknown
-    m15_regime = m15[:regime] || :unknown
-
-    case {h4_regime, h1_regime} do
-      {:unknown, _} ->
-        :unknown
-
-      {_, :unknown} ->
-        :unknown
-
-      {:trending, :trending} ->
-        if m15_regime == :choppy, do: :uncertain, else: :trending
-
-      {:choppy, :choppy} ->
-        if m15_regime == :trending, do: :uncertain, else: :choppy
-
-      _ ->
-        # H4 and H1 disagree — mixed signals, avoid both strategies
-        :uncertain
-    end
-  end
-
-  defp policy("trend_following", :trending, d, h4, h1, m15),
-    do: {true, "trending TF enabled — #{adx_line(d, h4, h1, m15)}"}
-
-  defp policy("trend_following", :choppy, d, h4, h1, m15),
-    do: {false, "choppy TF disabled — #{adx_line(d, h4, h1, m15)}"}
-
-  defp policy("trend_following", :uncertain, d, h4, h1, m15),
-    do: {true, "uncertain TF enabled (fail-open) — #{adx_line(d, h4, h1, m15)}"}
-
-  defp policy("mean_reversion", :choppy, d, h4, h1, m15),
-    do: {true, "choppy MR enabled — #{adx_line(d, h4, h1, m15)}"}
-
-  defp policy("mean_reversion", :trending, d, h4, h1, m15),
-    do: {false, "trending MR disabled — #{adx_line(d, h4, h1, m15)}"}
-
-  defp policy("mean_reversion", :uncertain, d, h4, h1, m15),
-    do: {true, "uncertain MR enabled (fail-open) — #{adx_line(d, h4, h1, m15)}"}
-
-  # fail-closed: unknown regime, unknown strategy_type, etc.
-  defp policy(_strategy_type, regime, _d, _h4, _h1, _m15),
-    do: {false, "no regime data (#{inspect(regime)}) — defaulting to disabled"}
-
-  defp adx_line(d, h4, h1, m15) do
-    "D:#{format_adx(d[:adx])} H4:#{format_adx(h4[:adx])} " <>
-      "H1:#{format_adx(h1[:adx])} M15:#{format_adx(m15[:adx])}"
-  end
-
-  defp format_adx(nil), do: "n/a"
-  defp format_adx(adx), do: :erlang.float_to_binary(adx, decimals: 1)
-
   # Persist all decisions to the rules table, then push the full map to Rust.
   # Returns `:ok` or `{:error, reason}`. If persistence succeeds but push fails,
   # return error — the next tick will re-push with whatever's in the DB.
   defp persist_and_push(decisions) do
-    Enum.each(decisions, fn d ->
-      %Rule{}
-      |> Rule.changeset(d)
-      |> Repo.insert(
-        on_conflict: {:replace, [:enabled, :reason, :computed_at, :updated_at]},
-        conflict_target: :live_strategy_id
-      )
-    end)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    rows =
+      Enum.map(decisions, fn d ->
+        %{
+          live_strategy_id: d.live_strategy_id,
+          enabled: d.enabled,
+          reason: d.reason,
+          regime_inputs: d.regime_inputs,
+          computed_at: d.computed_at,
+          inserted_at: now,
+          updated_at: now
+        }
+      end)
+
+    Repo.insert_all(
+      Rule,
+      rows,
+      on_conflict: {:replace, [:enabled, :reason, :regime_inputs, :computed_at, :updated_at]},
+      conflict_target: :live_strategy_id
+    )
 
     rules_map =
       Enum.into(decisions, %{}, fn d ->

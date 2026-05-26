@@ -18,6 +18,8 @@ fn sample_position(trade_id: &str) -> OpenPosition {
         granularity: Granularity::H1,
         worst_price: 1.12345,
         best_price: 1.12345,
+        transition_failed_at: None,
+        strategy_type: "mean_reversion".to_string(),
     }
 }
 

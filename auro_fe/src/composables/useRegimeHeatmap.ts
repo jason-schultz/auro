@@ -4,6 +4,7 @@ export type RegimeState = "trending" | "choppy" | "uncertain" | "unknown";
 
 export interface RegimeHeatmapCell {
     granularity: string;
+    applicable: boolean;
     regime: RegimeState;
     adx: number | null;
     bandwidth_pct: number | null;

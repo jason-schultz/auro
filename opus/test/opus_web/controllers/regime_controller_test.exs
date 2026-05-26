@@ -69,18 +69,18 @@ defmodule OpusWeb.RegimeControllerTest do
     assert %{
              "count" => 1,
              "instruments" => ["EUR_USD"],
-             "granularities" => ["D", "H4", "H1", "M15"],
+             "granularities" => ["H4", "H1"],
              "rows" => [row]
            } = json_response(conn, 200)
 
     assert row["instrument"] == "EUR_USD"
-    assert length(row["cells"]) == 4
+    assert length(row["cells"]) == 2
 
     h1 = Enum.find(row["cells"], &(&1["granularity"] == "H1"))
-    d = Enum.find(row["cells"], &(&1["granularity"] == "D"))
+    h4 = Enum.find(row["cells"], &(&1["granularity"] == "H4"))
 
     assert h1["regime"] == "trending"
     assert is_number(h1["adx"])
-    assert d["regime"] == "unknown"
+    assert h4["regime"] == "unknown"
   end
 end

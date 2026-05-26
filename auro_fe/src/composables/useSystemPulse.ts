@@ -36,8 +36,13 @@ function inferPulse(value: number | null, threshold: number): PulseState {
 function isForexClosed(now: Date): boolean {
     const day = now.getUTCDay();
     const hour = now.getUTCHours();
-    if (day === 6) return true;
-    if (day === 0 && hour < 21) return true;
+    // Forex closes Friday 21:00 UTC (5pm ET during EDT) and opens Sunday at the
+    // same UTC hour. Note: during EST (Nov-Mar) the actual close/open is 22:00
+    // UTC; we approximate with 21:00 UTC year-round, which means a 1-hour false
+    // "closed" window in winter. Acceptable trade-off for now.
+    if (day === 5 && hour >= 21) return true;  // Friday after close
+    if (day === 6) return true;                 // Saturday all day
+    if (day === 0 && hour < 21) return true;   // Sunday before open
     return false;
 }
 

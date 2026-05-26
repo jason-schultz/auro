@@ -37,6 +37,7 @@ const DEFAULT_INSTRUMENTS: &[&str] = &[
     "USD_JPY",
     "AUD_USD",
     "XAU_USD",
+    "XCU_USD",
     // Crosses
     "EUR_JPY",
     "EUR_GBP",
@@ -148,7 +149,7 @@ pub async fn run() -> anyhow::Result<()> {
         eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
     };
 
-    let instrument_metadata = load_instrument_metadata(&state.oanda).await;
+    let instrument_metadata = load_instrument_metadata(&state.oanda, &state.db).await;
     {
         let mut cache = state.live.instrument_metadata.write().await;
         *cache = instrument_metadata;
