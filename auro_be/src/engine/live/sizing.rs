@@ -15,6 +15,7 @@ pub struct SizingInput<'a> {
     pub instrument: &'a str,
     pub instrument_min_units: i64,
     pub instrument_max_units: Option<i64>,
+    pub instrument_policy_max_units: Option<i64>,
     pub strategy_max_units: Option<i64>,
 }
 
@@ -36,6 +37,7 @@ pub enum SkipReason {
     InvalidRiskPct,
     ZeroSlDistance,
     BelowMinimumUnits,
+    PolicyBelowMinimum,
     ExceedsMaxPositionPct,
     ExceedsConcurrentExposure,
     NavUnavailable,
@@ -47,6 +49,7 @@ impl SkipReason {
             SkipReason::InvalidRiskPct => "invalid_risk_pct",
             SkipReason::ZeroSlDistance => "zero_sl_distance",
             SkipReason::BelowMinimumUnits => "below_minimum_units",
+            SkipReason::PolicyBelowMinimum => "policy_below_minimum",
             SkipReason::ExceedsMaxPositionPct => "exceeds_max_position_pct",
             SkipReason::ExceedsConcurrentExposure => "exceeds_concurrent_exposure",
             SkipReason::NavUnavailable => "nav_unavailable",
@@ -108,17 +111,21 @@ pub fn compute_units(input: SizingInput<'_>) -> SizingDecision {
 
     metadata.raw_units = raw_units;
 
-    if let Some(cap) = input.instrument_max_units {
-        if units > cap {
-            units = cap;
-            metadata.clamps_applied.push("instrument_max".to_string());
-        }
-    }
+    // Each cap is compared against the raw computed units so clamps_applied
+    // records every cap that would have constrained sizing, even when two caps
+    // happen to tie. The final value is the min of all caps that are set.
+    let caps = [
+        ("instrument_max", input.instrument_max_units),
+        ("strategy_max", input.strategy_max_units),
+        ("policy_cap", input.instrument_policy_max_units),
+    ];
 
-    if let Some(cap) = input.strategy_max_units {
-        if units > cap {
-            units = cap;
-            metadata.clamps_applied.push("strategy_max".to_string());
+    for (label, cap) in caps {
+        if let Some(cap) = cap {
+            if units > cap {
+                metadata.clamps_applied.push(label.to_string());
+            }
+            units = units.min(cap);
         }
     }
 
@@ -132,6 +139,15 @@ pub fn compute_units(input: SizingInput<'_>) -> SizingDecision {
             reason: SkipReason::ExceedsMaxPositionPct,
             metadata,
         };
+    }
+
+    if let Some(policy_cap) = input.instrument_policy_max_units {
+        if policy_cap < input.instrument_min_units {
+            return SizingDecision::Skip {
+                reason: SkipReason::PolicyBelowMinimum,
+                metadata,
+            };
+        }
     }
 
     if units < input.instrument_min_units {
@@ -194,6 +210,7 @@ mod tests {
             instrument: "EUR_USD",
             instrument_min_units: 1,
             instrument_max_units: None,
+            instrument_policy_max_units: None,
             strategy_max_units: None,
         }
     }
@@ -337,6 +354,54 @@ mod tests {
         match decision {
             SizingDecision::Skip { reason, .. } => assert_eq!(reason, SkipReason::NavUnavailable),
             SizingDecision::Place { .. } => panic!("expected skip"),
+        }
+    }
+
+    #[test]
+    fn policy_cap_clamps_strategy_max() {
+        let mut input = make_input();
+        input.strategy_max_units = Some(100);
+        input.instrument_policy_max_units = Some(10);
+
+        let decision = compute_units(input);
+        match decision {
+            SizingDecision::Place { units, metadata } => {
+                assert_eq!(units, 10);
+                assert!(metadata.clamps_applied.iter().any(|c| c == "policy_cap"));
+            }
+            SizingDecision::Skip { reason, .. } => panic!("unexpected skip: {:?}", reason),
+        }
+    }
+
+    #[test]
+    fn policy_cap_below_oanda_min_skips() {
+        let mut input = make_input();
+        input.instrument_policy_max_units = Some(1);
+        input.instrument_min_units = 10;
+
+        let decision = compute_units(input);
+        match decision {
+            SizingDecision::Skip { reason, .. } => {
+                assert_eq!(reason, SkipReason::PolicyBelowMinimum)
+            }
+            SizingDecision::Place { .. } => panic!("expected policy skip"),
+        }
+    }
+
+    #[test]
+    fn no_policy_cap_unchanged() {
+        let mut input = make_input();
+        input.strategy_max_units = Some(120);
+        input.instrument_policy_max_units = None;
+
+        let decision = compute_units(input);
+        match decision {
+            SizingDecision::Place { units, metadata } => {
+                assert_eq!(units, 120);
+                assert!(!metadata.clamps_applied.iter().any(|c| c == "policy_cap"));
+                assert!(metadata.clamps_applied.iter().any(|c| c == "strategy_max"));
+            }
+            SizingDecision::Skip { reason, .. } => panic!("unexpected skip: {:?}", reason),
         }
     }
 }
