@@ -329,10 +329,11 @@ mod tests {
             strategy_type: "mean_reversion".to_string(),
             parameters: json!({
                 "ma_period": 20,
-                "entry_threshold": 0.01,
-                "exit_threshold": 0.005,
-                "stop_loss": -0.02,
-                "regime_filter": true
+                "rsi_period": 14,
+                "entry_z_threshold": 1.5,
+                "rsi_oversold": 30.0,
+                "rsi_overbought": 70.0,
+                "stop_z_threshold": 3.5
             }),
         };
     }

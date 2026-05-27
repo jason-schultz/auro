@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!(
         "{:<32} {:>18} {:>18} {:>10} {:>16} {:>10}",
-        "Strategy", "Old median_sharpe", "New median_sharpe", "Delta", "New pass_rate", "Candidate"
+        "Strategy", "Old median_sharpe", "New median_sharpe", "Delta", "New pass_rate", "Demote?"
     );
 
     for row in rows {

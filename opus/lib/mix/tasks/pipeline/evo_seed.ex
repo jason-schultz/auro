@@ -7,15 +7,21 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
   backtested — generation-1 children are spawned immediately with mutated params.
 
   Usage:
-    mix pipeline.evo_seed                        # H1, dry-run false
+    mix pipeline.evo_seed                        # H1, both strategies
     mix pipeline.evo_seed --granularity H4
     mix pipeline.evo_seed --granularity M15
     mix pipeline.evo_seed --granularity M5
+    mix pipeline.evo_seed --strategy mean_reversion         # only MR
+    mix pipeline.evo_seed --strategy trend_following        # only TF
+    mix pipeline.evo_seed --strategy mean_reversion --granularity H1
     mix pipeline.evo_seed --clean                # truncate all pipeline data first
     mix pipeline.evo_seed --clean --granularity H1
 
   --clean truncates strategy_configs, strategy_evaluations, and pending/running
   pipeline Oban jobs before seeding. Does NOT touch live_strategies.
+
+  --strategy restricts the run to a single strategy type. Valid values:
+    "mean_reversion", "trend_following". Omit to seed both.
 
   Skips combos that already have an active evo lineage (evo_generation=0 seed
   with the same instrument/strategy/granularity).
@@ -40,6 +46,9 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
 
   # Seed params are the starting point for mutation — exact values matter less
   # in exploratory mode since gen-1 children are immediately mutated.
+  # MR seeds use the v1 Investopedia-baseline params (Z-score + RSI + return-to-mean
+  # exit). The Z threshold stays at the textbook 1.5 across timeframes; only
+  # ma_period varies (kept at 20 — mutation will explore around it).
   @seed_params %{
     "H1" => %{
       "trend_following" => %{
@@ -53,10 +62,11 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
       },
       "mean_reversion" => %{
         "ma_period" => 20,
-        "entry_threshold" => -0.005,
-        "exit_threshold" => 0.003,
-        "stop_loss" => -0.01,
-        "regime_filter" => true
+        "rsi_period" => 14,
+        "entry_z_threshold" => 1.5,
+        "rsi_oversold" => 30.0,
+        "rsi_overbought" => 70.0,
+        "stop_z_threshold" => 3.5
       }
     },
     "H4" => %{
@@ -71,10 +81,11 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
       },
       "mean_reversion" => %{
         "ma_period" => 20,
-        "entry_threshold" => -0.008,
-        "exit_threshold" => 0.005,
-        "stop_loss" => -0.015,
-        "regime_filter" => true
+        "rsi_period" => 14,
+        "entry_z_threshold" => 1.5,
+        "rsi_oversold" => 30.0,
+        "rsi_overbought" => 70.0,
+        "stop_z_threshold" => 3.5
       }
     },
     "M15" => %{
@@ -89,10 +100,11 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
       },
       "mean_reversion" => %{
         "ma_period" => 20,
-        "entry_threshold" => -0.003,
-        "exit_threshold" => 0.002,
-        "stop_loss" => -0.008,
-        "regime_filter" => true
+        "rsi_period" => 14,
+        "entry_z_threshold" => 1.5,
+        "rsi_oversold" => 30.0,
+        "rsi_overbought" => 70.0,
+        "stop_z_threshold" => 3.5
       }
     },
     "M5" => %{
@@ -107,10 +119,11 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
       },
       "mean_reversion" => %{
         "ma_period" => 20,
-        "entry_threshold" => -0.002,
-        "exit_threshold" => 0.0015,
-        "stop_loss" => -0.005,
-        "regime_filter" => true
+        "rsi_period" => 14,
+        "entry_z_threshold" => 1.5,
+        "rsi_oversold" => 30.0,
+        "rsi_overbought" => 70.0,
+        "stop_z_threshold" => 3.5
       }
     }
   }
@@ -120,10 +133,13 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
     Mix.Task.run("app.start")
 
     {opts, _} =
-      OptionParser.parse!(args, strict: [clean: :boolean, granularity: :string])
+      OptionParser.parse!(args,
+        strict: [clean: :boolean, granularity: :string, strategy: :string]
+      )
 
     granularity = Keyword.get(opts, :granularity, "H1")
     clean? = Keyword.get(opts, :clean, false)
+    strategy_filter = Keyword.get(opts, :strategy)
 
     unless Map.has_key?(@seed_params, granularity) do
       Mix.shell().error(
@@ -134,7 +150,24 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
     end
 
     params_for_gran = Map.fetch!(@seed_params, granularity)
-    strategies = Map.keys(params_for_gran)
+    all_strategies = Map.keys(params_for_gran)
+
+    strategies =
+      case strategy_filter do
+        nil ->
+          all_strategies
+
+        chosen ->
+          unless chosen in all_strategies do
+            Mix.shell().error(
+              "Unknown strategy: #{chosen}. Valid: #{Enum.join(all_strategies, ", ")}"
+            )
+
+            exit(:shutdown)
+          end
+
+          [chosen]
+      end
 
     if clean? do
       Mix.shell().info("=== Cleaning pipeline data ===")

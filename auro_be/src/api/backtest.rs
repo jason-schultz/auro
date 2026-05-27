@@ -89,10 +89,13 @@ pub async fn run_grid_search(
             let config = grid::GridSearchConfig {
                 instrument: instrument.clone(),
                 granularity: timeframe.clone(),
-                ma_periods: vec![10, 15, 20, 30, 50, 100, 200],
-                entry_thresholds: vec![-0.001, -0.002, -0.003, -0.004, -0.005, -0.008, -0.012],
-                exit_thresholds: vec![0.0, 0.0005, 0.001, 0.002, 0.003],
-                stop_losses: vec![-0.002, -0.004, -0.006, -0.01],
+                // MR v1 grid: explore around the Investopedia baseline (Z=1.5, RSI 30/70).
+                ma_periods: vec![10, 15, 20, 30, 50],
+                rsi_periods: vec![10, 14, 21],
+                entry_z_thresholds: vec![1.5, 2.0, 2.5],
+                rsi_oversold_levels: vec![25.0, 30.0, 35.0],
+                rsi_overbought_levels: vec![65.0, 70.0, 75.0],
+                stop_z_thresholds: vec![3.0, 3.5, 4.0],
             };
 
             tracing::info!(

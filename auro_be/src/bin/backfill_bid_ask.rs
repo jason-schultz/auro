@@ -21,7 +21,7 @@ struct Ohlc {
     close: f64,
 }
 
-const OANDA_BATCH_LIMIT: usize = 5000;
+const OANDA_BATCH_LIMIT: usize = 4000;
 const REQUEST_PAUSE_MS: u64 = 175;
 
 async fn load_targets(pool: &PgPool) -> anyhow::Result<Vec<Target>> {
@@ -109,7 +109,7 @@ async fn backfill_target(
         return Ok(0);
     }
 
-    let step = granularity_step(&target.granularity)?;
+    let _step = granularity_step(&target.granularity)?;
     let total_batches = timestamps.len().div_ceil(OANDA_BATCH_LIMIT);
     let mut updated_total = 0usize;
 
@@ -119,23 +119,25 @@ async fn backfill_target(
             .expect("chunk is never empty")
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        let to = (*chunk.last().expect("chunk is never empty") + step)
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
 
+        // Use count instead of (from, to) range. OANDA's range-based query
+        // counts ITS view of candles in the range (which can exceed our local
+        // chunk size due to weekend/holiday/session-boundary differences) and
+        // rejects with "Maximum value for 'count' exceeded" past 5000.
+        // count-based query bounds the response size deterministically.
         let response = oanda
             .get_candles(
                 &target.instrument,
                 &target.granularity,
-                None,
+                Some(OANDA_BATCH_LIMIT as i32),
                 Some(&from),
-                Some(&to),
+                None,
             )
             .await
             .with_context(|| {
                 format!(
-                    "failed OANDA request for {} {} from {} to {}",
-                    target.instrument, target.granularity, from, to
+                    "failed OANDA request for {} {} starting at {}",
+                    target.instrument, target.granularity, from
                 )
             })?;
 

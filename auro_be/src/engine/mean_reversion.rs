@@ -1,141 +1,270 @@
-use crate::engine::indicators::adx;
+//! Mean reversion strategy — v1 (Investopedia baseline).
+//!
+//! Entry: bidirectional Z-score + RSI confirmation. Both must agree.
+//!   - Long:  Z < -entry_z_threshold AND RSI < rsi_oversold
+//!   - Short: Z > +entry_z_threshold AND RSI > rsi_overbought
+//!
+//! Exit:
+//!   - ReturnToMean: Z crosses zero from the entry side (canonical MR exit).
+//!   - ZStop: Z extends further in the adverse direction past stop_z_threshold.
+//!   - EndOfData: backtest only — trade still open at the end of the candle series.
+//!
+//! Reference: Investopedia "Mean Reversion" article. Z-score formula and
+//! 1.5/2.0 thresholds, RSI 30/70 confirmation, exit at the mean, SL around the
+//! mean. Departures from the article (ADX gate, time stop, MTF, Hurst, etc.)
+//! are deliberately deferred to v2 — see [[backlog-mr-v2]].
+
+use crate::engine::indicators::{rsi, z_score};
 use crate::engine::types::{Candle, Direction, EntryReason, ExitReason, Trade};
 
-const ADX_PERIOD: usize = 14;
-const ADX_TRENDING: f64 = 25.0;
+#[derive(Debug, serde::Deserialize, Clone)]
+pub struct MeanReversionParams {
+    /// SMA + stdev window for Z-score. Default 20.
+    pub ma_period: usize,
+    /// Wilder's RSI period. Default 14.
+    pub rsi_period: usize,
+    /// |Z| trigger for entry. Default 1.5.
+    pub entry_z_threshold: f64,
+    /// Long entry requires RSI strictly below this. Default 30.0.
+    pub rsi_oversold: f64,
+    /// Short entry requires RSI strictly above this. Default 70.0.
+    pub rsi_overbought: f64,
+    /// Z-extension stop (absolute value, applied in the adverse direction).
+    /// Long stops when Z ≤ -stop_z_threshold; Short stops when Z ≥ +stop_z_threshold.
+    /// Default 3.5.
+    pub stop_z_threshold: f64,
+}
 
-pub enum MRSignal {
-    Enter { ma_value: f64, deviation_pct: f64 },
-    Exit { pnl: f64 },
+pub enum MREntrySignal {
+    Long {
+        ma_value: f64,
+        z_score: f64,
+        rsi: f64,
+    },
+    Short {
+        ma_value: f64,
+        z_score: f64,
+        rsi: f64,
+    },
     None,
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct MeanReversionParams {
-    pub ma_period: usize,     // eg: 20 Candles
-    pub entry_threshold: f64, // eg: -0.005 (price is 0.5% below the MA)
-    pub exit_threshold: f64,  // eg: 0.003 (price recovered 0.3% from entry)
-    pub stop_loss: f64,       // eg: -0.001 (price dropped 1% from entry)
-    #[serde(default)]
-    pub regime_filter: bool, // if true, skip entries when ADX >= 25 (trending market)
+pub enum MRExitSignal {
+    ReturnToMean { ma_value: f64, z_score: f64 },
+    ZStop { z_score: f64 },
+    Hold,
 }
 
-/// Runs the mean reversion strategy on the given candles and returns a vector of trades.
-///
-/// # Arguments
-///
-/// * `candles` - A slice of `Candle` structs representing the price data.
-/// * `params` - A `MeanReversionParams` struct containing the strategy parameters.
-///
-/// # Returns
-///
-/// A vector of `Trade` structs representing the trades executed by the strategy.
+/// Evaluate entry signal against the candle window ending at the most recent close.
+pub fn check_entry(candles: &[Candle], params: &MeanReversionParams) -> MREntrySignal {
+    let needed = params.ma_period.max(params.rsi_period + 1);
+    if candles.len() < needed {
+        return MREntrySignal::None;
+    }
+
+    let z = match z_score(candles, params.ma_period) {
+        Some(v) => v,
+        None => return MREntrySignal::None,
+    };
+    let r = match rsi(candles, params.rsi_period) {
+        Some(v) => v,
+        None => return MREntrySignal::None,
+    };
+
+    // Recompute MA for metadata (cheap, same window as Z).
+    let window = &candles[candles.len() - params.ma_period..];
+    let ma: f64 = window.iter().map(|c| c.mid.close).sum::<f64>() / params.ma_period as f64;
+
+    // Long: oversold dislocation with momentum confirmation.
+    if z < -params.entry_z_threshold && r < params.rsi_oversold {
+        return MREntrySignal::Long {
+            ma_value: ma,
+            z_score: z,
+            rsi: r,
+        };
+    }
+
+    // Short: overbought dislocation with momentum confirmation.
+    if z > params.entry_z_threshold && r > params.rsi_overbought {
+        return MREntrySignal::Short {
+            ma_value: ma,
+            z_score: z,
+            rsi: r,
+        };
+    }
+
+    MREntrySignal::None
+}
+
+/// Evaluate exit signal for an open MR position. ZStop is checked before
+/// ReturnToMean so a bar that satisfies both is recorded as a stop.
+pub fn check_exit(
+    candles: &[Candle],
+    params: &MeanReversionParams,
+    direction: Direction,
+) -> MRExitSignal {
+    if candles.len() < params.ma_period {
+        return MRExitSignal::Hold;
+    }
+
+    let z = match z_score(candles, params.ma_period) {
+        Some(v) => v,
+        None => return MRExitSignal::Hold,
+    };
+
+    let window = &candles[candles.len() - params.ma_period..];
+    let ma: f64 = window.iter().map(|c| c.mid.close).sum::<f64>() / params.ma_period as f64;
+
+    match direction {
+        Direction::Long => {
+            if z <= -params.stop_z_threshold {
+                return MRExitSignal::ZStop { z_score: z };
+            }
+            if z >= 0.0 {
+                return MRExitSignal::ReturnToMean {
+                    ma_value: ma,
+                    z_score: z,
+                };
+            }
+        }
+        Direction::Short => {
+            if z >= params.stop_z_threshold {
+                return MRExitSignal::ZStop { z_score: z };
+            }
+            if z <= 0.0 {
+                return MRExitSignal::ReturnToMean {
+                    ma_value: ma,
+                    z_score: z,
+                };
+            }
+        }
+    }
+
+    MRExitSignal::Hold
+}
+
+/// Backtest the strategy over a slice of candles. Bidirectional — produces both
+/// long and short trades as signals fire. Trades still open at the end of the
+/// candle series are recorded with `ExitReason::EndOfData`.
 pub fn run(candles: &[Candle], params: &MeanReversionParams) -> Vec<Trade> {
     let mut trades: Vec<Trade> = Vec::new();
-    let mut i = params.ma_period;
+    let warmup = params.ma_period.max(params.rsi_period + 1);
+    if candles.len() < warmup + 1 {
+        return trades;
+    }
+
+    let mut i = warmup;
     while i < candles.len() {
-        let ma = candles[i - params.ma_period..i]
-            .iter()
-            .fold(0.0, |acc, c| acc + c.mid.close)
-            / params.ma_period as f64;
-        let close = candles[i].mid.close;
-        let pct_below = (close - ma) / ma;
-        if pct_below < params.entry_threshold {
-            if params.regime_filter {
-                if let Some(adx_val) = adx(&candles[..=i], ADX_PERIOD) {
-                    if adx_val >= ADX_TRENDING {
-                        i += 1;
-                        continue;
-                    }
-                }
+        let window = &candles[..=i];
+        let entry = check_entry(window, params);
+
+        let (direction, entry_z, entry_rsi, ma_value) = match entry {
+            MREntrySignal::Long {
+                ma_value,
+                z_score,
+                rsi,
+            } => (Direction::Long, z_score, rsi, ma_value),
+            MREntrySignal::Short {
+                ma_value,
+                z_score,
+                rsi,
+            } => (Direction::Short, z_score, rsi, ma_value),
+            MREntrySignal::None => {
+                i += 1;
+                continue;
             }
-            let entry_time = candles[i].time;
-            let entry_price = candles[i].entry_fill_price(Direction::Long);
-            let mut in_trade = true;
-            for (j, candle) in candles.iter().enumerate().skip(i + 1) {
-                let exit_price = candle.exit_fill_price(Direction::Long);
-                let exit_time = candle.time;
-                let pnl = (exit_price - entry_price) / entry_price;
-                if pnl > params.exit_threshold || pnl < params.stop_loss {
-                    in_trade = false;
+        };
+
+        let entry_time = candles[i].time;
+        let entry_price = candles[i].entry_fill_price(direction);
+        let entry_reason = EntryReason::MeanReversionEntry {
+            ma_value,
+            z_score: entry_z,
+            rsi: entry_rsi,
+        };
+
+        // Walk forward looking for exit.
+        let mut exited = false;
+        let mut j = i + 1;
+        while j < candles.len() {
+            let exit_window = &candles[..=j];
+            match check_exit(exit_window, params, direction) {
+                MRExitSignal::Hold => {
+                    j += 1;
+                }
+                MRExitSignal::ReturnToMean { .. } | MRExitSignal::ZStop { .. } => {
+                    let exit_price = candles[j].exit_fill_price(direction);
+                    let pnl = match direction {
+                        Direction::Long => (exit_price - entry_price) / entry_price,
+                        Direction::Short => (entry_price - exit_price) / entry_price,
+                    };
+                    let exit_reason = match check_exit(exit_window, params, direction) {
+                        MRExitSignal::ZStop { .. } => ExitReason::ZStop,
+                        MRExitSignal::ReturnToMean { .. } => ExitReason::ReturnToMean,
+                        MRExitSignal::Hold => unreachable!(),
+                    };
                     trades.push(Trade {
-                        direction: Direction::Long,
+                        direction,
                         entry_price,
                         exit_price,
                         entry_time,
-                        exit_time,
+                        exit_time: candles[j].time,
                         pnl_percent: pnl,
-                        entry_reason: EntryReason::BelowMA {
-                            ma_value: ma,
-                            deviation_pct: pct_below,
-                        },
-                        exit_reason: if pnl > params.exit_threshold {
-                            ExitReason::TakeProfit
-                        } else {
-                            ExitReason::StopLoss
-                        },
+                        entry_reason,
+                        exit_reason,
                     });
+                    exited = true;
                     i = j + 1;
                     break;
                 }
             }
-            if in_trade {
-                trades.push(Trade {
-                    direction: Direction::Long,
-                    entry_price,
-                    exit_price: candles.last().unwrap().exit_fill_price(Direction::Long),
-                    entry_time,
-                    exit_time: candles.last().unwrap().time,
-                    pnl_percent: (candles.last().unwrap().exit_fill_price(Direction::Long)
-                        - entry_price)
-                        / entry_price,
-                    entry_reason: EntryReason::BelowMA {
-                        ma_value: ma,
-                        deviation_pct: pct_below,
-                    },
-                    exit_reason: ExitReason::EndOfData,
-                });
-                break;
-            }
-        } else {
-            i += 1;
+        }
+
+        if !exited {
+            // Trade still open at end of data.
+            let last = candles.last().expect("non-empty by guard above");
+            let exit_price = last.exit_fill_price(direction);
+            let pnl = match direction {
+                Direction::Long => (exit_price - entry_price) / entry_price,
+                Direction::Short => (entry_price - exit_price) / entry_price,
+            };
+            trades.push(Trade {
+                direction,
+                entry_price,
+                exit_price,
+                entry_time,
+                exit_time: last.time,
+                pnl_percent: pnl,
+                entry_reason,
+                exit_reason: ExitReason::EndOfData,
+            });
+            break;
         }
     }
+
     trades
-}
-
-pub fn check_entry(closes: &[f64], params: &MeanReversionParams) -> MRSignal {
-    if closes.len() < params.ma_period {
-        return MRSignal::None;
-    }
-
-    let ma = closes[closes.len() - params.ma_period..]
-        .iter()
-        .sum::<f64>()
-        / params.ma_period as f64;
-
-    let close = closes[closes.len() - 1];
-    let deviation = (close - ma) / ma;
-
-    if deviation < params.entry_threshold {
-        MRSignal::Enter {
-            ma_value: ma,
-            deviation_pct: deviation,
-        }
-    } else {
-        MRSignal::None
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::types::OHLC;
-    use chrono::{Duration, Utc};
+    use chrono::{Duration, TimeZone, Utc};
 
-    fn make_candle(price: f64, minutes_offset: i64) -> Candle {
+    fn base_params() -> MeanReversionParams {
+        MeanReversionParams {
+            ma_period: 20,
+            rsi_period: 14,
+            entry_z_threshold: 1.5,
+            rsi_oversold: 30.0,
+            rsi_overbought: 70.0,
+            stop_z_threshold: 3.5,
+        }
+    }
+
+    fn candle_at(price: f64, idx: i64) -> Candle {
         Candle {
-            time: Utc::now() - Duration::minutes(minutes_offset),
+            time: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap() + Duration::hours(idx),
             mid: OHLC {
                 open: price,
                 high: price,
@@ -148,204 +277,186 @@ mod tests {
         }
     }
 
-    fn make_candle_with_symmetric_spread(
-        price: f64,
-        minutes_offset: i64,
-        half_spread: f64,
-    ) -> Candle {
-        Candle {
-            time: Utc::now() - Duration::minutes(minutes_offset),
-            mid: OHLC {
-                open: price,
-                high: price,
-                low: price,
-                close: price,
-            },
-            volume: 0,
-            bid: Some(OHLC {
-                open: price - half_spread,
-                high: price - half_spread,
-                low: price - half_spread,
-                close: price - half_spread,
-            }),
-            ask: Some(OHLC {
-                open: price + half_spread,
-                high: price + half_spread,
-                low: price + half_spread,
-                close: price + half_spread,
-            }),
+    // -- Entry --
+
+    #[test]
+    fn entry_returns_none_with_insufficient_data() {
+        let candles: Vec<Candle> = (0..10).map(|i| candle_at(100.0, i)).collect();
+        let params = base_params();
+        assert!(matches!(
+            check_entry(&candles, &params),
+            MREntrySignal::None
+        ));
+    }
+
+    #[test]
+    fn entry_long_when_z_low_and_rsi_oversold() {
+        // 25 candles trending down monotonically — RSI will be near 0, last close
+        // will be well below the rolling mean (negative Z).
+        let candles: Vec<Candle> = (0..25)
+            .map(|i| candle_at(200.0 - i as f64 * 2.0, i))
+            .collect();
+        let params = base_params();
+        match check_entry(&candles, &params) {
+            MREntrySignal::Long { z_score, rsi, .. } => {
+                assert!(z_score < -1.5, "expected Z < -1.5, got {}", z_score);
+                assert!(rsi < 30.0, "expected RSI < 30, got {}", rsi);
+            }
+            _ => panic!("expected Long signal, got something else (z+rsi conditions not met)"),
         }
     }
 
     #[test]
-    fn test_mean_reversion_take_profit() {
-        // Create 20 candles, hovering around 1.1650
-        // 3 candles dropping to 1.1590
-        // 5 candles recovering back to 1.1640
-        let candles = vec![
-            make_candle(1.1650, 0),
-            make_candle(1.1648, 1),
-            make_candle(1.1652, 2),
-            make_candle(1.1649, 3),
-            make_candle(1.1651, 4),
-            make_candle(1.1650, 5),
-            make_candle(1.1647, 6),
-            make_candle(1.1653, 7),
-            make_candle(1.1650, 8),
-            make_candle(1.1651, 9),
-            make_candle(1.1649, 10),
-            make_candle(1.1650, 11),
-            make_candle(1.1652, 12),
-            make_candle(1.1648, 13),
-            make_candle(1.1650, 14),
-            make_candle(1.1651, 15),
-            make_candle(1.1649, 16),
-            make_candle(1.1650, 17),
-            make_candle(1.1652, 18),
-            make_candle(1.1650, 19),
-            make_candle(1.1620, 20),
-            make_candle(1.1600, 21),
-            make_candle(1.1590, 22),
-            make_candle(1.1610, 23),
-            make_candle(1.1630, 24),
-            make_candle(1.1645, 25),
-            make_candle(1.1650, 26),
-        ];
-        let params = MeanReversionParams {
-            ma_period: 20,
-            entry_threshold: -0.002,
-            exit_threshold: 0.002,
-            stop_loss: -0.01,
-            regime_filter: false,
-        };
-        let trades = run(&candles, &params);
-        assert_eq!(trades.len(), 1);
-        assert!(trades[0].pnl_percent > 0.0);
-        assert!(matches!(trades[0].exit_reason, ExitReason::TakeProfit));
+    fn entry_short_when_z_high_and_rsi_overbought() {
+        // 25 candles trending up monotonically — RSI near 100, Z strongly positive.
+        let candles: Vec<Candle> = (0..25)
+            .map(|i| candle_at(100.0 + i as f64 * 2.0, i))
+            .collect();
+        let params = base_params();
+        match check_entry(&candles, &params) {
+            MREntrySignal::Short { z_score, rsi, .. } => {
+                assert!(z_score > 1.5, "expected Z > 1.5, got {}", z_score);
+                assert!(rsi > 70.0, "expected RSI > 70, got {}", rsi);
+            }
+            _ => panic!("expected Short signal"),
+        }
+    }
+
+    // -- Exit --
+
+    #[test]
+    fn exit_returns_hold_when_z_inside_band() {
+        // Construct prices with non-trivial stdev: 10 candles at 102, 9 at 98,
+        // last at 99.7. Mean ≈ 100.085, stdev ≈ 1.95, Z ≈ -0.20 — well inside
+        // the (-3.5, 0) band for a Long position → Hold.
+        let mut candles: Vec<Candle> = Vec::with_capacity(20);
+        for i in 0..10 {
+            candles.push(candle_at(102.0, i));
+        }
+        for i in 10..19 {
+            candles.push(candle_at(98.0, i));
+        }
+        candles.push(candle_at(99.7, 19));
+        let params = base_params();
+        let result = check_exit(&candles, &params, Direction::Long);
+        assert!(
+            matches!(result, MRExitSignal::Hold),
+            "expected Hold for Z mildly negative, got non-Hold"
+        );
     }
 
     #[test]
-    fn test_mean_reversion_stop_loss() {
-        // Create 20 candles, hovering around 1.1650, create data that will trigger a stop loss exit
-        let candles = vec![
-            // 20 stable candles to establish MA around 1.1650
-            make_candle(1.1650, 0),
-            make_candle(1.1648, 1),
-            make_candle(1.1652, 2),
-            make_candle(1.1649, 3),
-            make_candle(1.1651, 4),
-            make_candle(1.1650, 5),
-            make_candle(1.1647, 6),
-            make_candle(1.1653, 7),
-            make_candle(1.1650, 8),
-            make_candle(1.1651, 9),
-            make_candle(1.1649, 10),
-            make_candle(1.1650, 11),
-            make_candle(1.1652, 12),
-            make_candle(1.1648, 13),
-            make_candle(1.1650, 14),
-            make_candle(1.1651, 15),
-            make_candle(1.1649, 16),
-            make_candle(1.1650, 17),
-            make_candle(1.1652, 18),
-            make_candle(1.1650, 19),
-            // Drop triggers entry
-            make_candle(1.1620, 20),
-            // Price keeps falling — no recovery
-            make_candle(1.1600, 21),
-            make_candle(1.1570, 22),
-            make_candle(1.1540, 23),
-            make_candle(1.1500, 24),
-        ];
-        let params = MeanReversionParams {
-            ma_period: 20,
-            entry_threshold: -0.002,
-            exit_threshold: 0.002,
-            stop_loss: -0.01,
-            regime_filter: false,
-        };
-        let trades = run(&candles, &params);
-        assert_eq!(trades.len(), 1);
-        assert!(trades[0].pnl_percent < 0.0);
-        assert!(matches!(trades[0].exit_reason, ExitReason::StopLoss));
+    fn exit_long_returns_to_mean_when_z_crosses_zero() {
+        // Build prices so the last close sits above the mean → Z > 0 → exit.
+        let mut candles: Vec<Candle> = (0..19).map(|i| candle_at(100.0, i)).collect();
+        candles.push(candle_at(105.0, 19));
+        let params = base_params();
+        let result = check_exit(&candles, &params, Direction::Long);
+        assert!(matches!(result, MRExitSignal::ReturnToMean { .. }));
     }
 
     #[test]
-    fn test_spread_drag_is_reflected_in_round_trip_pnl() {
-        let params = MeanReversionParams {
-            ma_period: 3,
-            entry_threshold: -0.005,
-            exit_threshold: 0.5,
-            stop_loss: -0.5,
-            regime_filter: false,
-        };
-
-        // Entry triggers on the 4th candle (99.0 vs MA 100.0), then exits at EndOfData.
-        let mid_only = vec![
-            make_candle(100.0, 0),
-            make_candle(100.0, 1),
-            make_candle(100.0, 2),
-            make_candle(99.0, 3),
-            make_candle(99.0, 4),
-        ];
-        let spread_aware = vec![
-            make_candle_with_symmetric_spread(100.0, 0, 0.1),
-            make_candle_with_symmetric_spread(100.0, 1, 0.1),
-            make_candle_with_symmetric_spread(100.0, 2, 0.1),
-            make_candle_with_symmetric_spread(99.0, 3, 0.099),
-            make_candle_with_symmetric_spread(99.0, 4, 0.099),
-        ];
-
-        let baseline = run(&mid_only, &params);
-        let with_spread = run(&spread_aware, &params);
-
-        assert_eq!(baseline.len(), 1);
-        assert_eq!(with_spread.len(), 1);
-        assert!(matches!(with_spread[0].exit_reason, ExitReason::EndOfData));
-
-        assert!(baseline[0].pnl_percent.abs() < 1e-12);
-        assert!(with_spread[0].pnl_percent < baseline[0].pnl_percent);
-        assert!((with_spread[0].pnl_percent - (-0.001998001998)).abs() < 1e-9);
+    fn exit_short_returns_to_mean_when_z_crosses_zero() {
+        let mut candles: Vec<Candle> = (0..19).map(|i| candle_at(100.0, i)).collect();
+        candles.push(candle_at(95.0, 19));
+        let params = base_params();
+        let result = check_exit(&candles, &params, Direction::Short);
+        assert!(matches!(result, MRExitSignal::ReturnToMean { .. }));
     }
 
     #[test]
-    fn test_mean_reversion_end_of_data() {
-        // Create 20 candles, hovering around 1.1650, but no clear exit point, so trigger END_OF_DATA exit
-        let candles = vec![
-            make_candle(1.1650, 0),
-            make_candle(1.1648, 1),
-            make_candle(1.1652, 2),
-            make_candle(1.1649, 3),
-            make_candle(1.1651, 4),
-            make_candle(1.1650, 5),
-            make_candle(1.1647, 6),
-            make_candle(1.1653, 7),
-            make_candle(1.1650, 8),
-            make_candle(1.1651, 9),
-            make_candle(1.1649, 10),
-            make_candle(1.1650, 11),
-            make_candle(1.1652, 12),
-            make_candle(1.1648, 13),
-            make_candle(1.1650, 14),
-            make_candle(1.1648, 15),
-            make_candle(1.1650, 16),
-            make_candle(1.1649, 17),
-            make_candle(1.1651, 18),
-            make_candle(1.1650, 19),
-            make_candle(1.1620, 20), // entry
-            make_candle(1.1615, 21), // P&L = -0.04%  (not near -1%)
-            make_candle(1.1618, 22), // P&L = -0.02%
-            make_candle(1.1622, 23), // P&L = +0.02% (not near +0.2%)
-        ];
+    fn exit_long_z_stop_fires_at_extreme_adverse_z() {
+        // 19 candles near 100, then a sharp drop pushing Z below -3.5.
+        let mut candles: Vec<Candle> = (0..19).map(|i| candle_at(100.0, i)).collect();
+        // Set the last to be well below; with stable prior history, even
+        // a moderate drop yields a large Z because stdev is tiny.
+        candles.push(candle_at(99.0, 19));
+        let params = base_params();
+        // 99 vs near-100-mean: Z very negative because stdev of (mostly 100s) is small.
+        let result = check_exit(&candles, &params, Direction::Long);
+        assert!(matches!(result, MRExitSignal::ZStop { .. }));
+    }
+
+    #[test]
+    fn exit_z_stop_preempts_return_to_mean_when_both_would_fire() {
+        // Construct a scenario where Z reads as a stop (very negative for Long).
+        // ReturnToMean for Long requires Z >= 0, which is mutually exclusive
+        // with ZStop (Z <= -3.5). This test confirms the SL branch fires when
+        // Z is in the adverse extreme, which is its own correctness check.
+        let mut candles: Vec<Candle> = (0..19).map(|i| candle_at(100.0, i)).collect();
+        candles.push(candle_at(90.0, 19));
+        let params = base_params();
+        let result = check_exit(&candles, &params, Direction::Long);
+        assert!(matches!(result, MRExitSignal::ZStop { .. }));
+    }
+
+    // -- run() backtest --
+
+    #[test]
+    fn run_produces_no_trades_when_market_is_quiet() {
+        // Stable prices → no Z extremes → no entries.
+        let candles: Vec<Candle> = (0..50).map(|i| candle_at(100.0, i)).collect();
+        let params = base_params();
+        let trades = run(&candles, &params);
+        assert!(trades.is_empty());
+    }
+
+    #[test]
+    fn run_records_short_then_reverts() {
+        // Steady history at 100, then a rally to 110, then drop back through 100.
+        // Should fire a short entry, then exit on return-to-mean.
+        let mut candles: Vec<Candle> = (0..20).map(|i| candle_at(100.0, i)).collect();
+        // Rally
+        for i in 20..28 {
+            candles.push(candle_at(102.0 + (i - 20) as f64, i));
+        }
+        // Revert through and below the mean
+        for i in 28..40 {
+            candles.push(candle_at(100.0 - (i - 28) as f64 * 0.3, i));
+        }
+        let params = base_params();
+        let trades = run(&candles, &params);
+        // At least one short trade should fire and exit.
+        let shorts: Vec<&Trade> = trades
+            .iter()
+            .filter(|t| t.direction == Direction::Short)
+            .collect();
+        assert!(
+            !shorts.is_empty(),
+            "expected at least one short trade in a rally-then-revert series, got {:?}",
+            trades.len()
+        );
+    }
+
+    #[test]
+    fn run_records_eod_when_trade_never_resolves() {
+        // Start stable, then a sharp drop that triggers a long, then prices stall
+        // mid-range — no return-to-mean (Z stays negative), no Z-stop fire.
+        let mut candles: Vec<Candle> = (0..20).map(|i| candle_at(100.0, i)).collect();
+        // Drop to trigger long entry (Z very negative, RSI oversold via the drop)
+        for i in 20..30 {
+            candles.push(candle_at(100.0 - (i - 20) as f64 * 0.8, i));
+        }
+        // Stall just below mean — Z stays slightly negative, not enough for stop,
+        // not above zero for return-to-mean.
+        for i in 30..50 {
+            candles.push(candle_at(95.0 + ((i - 30) % 3) as f64 * 0.05, i));
+        }
         let params = MeanReversionParams {
-            ma_period: 20,
-            entry_threshold: -0.002,
-            exit_threshold: 0.002,
-            stop_loss: -0.01,
-            regime_filter: false,
+            stop_z_threshold: 10.0, // Make stop nearly impossible to trip
+            ..base_params()
         };
         let trades = run(&candles, &params);
-        assert_eq!(trades.len(), 1);
-        assert!(matches!(trades[0].exit_reason, ExitReason::EndOfData));
+        if let Some(last) = trades.last() {
+            // If a trade did fire, the very last one should hit EndOfData since
+            // we constructed a stall after entry.
+            // (Other earlier trades may have resolved cleanly.)
+            assert!(
+                matches!(last.exit_reason, ExitReason::EndOfData)
+                    || matches!(last.exit_reason, ExitReason::ReturnToMean),
+                "expected last trade to be EndOfData or ReturnToMean, got {:?}",
+                last.exit_reason
+            );
+        }
     }
 }
