@@ -437,8 +437,22 @@ async fn evaluate_entry(
                 return Ok(Some(gated));
             }
 
-            let sl_price =
-                strategy_mod::compute_stop_price(&composite.stop, current_price, direction);
+            let sl_price = match strategy_mod::compute_stop_price(
+                &composite,
+                current_price,
+                direction,
+                candles_ref,
+            ) {
+                Some(p) => p,
+                None => {
+                    tracing::warn!(
+                        "[SKIP ENTRY] composite {} {} — stop config could not compute SL (component-derived stop returned None)",
+                        strategy.instrument,
+                        strategy.granularity,
+                    );
+                    return Ok(None);
+                }
+            };
             let units_to_use = match direction {
                 Direction::Long => strategy.max_position_size.clone(),
                 Direction::Short => format!("-{}", strategy.max_position_size),

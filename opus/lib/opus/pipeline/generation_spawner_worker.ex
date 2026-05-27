@@ -177,7 +177,31 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
   # Mutation — Gaussian with linearly-decaying sigma
   # ---------------------------------------------------------------------------
 
-  # MR v1 (Investopedia baseline): mutate Z-score + RSI params.
+  # MR v1 (Investopedia baseline) in the composite strategy shape — see
+  # decision-canonical-strategy-shape. Mutates only the inner MeanReversion
+  # component's params; leaves the rest of the strategy structure unchanged.
+  defp mutate_params(
+         "mean_reversion",
+         %{"components" => %{"mr" => %{"params" => mr_params}}} = composite,
+         _granularity,
+         generation
+       ) do
+    sf = sigma_fraction(generation)
+
+    mutated_mr = %{
+      "ma_period" => mutate_integer(mr_params["ma_period"], sf, 5, 200),
+      "rsi_period" => mutate_integer(mr_params["rsi_period"], sf, 5, 30),
+      "entry_z_threshold" => mutate_float(mr_params["entry_z_threshold"], sf, 1.0, 3.0),
+      "rsi_oversold" => mutate_float(mr_params["rsi_oversold"], sf, 15.0, 40.0),
+      "rsi_overbought" => mutate_float(mr_params["rsi_overbought"], sf, 60.0, 85.0),
+      "stop_z_threshold" => mutate_float(mr_params["stop_z_threshold"], sf, 2.0, 6.0)
+    }
+
+    put_in(composite, ["components", "mr", "params"], mutated_mr)
+  end
+
+  # Legacy flat-shape MR — kept as a fallback for any lingering pre-composite
+  # MR lineages still in the DB. New MR seeds use the composite shape above.
   defp mutate_params("mean_reversion", params, _granularity, generation) do
     sf = sigma_fraction(generation)
 
