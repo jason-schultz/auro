@@ -21,8 +21,18 @@
 
 use std::collections::HashMap;
 
-use crate::engine::strategy::TrendFollowingParams;
-use crate::engine::types::Candle;
+use serde::{Deserialize, Serialize};
+
+use crate::engine::strategy::Signaler;
+use crate::engine::types::{Candle, Direction, EntryReason};
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TrendFollowingParams {
+    /// Fast moving-average period. Default 50 (Britannica golden cross).
+    pub fast_period: usize,
+    /// Slow moving-average period. Default 200 (Britannica golden cross).
+    pub slow_period: usize,
+}
 
 /// Compute output ports for the TrendFollowing component at the current bar.
 /// Returns:
@@ -62,6 +72,35 @@ pub fn compute_ports(
 fn sma(candles: &[Candle], end_exclusive: usize, period: usize) -> f64 {
     let slice = &candles[end_exclusive - period..end_exclusive];
     slice.iter().map(|c| c.mid.close).sum::<f64>() / period as f64
+}
+
+impl Signaler for TrendFollowingParams {
+    fn warmup(&self) -> usize {
+        self.slow_period + 1
+    }
+
+    fn compute(&self, candles: &[Candle]) -> Option<HashMap<String, bool>> {
+        compute_ports(candles, self)
+    }
+
+    fn entry_reason(&self, candles: &[Candle], direction: Direction) -> EntryReason {
+        let n = candles.len();
+        let fast = sma(candles, n, self.fast_period);
+        let slow = sma(candles, n, self.slow_period);
+        match direction {
+            Direction::Long => EntryReason::CrossAbove {
+                fast_ma: fast,
+                slow_ma: slow,
+            },
+            Direction::Short => EntryReason::CrossBelow {
+                fast_ma: fast,
+                slow_ma: slow,
+            },
+        }
+    }
+
+    // TF uses fixed-pct stop at the top level; no component-driven stop distance.
+    // (stop_distance falls through to the trait's default `None`.)
 }
 
 #[cfg(test)]

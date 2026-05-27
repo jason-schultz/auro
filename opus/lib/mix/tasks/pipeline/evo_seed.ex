@@ -44,36 +44,26 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
     SPX500_USD NAS100_USD US30_USD UK100_GBP DE30_EUR JP225_USD AU200_AUD EU50_EUR
   ]
 
-  # Seed params per strategy class. Two shapes coexist during the migration:
-  # - MR uses the legacy flat shape (will migrate to composite in a follow-up).
-  # - TF uses the new composite shape — see decision-canonical-strategy-shape.
-  # TF v1 ships with fixed 50/200 (Britannica textbook) across all granularities;
-  # no mutation per the textbook-baselines-then-composites principle.
-  @mr_seed %{
-    "ma_period" => 20,
-    "rsi_period" => 14,
-    "entry_z_threshold" => 1.5,
-    "rsi_oversold" => 30.0,
-    "rsi_overbought" => 70.0,
-    "stop_z_threshold" => 3.5
-  }
-
+  # Seed params per strategy class. Both TF and MR now use the composite shape
+  # — see decision-canonical-strategy-shape. TF v1 ships fixed 50/200 (no
+  # mutation, textbook Britannica baseline). MR v1 evolves around the textbook
+  # Investopedia params via the spawner mutator.
   @seed_params %{
     "H1" => %{
       "trend_following" => :composite_tf_v1,
-      "mean_reversion" => @mr_seed
+      "mean_reversion" => :composite_mr_v1
     },
     "H4" => %{
       "trend_following" => :composite_tf_v1,
-      "mean_reversion" => @mr_seed
+      "mean_reversion" => :composite_mr_v1
     },
     "M15" => %{
       "trend_following" => :composite_tf_v1,
-      "mean_reversion" => @mr_seed
+      "mean_reversion" => :composite_mr_v1
     },
     "M5" => %{
       "trend_following" => :composite_tf_v1,
-      "mean_reversion" => @mr_seed
+      "mean_reversion" => :composite_mr_v1
     }
   }
 
@@ -107,10 +97,52 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
     }
   end
 
+  # Build the composite-shape Strategy JSON for MR v1.
+  # Textbook Investopedia baseline: Z-score entry + RSI confirmation,
+  # return-to-mean exit, Z-extension stop anchored at the MA.
+  defp build_mr_v1_composite(instrument, granularity) do
+    %{
+      "strategy_id" => nil,
+      "strategy_name" => "mr_v1_#{instrument}_#{granularity}",
+      "version" => "v1_composite",
+      "instrument" => instrument,
+      "granularity" => granularity,
+      "components" => %{
+        "mr" => %{
+          "type" => "MeanReversion",
+          "params" => %{
+            "ma_period" => 20,
+            "rsi_period" => 14,
+            "entry_z_threshold" => 1.5,
+            "rsi_oversold" => 30.0,
+            "rsi_overbought" => 70.0,
+            "stop_z_threshold" => 3.5
+          }
+        }
+      },
+      "entry" => %{
+        "long" => "mr.long",
+        "short" => "mr.short"
+      },
+      "exit" => %{
+        "long" => "mr.exit_long",
+        "short" => "mr.exit_short"
+      },
+      # MR's SL is component-derived (anchored at MA ± k·stdev), not a fixed
+      # pct from entry. The "mr" component computes the absolute SL price via
+      # its Signaler::stop_price impl.
+      "stop" => %{"type" => "FromComponent", "params" => %{"component" => "mr"}},
+      "sizing" => %{"type" => "RiskPct", "params" => %{"pct" => 0.01}}
+    }
+  end
+
   defp resolve_params(strategy_type, instrument, granularity, seed) do
     case seed do
       :composite_tf_v1 ->
         build_tf_v1_composite(instrument, granularity)
+
+      :composite_mr_v1 ->
+        build_mr_v1_composite(instrument, granularity)
 
       params when is_map(params) ->
         params

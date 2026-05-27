@@ -18,7 +18,45 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::engine::mean_reversion::MeanReversionParams;
+use crate::engine::trend_following::TrendFollowingParams;
 use crate::engine::types::{Candle, Direction, EntryReason, ExitReason, Granularity, Trade};
+
+/// Behavior contract for all signaler components. Each strategy type
+/// implements this trait in its own file (TF in trend_following.rs, MR in
+/// mean_reversion.rs, etc.). The `Component` enum below stays as the serde
+/// tagged-enum dispatch surface and delegates each method to the trait impl.
+///
+/// See [[backlog-signaler-trait-and-mr-composite]] for the rationale (hybrid
+/// trait + enum, avoiding `Box<dyn>` to preserve serde tagged-enum dispatch).
+pub trait Signaler {
+    /// Minimum number of candles required before this component can compute
+    /// any output.
+    fn warmup(&self) -> usize;
+
+    /// Compute all output ports for this component against the candle window
+    /// ending at the most recent close. Returns None if not enough candles
+    /// or other computation prerequisites fail; the caller treats None as
+    /// "no signal."
+    fn compute(&self, candles: &[Candle]) -> Option<HashMap<String, bool>>;
+
+    /// Produce an EntryReason metadata variant when an entry fires in the
+    /// given direction. Each component owns its own metadata format (TF →
+    /// CrossAbove/CrossBelow, MR → MeanReversionEntry, etc.) so the generic
+    /// runner doesn't need component-specific code.
+    fn entry_reason(&self, candles: &[Candle], direction: Direction) -> EntryReason;
+
+    /// Optional: compute the absolute stop-loss price for an entry in the
+    /// given direction. Used by `StopConfig::FromComponent` to give the
+    /// named component full control over its stop placement (e.g. MR anchors
+    /// its Z-extension stop at the MA, not at entry price). Returning an
+    /// absolute price — not a distance — lets components anchor wherever
+    /// makes sense for their logic.
+    /// Default: None (component doesn't expose its own stop placement).
+    fn stop_price(&self, _candles: &[Candle], _direction: Direction) -> Option<f64> {
+        None
+    }
+}
 
 /// Top-level strategy configuration. Stored in `live_strategies.parameters` and
 /// `strategy_configs.parameters` as JSONB. `strategy_type = "composite"` indicates
@@ -38,22 +76,18 @@ pub struct Strategy {
 }
 
 /// A named component. Tagged enum: `{"type": "TrendFollowing", "params": { ... }}`.
-/// New component types add a new variant here and a new dispatch arm in
-/// `compute_ports`.
+/// The enum exists for serde dispatch only — all behavior lives in the
+/// `Signaler` trait impl on each variant's inner params type. Adding a new
+/// component type: write the params struct, impl Signaler for it, add a
+/// variant here, add a delegation arm in the Signaler impl below.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", content = "params")]
 pub enum Component {
     #[serde(rename = "TrendFollowing")]
     TrendFollowing(TrendFollowingParams),
-    // Future variants: MeanReversion, Donchian, LiquiditySweep, etc.
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TrendFollowingParams {
-    /// Fast moving-average period. Default 50 (Britannica golden cross).
-    pub fast_period: usize,
-    /// Slow moving-average period. Default 200 (Britannica golden cross).
-    pub slow_period: usize,
+    #[serde(rename = "MeanReversion")]
+    MeanReversion(MeanReversionParams),
+    // Future variants: Donchian, LiquiditySweep, etc.
 }
 
 /// Long and short port selectors for entry or exit decisions.
@@ -120,9 +154,17 @@ impl<'de> Deserialize<'de> for PortRef {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", content = "params")]
 pub enum StopConfig {
+    /// SL placed at a fixed percent below (long) or above (short) the entry
+    /// price. `pct` is a negative fraction (e.g. -0.02 for -2%).
     #[serde(rename = "FixedPct")]
     FixedPct { pct: f64 },
-    // Future: ZExtension { k: f64 }, AtrMultiple { k: f64 }, StructuralLevel { source: String }
+    /// SL placed at a price derived from the named component's
+    /// `stop_distance(candles)`. Used by MR for Z-extension stops where the
+    /// distance depends on current stdev. Component must impl
+    /// `Signaler::stop_distance` and return `Some(distance)`.
+    #[serde(rename = "FromComponent")]
+    FromComponent { component: String },
+    // Future: AtrMultiple { k: f64 }, StructuralLevel { source: String }
 }
 
 /// How to compute position size.
@@ -201,52 +243,35 @@ impl Strategy {
     }
 }
 
+/// Delegate all `Signaler` methods on the enum to the appropriate variant's
+/// trait impl. Each new component variant requires one dispatch arm here —
+/// the actual logic lives in the variant's own file.
 impl Component {
     pub fn warmup(&self) -> usize {
         match self {
-            Component::TrendFollowing(p) => p.slow_period + 1,
+            Component::TrendFollowing(p) => p.warmup(),
+            Component::MeanReversion(p) => p.warmup(),
         }
     }
 
-    /// Compute all output ports for this component. Returns a map of port name → bool.
-    /// Returns None if not enough candles to compute (caller treats as no signal).
     pub fn compute(&self, candles: &[Candle]) -> Option<HashMap<String, bool>> {
         match self {
-            Component::TrendFollowing(p) => {
-                crate::engine::trend_following::compute_ports(candles, p)
-            }
+            Component::TrendFollowing(p) => p.compute(candles),
+            Component::MeanReversion(p) => p.compute(candles),
         }
     }
 
-    /// Produce an EntryReason metadata variant appropriate for this component
-    /// when an entry fires in the given direction. Lets each component carry
-    /// its own metadata (e.g. TF stores fast/slow MA, MR stores Z+RSI) into
-    /// the Trade record without the runner needing component-specific code.
     pub fn entry_reason(&self, candles: &[Candle], direction: Direction) -> EntryReason {
         match self {
-            Component::TrendFollowing(p) => {
-                let n = candles.len();
-                let fast = candles[n - p.fast_period..n]
-                    .iter()
-                    .map(|c| c.mid.close)
-                    .sum::<f64>()
-                    / p.fast_period as f64;
-                let slow = candles[n - p.slow_period..n]
-                    .iter()
-                    .map(|c| c.mid.close)
-                    .sum::<f64>()
-                    / p.slow_period as f64;
-                match direction {
-                    Direction::Long => EntryReason::CrossAbove {
-                        fast_ma: fast,
-                        slow_ma: slow,
-                    },
-                    Direction::Short => EntryReason::CrossBelow {
-                        fast_ma: fast,
-                        slow_ma: slow,
-                    },
-                }
-            }
+            Component::TrendFollowing(p) => p.entry_reason(candles, direction),
+            Component::MeanReversion(p) => p.entry_reason(candles, direction),
+        }
+    }
+
+    pub fn stop_price(&self, candles: &[Candle], direction: Direction) -> Option<f64> {
+        match self {
+            Component::TrendFollowing(p) => p.stop_price(candles, direction),
+            Component::MeanReversion(p) => p.stop_price(candles, direction),
         }
     }
 }
@@ -310,7 +335,16 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
             slow_ma: 0.0,
         });
 
-        let stop_price = compute_stop_price(&strategy.stop, entry_price, direction);
+        let stop_price = match compute_stop_price(strategy, entry_price, direction, window) {
+            Some(p) => p,
+            None => {
+                // Stop config requires a component-derived distance but the
+                // component didn't expose one (warmup or other prerequisite
+                // not met). Skip this entry rather than open without an SL.
+                i += 1;
+                continue;
+            }
+        };
 
         let mut exited = false;
         let mut j = i + 1;
@@ -403,13 +437,34 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
     trades
 }
 
-/// Compute the absolute stop-loss price for a position given its config and entry.
-pub fn compute_stop_price(config: &StopConfig, entry_price: f64, direction: Direction) -> f64 {
-    match config {
-        StopConfig::FixedPct { pct } => match direction {
+/// Compute the absolute stop-loss price for a position given the strategy's
+/// stop config, the entry price, the trade direction, and the candle window
+/// at entry time (needed for `FromComponent` which derives stop from a
+/// component's current state, e.g. MR's stdev).
+///
+/// Returns None when `FromComponent` is configured but the named component
+/// doesn't exist or doesn't expose a stop distance. Callers should treat
+/// None as "cannot place this trade" and skip the entry.
+pub fn compute_stop_price(
+    strategy: &Strategy,
+    entry_price: f64,
+    direction: Direction,
+    candles: &[Candle],
+) -> Option<f64> {
+    match &strategy.stop {
+        StopConfig::FixedPct { pct } => Some(match direction {
             Direction::Long => entry_price * (1.0 + pct),
             Direction::Short => entry_price * (1.0 - pct),
-        },
+        }),
+        StopConfig::FromComponent { component } => {
+            // Component computes the absolute stop price (it can anchor wherever
+            // makes sense — MR uses MA ± k·stdev, not entry ± distance).
+            // entry_price is unused here but kept in the signature so the
+            // backtest runner and live evaluator can call uniformly.
+            let _ = entry_price;
+            let comp = strategy.components.get(component)?;
+            comp.stop_price(candles, direction)
+        }
     }
 }
 
@@ -684,5 +739,152 @@ mod tests {
             .any(|t| t.exit_reason == ExitReason::TrendReversal);
         // At least one trade should have an interpretable exit.
         assert!(any_stop || any_reversal || !trades.is_empty());
+    }
+
+    // ---- MR composite shape tests ----
+
+    fn mr_strategy() -> Strategy {
+        let mut components: HashMap<String, Component> = HashMap::new();
+        components.insert(
+            "mr".to_string(),
+            Component::MeanReversion(MeanReversionParams {
+                ma_period: 20,
+                rsi_period: 14,
+                entry_z_threshold: 1.5,
+                rsi_oversold: 30.0,
+                rsi_overbought: 70.0,
+                stop_z_threshold: 3.5,
+            }),
+        );
+        Strategy {
+            strategy_id: None,
+            strategy_name: Some("mr_test".to_string()),
+            version: "v1_composite".to_string(),
+            instrument: "TEST".to_string(),
+            granularity: Granularity::M15,
+            components,
+            entry: EntryExitSelector {
+                long: PortRef::Direct("mr.long".to_string()),
+                short: PortRef::Direct("mr.short".to_string()),
+            },
+            exit: EntryExitSelector {
+                long: PortRef::Direct("mr.exit_long".to_string()),
+                short: PortRef::Direct("mr.exit_short".to_string()),
+            },
+            stop: StopConfig::FromComponent {
+                component: "mr".to_string(),
+            },
+            sizing: SizingConfig::RiskPct { pct: 0.01 },
+        }
+    }
+
+    #[test]
+    fn full_mr_strategy_roundtrips_json() {
+        let json = serde_json::json!({
+            "strategy_id": null,
+            "strategy_name": "test_mr",
+            "version": "v1_composite",
+            "instrument": "EUR_GBP",
+            "granularity": "M15",
+            "components": {
+                "mr": {
+                    "type": "MeanReversion",
+                    "params": {
+                        "ma_period": 20,
+                        "rsi_period": 14,
+                        "entry_z_threshold": 1.5,
+                        "rsi_oversold": 30.0,
+                        "rsi_overbought": 70.0,
+                        "stop_z_threshold": 3.5
+                    }
+                }
+            },
+            "entry": { "long": "mr.long", "short": "mr.short" },
+            "exit":  { "long": "mr.exit_long", "short": "mr.exit_short" },
+            "stop":  { "type": "FromComponent", "params": { "component": "mr" } },
+            "sizing": { "type": "RiskPct", "params": { "pct": 0.01 } }
+        });
+        let strategy: Strategy = serde_json::from_value(json).expect("should parse");
+        assert!(strategy.components.contains_key("mr"));
+        assert!(matches!(strategy.stop, StopConfig::FromComponent { .. }));
+    }
+
+    #[test]
+    fn mr_compute_emits_four_ports() {
+        // Stable history followed by sharp drop should fire long entry.
+        let mut candles: Vec<Candle> = (0..19)
+            .map(|i| {
+                // Need actual variance for RSI/stdev to compute, so alternate
+                // up and down by tiny amounts.
+                let p = if i % 2 == 0 { 100.0 } else { 100.1 };
+                make_candle(p, i)
+            })
+            .collect();
+        candles.push(make_candle(90.0, 19));
+
+        let mr = MeanReversionParams {
+            ma_period: 20,
+            rsi_period: 14,
+            entry_z_threshold: 1.5,
+            rsi_oversold: 30.0,
+            rsi_overbought: 70.0,
+            stop_z_threshold: 3.5,
+        };
+        let ports = mr.compute(&candles).expect("should compute");
+        // All four expected ports present:
+        assert!(ports.contains_key("long"));
+        assert!(ports.contains_key("short"));
+        assert!(ports.contains_key("exit_long"));
+        assert!(ports.contains_key("exit_short"));
+    }
+
+    #[test]
+    fn mr_stop_price_anchors_at_ma() {
+        // Construct candles with known mean and stdev:
+        // 10 candles at 102, 10 at 98 → mean = 100, popn stdev = 2.
+        // For long: SL = 100 - 3.5 * 2 = 93.
+        // For short: SL = 100 + 3.5 * 2 = 107.
+        let prices: Vec<f64> = (0..10)
+            .map(|_| 102.0)
+            .chain((0..10).map(|_| 98.0))
+            .collect();
+        let candles: Vec<Candle> = prices
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| make_candle(p, i as i64))
+            .collect();
+        let mr = MeanReversionParams {
+            ma_period: 20,
+            rsi_period: 14,
+            entry_z_threshold: 1.5,
+            rsi_oversold: 30.0,
+            rsi_overbought: 70.0,
+            stop_z_threshold: 3.5,
+        };
+        let long_stop = mr.stop_price(&candles, Direction::Long).unwrap();
+        let short_stop = mr.stop_price(&candles, Direction::Short).unwrap();
+        assert!((long_stop - 93.0).abs() < 0.01, "long_stop={}", long_stop);
+        assert!(
+            (short_stop - 107.0).abs() < 0.01,
+            "short_stop={}",
+            short_stop
+        );
+    }
+
+    #[test]
+    fn mr_strategy_compute_stop_price_via_from_component() {
+        let strategy = mr_strategy();
+        let prices: Vec<f64> = (0..10)
+            .map(|_| 102.0)
+            .chain((0..10).map(|_| 98.0))
+            .collect();
+        let candles: Vec<Candle> = prices
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| make_candle(p, i as i64))
+            .collect();
+        // entry_price argument is ignored for FromComponent — MR anchors at MA.
+        let long_stop = compute_stop_price(&strategy, 99.5, Direction::Long, &candles).unwrap();
+        assert!((long_stop - 93.0).abs() < 0.01);
     }
 }

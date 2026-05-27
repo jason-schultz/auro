@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use crate::engine::mean_reversion::{run as run_mean_reversion, MeanReversionParams};
 use crate::engine::stats::{self, BacktestStats};
 use crate::engine::strategy::{
-    self as strategy_mod, Component, EntryExitSelector, PortRef, SizingConfig, StopConfig,
-    Strategy, TrendFollowingParams,
+    self as strategy_mod, Component, EntryExitSelector, PortRef, SizingConfig, StopConfig, Strategy,
 };
+use crate::engine::trend_following::TrendFollowingParams;
 use crate::engine::types::{Candle, EntryReason, ExitReason, Granularity, Trade, OHLC};
 
 /// MR v1 grid search config. Parameters reflect the Investopedia baseline
