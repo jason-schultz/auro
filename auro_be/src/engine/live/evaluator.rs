@@ -6,7 +6,7 @@ use crate::db::repositories::{live_queries, live_strategies as live_strategies_r
 use crate::engine::indicators;
 use crate::engine::mean_reversion::{self, MREntrySignal, MRExitSignal, MeanReversionParams};
 use crate::engine::rules::{entry_gate_report, Rules};
-use crate::engine::trend_following::{self, TFSignal, TrendFollowingParams};
+use crate::engine::strategy::{self as strategy_mod, EntrySignal, ExitSignal, Strategy};
 use crate::engine::types::{
     Direction, Granularity, LiveStrategy, OpenPosition, SignalAction, SignalReport, StopLossState,
 };
@@ -242,7 +242,21 @@ async fn evaluate_entry(
         }));
     }
 
-    match strategy.strategy_type.as_str() {
+    // Shape detection: composite-shape params have a "components" key. This lets
+    // strategy_type stay logical ("trend_following", "mean_reversion") even after
+    // a strategy class migrates to the composite shape — dispatch is driven by
+    // the shape of the parameters JSON, not by strategy_type.
+    let dispatch_key: &str = if params
+        .as_object()
+        .map(|o| o.contains_key("components"))
+        .unwrap_or(false)
+    {
+        "composite"
+    } else {
+        strategy.strategy_type.as_str()
+    };
+
+    match dispatch_key {
         "mean_reversion" => {
             // MR v1: Z-score + RSI confirmed entry, bidirectional. Static OANDA
             // SL is set at the Z-extension price; TP is dynamic (return-to-mean)
@@ -362,192 +376,112 @@ async fn evaluate_entry(
             )
             .await;
         }
-        "trend_following" => {
-            let tf_params = TrendFollowingParams {
-                fast_period: params["fast_period"].as_u64().unwrap_or(10) as usize,
-                slow_period: params["slow_period"].as_u64().unwrap_or(50) as usize,
-                stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.02),
-                take_profit: params["take_profit"].as_f64(),
-                regime_filter: false, // live path: regime gating handled by Elixir rules engine
-                confirm_bars: params["confirm_bars"].as_u64().map(|v| v as usize),
-                trailing_k: params["trailing_k"].as_f64(),
+        "composite" => {
+            // New canonical strategy shape. All parameters live inside the
+            // Strategy struct (components, entry/exit selectors, stop, sizing).
+            let composite: Strategy = match serde_json::from_value(params.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        "[SKIP ENTRY] composite parse failure for {} {}: {}",
+                        strategy.instrument,
+                        strategy.granularity,
+                        e
+                    );
+                    return Ok(None);
+                }
             };
 
-            let closes = buffer.closes();
-
-            // Diagnostic: compute fast/slow MAs for logging
-            if closes.len() >= tf_params.slow_period {
-                let fast_ma: f64 = closes[closes.len() - tf_params.fast_period..]
-                    .iter()
-                    .sum::<f64>()
-                    / tf_params.fast_period as f64;
-                let slow_ma: f64 = closes[closes.len() - tf_params.slow_period..]
-                    .iter()
-                    .sum::<f64>()
-                    / tf_params.slow_period as f64;
-                let gap_pct = (fast_ma - slow_ma) / slow_ma * 100.0;
-                let side = if fast_ma > slow_ma { "ABOVE" } else { "BELOW" };
+            let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+            let warmup = composite.warmup();
+            if candles_ref.len() < warmup {
                 tracing::info!(
-                    "[STATUS] TF {} {} | F{}={:.5} S{}={:.5} gap={:.4}% ({}) | buf={}",
+                    "[STATUS] composite {} {} | buffer {}/{} — waiting for data",
                     strategy.instrument,
                     strategy.granularity,
-                    tf_params.fast_period,
-                    fast_ma,
-                    tf_params.slow_period,
-                    slow_ma,
-                    gap_pct,
-                    side,
-                    closes.len(),
+                    candles_ref.len(),
+                    warmup,
                 );
-            } else {
-                tracing::info!(
-                    "[STATUS] TF {} {} | buffer {}/{} — waiting for data",
-                    strategy.instrument,
-                    strategy.granularity,
-                    closes.len(),
-                    tf_params.slow_period,
-                );
+                return Ok(None);
             }
 
-            match trend_following::check_entry(&closes, &tf_params) {
-                TFSignal::EnterLong { fast_ma, slow_ma } => {
-                    tracing::info!(
-                        "[SIGNAL] Trend following LONG on {} ({}): fast_ma={:.5}, slow_ma={:.5}",
-                        strategy.instrument,
-                        strategy.granularity,
-                        fast_ma,
-                        slow_ma
-                    );
+            let ports = match composite.compute_ports(candles_ref) {
+                Some(p) => p,
+                None => return Ok(None),
+            };
 
-                    if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
-                        return Ok(Some(gated));
-                    }
+            tracing::info!(
+                "[STATUS] composite {} {} | ports={:?} | buf={}",
+                strategy.instrument,
+                strategy.granularity,
+                ports,
+                candles_ref.len(),
+            );
 
-                    let sl_price = current_price * (1.0 + tf_params.stop_loss);
-                    let tp_price = tf_params.take_profit.map(|tp| current_price * (1.0 + tp));
+            let entry_signal = composite.evaluate_entry(&ports);
+            let direction = match entry_signal {
+                EntrySignal::Long => Direction::Long,
+                EntrySignal::Short => Direction::Short,
+                EntrySignal::None => return Ok(None),
+            };
 
-                    let adx = indicators::adx(&buffer.candles, 14);
-                    let ma_gap_pct = (fast_ma - slow_ma) / slow_ma * 100.0;
-                    let indicators_json = serde_json::json!({
-                        "fast_period": tf_params.fast_period,
-                        "slow_period": tf_params.slow_period,
-                        "fast_ma": fast_ma,
-                        "slow_ma": slow_ma,
-                        "ma_gap_pct": ma_gap_pct,
-                        "adx": adx,
-                    });
-                    let (_, regime_reason) = rules.decision(&strategy.id);
-                    let regime = regime_reason.unwrap_or("unknown").to_string();
+            tracing::info!(
+                "[SIGNAL] Composite {:?} entry on {} ({}): price={:.5}",
+                direction,
+                strategy.instrument,
+                strategy.granularity,
+                current_price,
+            );
 
-                    return execute_entry(
-                        state,
-                        strategy,
-                        &Direction::Long,
-                        &strategy.max_position_size,
-                        strategy.risk_pct,
-                        strategy.max_units,
-                        current_price,
-                        sl_price,
-                        tp_price,
-                        &format!("CrossAbove: fast_ma={:.5}, slow_ma={:.5}", fast_ma, slow_ma),
-                        indicators_json,
-                        regime,
-                        open_positions,
-                    )
-                    .await;
-                }
-                TFSignal::EnterShort { fast_ma, slow_ma } => {
-                    tracing::info!(
-                        "[SIGNAL] Trend following SHORT on {} ({}): fast_ma={:.5}, slow_ma={:.5}",
-                        strategy.instrument,
-                        strategy.granularity,
-                        fast_ma,
-                        slow_ma
-                    );
-
-                    if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
-                        return Ok(Some(gated));
-                    }
-
-                    let sl_price = current_price * (1.0 - tf_params.stop_loss);
-                    let tp_price = tf_params.take_profit.map(|tp| current_price * (1.0 - tp));
-                    let short_units = format!("-{}", strategy.max_position_size);
-
-                    let adx = indicators::adx(&buffer.candles, 14);
-                    let ma_gap_pct = (fast_ma - slow_ma) / slow_ma * 100.0;
-                    let indicators_json = serde_json::json!({
-                        "fast_period": tf_params.fast_period,
-                        "slow_period": tf_params.slow_period,
-                        "fast_ma": fast_ma,
-                        "slow_ma": slow_ma,
-                        "ma_gap_pct": ma_gap_pct,
-                        "adx": adx,
-                    });
-                    let (_, regime_reason) = rules.decision(&strategy.id);
-                    let regime = regime_reason.unwrap_or("unknown").to_string();
-
-                    return execute_entry(
-                        state,
-                        strategy,
-                        &Direction::Short,
-                        &short_units,
-                        strategy.risk_pct,
-                        strategy.max_units,
-                        current_price,
-                        sl_price,
-                        tp_price,
-                        &format!("CrossBelow: fast_ma={:.5}, slow_ma={:.5}", fast_ma, slow_ma),
-                        indicators_json,
-                        regime,
-                        open_positions,
-                    )
-                    .await;
-                }
-                _ => {}
+            if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
+                return Ok(Some(gated));
             }
+
+            let sl_price =
+                strategy_mod::compute_stop_price(&composite.stop, current_price, direction);
+            let units_to_use = match direction {
+                Direction::Long => strategy.max_position_size.clone(),
+                Direction::Short => format!("-{}", strategy.max_position_size),
+            };
+
+            let adx = indicators::adx(candles_ref, 14);
+            let indicators_json = serde_json::json!({
+                "strategy_version": composite.version,
+                "components": composite.components.keys().collect::<Vec<_>>(),
+                "ports": ports,
+                "adx": adx,
+            });
+            let (_, regime_reason) = rules.decision(&strategy.id);
+            let regime = regime_reason.unwrap_or("unknown").to_string();
+
+            return execute_entry(
+                state,
+                strategy,
+                &direction,
+                &units_to_use,
+                strategy.risk_pct,
+                strategy.max_units,
+                current_price,
+                sl_price,
+                None, // no static TP — exit handled by composite strategy's exit selector
+                &format!("Composite {:?} entry", direction),
+                indicators_json,
+                regime,
+                open_positions,
+            )
+            .await;
         }
         _ => {}
     }
     Ok(None)
 }
 
-fn reject_incomplete_m5_tf_config(strategy: &LiveStrategy) -> Option<String> {
-    if strategy.strategy_type != "trend_following" || strategy.granularity != Granularity::M5 {
-        return None;
-    }
-
-    let confirm_bars = strategy
-        .parameters
-        .get("confirm_bars")
-        .and_then(|v| v.as_u64());
-    let trailing_k = strategy
-        .parameters
-        .get("trailing_k")
-        .and_then(|v| v.as_f64());
-
-    let mut issues: Vec<&str> = Vec::new();
-
-    if strategy.risk_pct <= 0.0 {
-        issues.push("risk_pct must be > 0");
-    }
-
-    if strategy.max_units.is_none() {
-        issues.push("max_units must be set");
-    }
-
-    if confirm_bars.is_none() {
-        issues.push("parameters.confirm_bars missing");
-    }
-
-    if trailing_k.is_none() {
-        issues.push("parameters.trailing_k missing");
-    }
-
-    if issues.is_empty() {
-        None
-    } else {
-        Some(format!("m5_tf_config_incomplete: {}", issues.join(", ")))
-    }
+fn reject_incomplete_m5_tf_config(_strategy: &LiveStrategy) -> Option<String> {
+    // Deprecated: old-shape TF strategies (which required confirm_bars/trailing_k)
+    // are no longer supported. Composite-shape TF v1 doesn't use these
+    // parameters. Kept as a no-op for call-site symmetry until callers are
+    // refactored.
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -925,7 +859,18 @@ async fn evaluate_exit(
     let mut should_exit = false;
     let mut exit_reason = String::new();
 
-    match strategy.strategy_type.as_str() {
+    // Same shape detection as the entry path.
+    let dispatch_key: &str = if params
+        .as_object()
+        .map(|o| o.contains_key("components"))
+        .unwrap_or(false)
+    {
+        "composite"
+    } else {
+        strategy.strategy_type.as_str()
+    };
+
+    match dispatch_key {
         "mean_reversion" => {
             // MR v1 dynamic exit: on each bar, check whether Z has crossed
             // back through zero (return-to-mean) or extended past the stop
@@ -953,38 +898,30 @@ async fn evaluate_exit(
                 MRExitSignal::Hold => {}
             }
         }
-        "trend_following" => {
-            let tf_params = TrendFollowingParams {
-                fast_period: params["fast_period"].as_u64().unwrap_or(10) as usize,
-                slow_period: params["slow_period"].as_u64().unwrap_or(50) as usize,
-                stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.02),
-                take_profit: params["take_profit"].as_f64(),
-                regime_filter: false, // live path: regime gating handled by Elixir rules engine
-                confirm_bars: params["confirm_bars"].as_u64().map(|v| v as usize),
-                trailing_k: params["trailing_k"].as_f64(),
+        "composite" => {
+            // New canonical strategy shape: evaluate the exit selector against
+            // computed component ports. On Exit, close via OANDA.
+            let composite: Strategy = match serde_json::from_value(params.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        "[EXIT CHECK] composite parse failure for {} {}: {}",
+                        strategy.instrument,
+                        strategy.granularity,
+                        e
+                    );
+                    return Ok(vec![]);
+                }
             };
-
+            let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+            let ports = match composite.compute_ports(candles_ref) {
+                Some(p) => p,
+                None => return Ok(vec![]),
+            };
             let is_long = positions_for_strategy[0].direction == Direction::Long;
-            let closes = buffer.closes();
-            let risk = risk_params::get_risk_params(
-                &state.db,
-                &strategy.instrument,
-                &strategy.strategy_type,
-                strategy.granularity,
-            )
-            .await;
-
-            if let TFSignal::ExitTrendReversal { fast_ma, slow_ma } = trend_following::check_exit(
-                &closes,
-                &tf_params,
-                is_long,
-                tf_params.confirm_bars.unwrap_or(risk.exit_confirm_bars),
-            ) {
+            if matches!(composite.evaluate_exit(&ports, is_long), ExitSignal::Exit) {
                 should_exit = true;
-                exit_reason = format!(
-                    "TrendReversal: fast_ma={:.5}, slow_ma={:.5}",
-                    fast_ma, slow_ma
-                );
+                exit_reason = format!("CompositeExit (ports={:?})", ports);
             }
         }
         _ => {}

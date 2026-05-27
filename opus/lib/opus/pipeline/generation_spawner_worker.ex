@@ -59,6 +59,8 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
       best = Enum.max_by(configs, &(&1.score || 0.0))
       best_score = best.score || 0.0
 
+      max_gen = max_generations_for(best.strategy_type)
+
       cond do
         best_score <= 0.0 ->
           Logger.info(
@@ -68,9 +70,10 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
 
           :ok
 
-        evo_generation >= @max_generations ->
+        evo_generation >= max_gen ->
           Logger.info(
-            "[EvoEngine] lineage=#{lineage_id} max generations reached — " <>
+            "[EvoEngine] lineage=#{lineage_id} max generations reached " <>
+              "(gen=#{evo_generation}, max=#{max_gen}) — " <>
               "promoting #{best.id} (score=#{Float.round(best_score, 4)})"
           )
 
@@ -90,6 +93,13 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
       end
     end
   end
+
+  # Per-strategy-class max generations. TF v1 is strict textbook (50/200, no
+  # mutation) per decision-canonical-strategy-shape Option A, so the lineage
+  # promotes at gen 0 — no spawning. Other classes (MR) keep the default evo
+  # depth.
+  defp max_generations_for("trend_following"), do: 0
+  defp max_generations_for(_), do: @max_generations
 
   # ---------------------------------------------------------------------------
   # Terminal check
@@ -181,32 +191,13 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
     }
   end
 
-  defp mutate_params("trend_following", params, granularity, generation) do
-    sf = sigma_fraction(generation)
-    fast = mutate_integer(params["fast_period"], sf, 3, 50)
-    # Ensure slow > fast by at least 2
-    slow = max(mutate_integer(params["slow_period"], sf, 10, 200), fast + 2)
-    default_confirm = default_exit_confirm_bars_for(granularity)
-
-    %{
-      "fast_period" => fast,
-      "slow_period" => slow,
-      "stop_loss" => mutate_float(params["stop_loss"], sf, -0.10, -0.001),
-      "take_profit" => mutate_optional_float(params["take_profit"], sf, 0.005, 0.20),
-      "confirm_bars" => mutate_integer(params["confirm_bars"] || default_confirm, sf, 1, 60),
-      "trailing_k" => mutate_float(params["trailing_k"] || 2.5, sf, 1.0, 5.0),
-      "regime_filter" => true
-    }
+  defp mutate_params("trend_following", _params, _granularity, _generation) do
+    # TF v1 is strict textbook (50/200, no mutation). max_generations_for/1
+    # returns 0 for "trend_following" so the spawner promotes at gen 0 and
+    # never calls into this branch. Raise loudly if it ever does — that
+    # indicates a misconfiguration upstream.
+    raise "trend_following is non-evolving (textbook v1); mutate_params should never be called"
   end
-
-  # Keep in sync with auro_be/src/engine/risk_defaults.rs default_exit_confirm_bars/1.
-  defp default_exit_confirm_bars_for("M1"), do: 60
-  defp default_exit_confirm_bars_for("M5"), do: 24
-  defp default_exit_confirm_bars_for("M15"), do: 12
-  defp default_exit_confirm_bars_for("H1"), do: 4
-  defp default_exit_confirm_bars_for("H4"), do: 3
-  defp default_exit_confirm_bars_for("D"), do: 2
-  defp default_exit_confirm_bars_for(_), do: 4
 
   # sigma decays linearly: 20% at gen 1 → 4% at gen 5
   defp sigma_fraction(generation) do
@@ -222,11 +213,6 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
   defp mutate_integer(value, sigma_f, min_val, max_val) do
     mutate_float(value * 1.0, sigma_f, min_val * 1.0, max_val * 1.0) |> round()
   end
-
-  defp mutate_optional_float(nil, _sf, _min, _max), do: nil
-
-  defp mutate_optional_float(value, sf, min_val, max_val),
-    do: mutate_float(value, sf, min_val, max_val)
 
   defp clamp(value, min_val, max_val), do: max(min_val, min(max_val, value))
 

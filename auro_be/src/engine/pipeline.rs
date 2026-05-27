@@ -6,9 +6,8 @@ use uuid::Uuid;
 use crate::db::repositories::pipeline as pipeline_repo;
 use crate::engine::grid::load_candles;
 use crate::engine::mean_reversion::{run as run_mean_reversion, MeanReversionParams};
-use crate::engine::risk_defaults::{default_exit_confirm_bars, default_trailing_k};
 use crate::engine::stats::{calculate_backtest_stats, BacktestStats};
-use crate::engine::trend_following::{run as run_trend_following, TrendFollowingParams};
+use crate::engine::strategy::{self as strategy_mod, Strategy};
 use crate::engine::types::{Candle, Granularity, Trade};
 use crate::error::{AppError, AppResult};
 
@@ -53,6 +52,24 @@ pub fn instrument_to_class(instrument: &str) -> &'static str {
 }
 
 fn run_strategy(candles: &[Candle], config: &StrategyConfig) -> AppResult<Vec<Trade>> {
+    // Shape detection: composite-shape params have a "components" key. This lets
+    // strategy_type stay logical ("trend_following", "mean_reversion") in the DB
+    // even as MR migrates to the composite shape — dispatch is driven by the
+    // shape of the parameters JSON, not by strategy_type.
+    let is_composite = config
+        .parameters
+        .as_object()
+        .map(|o| o.contains_key("components"))
+        .unwrap_or(false);
+
+    if is_composite {
+        let strategy: Strategy =
+            serde_json::from_value(config.parameters.clone()).map_err(|e| {
+                AppError::BadRequest(format!("invalid composite strategy parameters: {}", e))
+            })?;
+        return Ok(strategy_mod::run_backtest(candles, &strategy));
+    }
+
     match config.strategy_type.as_str() {
         "mean_reversion" => {
             let params: MeanReversionParams = serde_json::from_value(config.parameters.clone())
@@ -61,25 +78,12 @@ fn run_strategy(candles: &[Candle], config: &StrategyConfig) -> AppResult<Vec<Tr
                 })?;
             Ok(run_mean_reversion(candles, &params))
         }
-        "trend_following" => {
-            let params: TrendFollowingParams = serde_json::from_value(config.parameters.clone())
-                .map_err(|e| {
-                    AppError::BadRequest(format!("invalid trend_following parameters: {}", e))
-                })?;
-            let effective_confirm_bars = params
-                .confirm_bars
-                .unwrap_or_else(|| default_exit_confirm_bars(config.granularity));
-            let effective_trailing_k = params
-                .trailing_k
-                .unwrap_or_else(|| default_trailing_k("trend_following"));
-
-            Ok(run_trend_following(
-                candles,
-                &params,
-                effective_confirm_bars,
-                effective_trailing_k,
-            ))
-        }
+        "trend_following" => Err(AppError::BadRequest(
+            "trend_following old-shape strategies are deprecated. \
+             Rebuild as a composite strategy (TrendFollowing component) — \
+             see [[decision-canonical-strategy-shape]]."
+                .to_string(),
+        )),
         other => Err(AppError::BadRequest(format!(
             "unknown strategy_type: {}",
             other

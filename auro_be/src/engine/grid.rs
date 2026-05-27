@@ -3,10 +3,14 @@ use sqlx::PgPool;
 use std::time::Instant;
 use uuid::Uuid;
 
+use std::collections::HashMap;
+
 use crate::engine::mean_reversion::{run as run_mean_reversion, MeanReversionParams};
-use crate::engine::risk_defaults::{default_exit_confirm_bars, default_trailing_k};
 use crate::engine::stats::{self, BacktestStats};
-use crate::engine::trend_following::{run as run_trend_following, TrendFollowingParams};
+use crate::engine::strategy::{
+    self as strategy_mod, Component, EntryExitSelector, PortRef, SizingConfig, StopConfig,
+    Strategy, TrendFollowingParams,
+};
 use crate::engine::types::{Candle, EntryReason, ExitReason, Granularity, Trade, OHLC};
 
 /// MR v1 grid search config. Parameters reflect the Investopedia baseline
@@ -46,22 +50,24 @@ pub struct GridSearchResult {
     pub duration_ms: u128,
 }
 
+/// TF v1 (composite shape) grid config. Per the textbook discipline
+/// [[feedback-textbook-baselines-then-composites]] and Option A in
+/// [[decision-canonical-strategy-shape]], TF v1 ships with fixed 50/200 — no
+/// mutation. The "grid" therefore degenerates to a single config per
+/// instrument. The struct exists for symmetry with MR's grid and to make the
+/// API endpoint consistent; it does not currently expose tunable knobs.
 #[derive(Debug, Clone)]
 pub struct TrendGridConfig {
     pub instrument: String,
     pub granularity: String,
-    pub fast_periods: Vec<usize>,
-    pub slow_periods: Vec<usize>,
-    pub stop_losses: Vec<f64>,
-    pub take_profits: Vec<Option<f64>>,
+    pub fast_period: usize, // Default 50 per Britannica golden cross.
+    pub slow_period: usize, // Default 200 per Britannica golden cross.
+    pub stop_loss_pct: f64, // Default -0.02 (-2%); not in textbook but standard practice.
 }
 
 impl TrendGridConfig {
     pub fn total_combinations(&self) -> usize {
-        self.fast_periods.len()
-            * self.slow_periods.len()
-            * self.stop_losses.len()
-            * self.take_profits.len()
+        1
     }
 }
 
@@ -302,68 +308,68 @@ pub fn run_mean_grid(candles: &[Candle], config: &GridSearchConfig) -> Vec<GridS
 }
 
 pub fn run_trend_grid(candles: &[Candle], config: &TrendGridConfig) -> Vec<GridSearchResult> {
-    let mut results = Vec::new();
+    let granularity = config
+        .granularity
+        .parse::<Granularity>()
+        .unwrap_or(Granularity::H1);
 
-    for &fast in &config.fast_periods {
-        for &slow in &config.slow_periods {
-            if fast >= slow {
-                continue;
-            }
+    let mut components: HashMap<String, Component> = HashMap::new();
+    components.insert(
+        "tf".to_string(),
+        Component::TrendFollowing(TrendFollowingParams {
+            fast_period: config.fast_period,
+            slow_period: config.slow_period,
+        }),
+    );
 
-            for &stop_loss in &config.stop_losses {
-                for take_profit in &config.take_profits {
-                    let params = TrendFollowingParams {
-                        fast_period: fast,
-                        slow_period: slow,
-                        stop_loss,
-                        take_profit: *take_profit,
-                        regime_filter: true,
-                        confirm_bars: None,
-                        trailing_k: None,
-                    };
+    let strategy = Strategy {
+        strategy_id: None,
+        strategy_name: Some(format!(
+            "TF_v1_F{}_S{}_{}",
+            config.fast_period, config.slow_period, config.instrument
+        )),
+        version: "v1_composite".to_string(),
+        instrument: config.instrument.clone(),
+        granularity,
+        components,
+        entry: EntryExitSelector {
+            long: PortRef::Direct("tf.bullish_cross".to_string()),
+            short: PortRef::Direct("tf.bearish_cross".to_string()),
+        },
+        exit: EntryExitSelector {
+            long: PortRef::Direct("tf.bearish_cross".to_string()),
+            short: PortRef::Direct("tf.bullish_cross".to_string()),
+        },
+        stop: StopConfig::FixedPct {
+            pct: config.stop_loss_pct,
+        },
+        sizing: SizingConfig::RiskPct { pct: 0.01 },
+    };
 
-                    let start = Instant::now();
-                    let granularity = config
-                        .granularity
-                        .parse::<Granularity>()
-                        .unwrap_or(Granularity::H1);
-                    let trades = run_trend_following(
-                        candles,
-                        &params,
-                        default_exit_confirm_bars(granularity),
-                        default_trailing_k("trend_following"),
-                    );
-                    let duration_ms = start.elapsed().as_millis();
+    let start = Instant::now();
+    let trades = strategy_mod::run_backtest(candles, &strategy);
+    let duration_ms = start.elapsed().as_millis();
 
-                    let bt_stats = stats::calculate_backtest_stats(&trades);
-                    let (status, reason_flagged) = flag_result(
-                        &bt_stats,
-                        "trend_following",
-                        trades.last().map(|t| t.exit_time),
-                    );
+    let bt_stats = stats::calculate_backtest_stats(&trades);
+    let (status, reason_flagged) = flag_result(
+        &bt_stats,
+        "trend_following",
+        trades.last().map(|t| t.exit_time),
+    );
 
-                    results.push(GridSearchResult {
-                        strategy_type: "trend_following".to_string(),
-                        strategy_name: format!("TrendFollow_F{}_S{}", fast, slow),
-                        params_json: serde_json::json!({
-                            "fast_period": fast,
-                            "slow_period": slow,
-                            "stop_loss": stop_loss,
-                            "take_profit": take_profit,
-                            "regime_filter": true,
-                        }),
-                        stats: bt_stats,
-                        trades,
-                        status,
-                        reason_flagged,
-                        duration_ms,
-                    });
-                }
-            }
-        }
-    }
+    let params_json = serde_json::to_value(&strategy)
+        .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize strategy"}));
 
-    results
+    vec![GridSearchResult {
+        strategy_type: "composite".to_string(),
+        strategy_name: strategy.strategy_name.clone().unwrap_or_default(),
+        params_json,
+        stats: bt_stats,
+        trades,
+        status,
+        reason_flagged,
+        duration_ms,
+    }]
 }
 
 /// Converts an [`EntryReason`] enum variant to a string.
