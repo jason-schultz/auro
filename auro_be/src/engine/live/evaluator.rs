@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::db::repositories::{live_queries, live_strategies as live_strategies_repo};
 use crate::engine::indicators;
-use crate::engine::mean_reversion::{self, MRSignal, MeanReversionParams};
+use crate::engine::mean_reversion::{self, MREntrySignal, MRExitSignal, MeanReversionParams};
 use crate::engine::rules::{entry_gate_report, Rules};
 use crate::engine::trend_following::{self, TFSignal, TrendFollowingParams};
 use crate::engine::types::{
@@ -244,93 +244,123 @@ async fn evaluate_entry(
 
     match strategy.strategy_type.as_str() {
         "mean_reversion" => {
+            // MR v1: Z-score + RSI confirmed entry, bidirectional. Static OANDA
+            // SL is set at the Z-extension price; TP is dynamic (return-to-mean)
+            // and handled by Rust check_exit on each bar, so we pass None for TP.
             let mr_params = MeanReversionParams {
                 ma_period: params["ma_period"].as_u64().unwrap_or(20) as usize,
-                entry_threshold: params["entry_threshold"].as_f64().unwrap_or(-0.01),
-                exit_threshold: params["exit_threshold"].as_f64().unwrap_or(0.003),
-                stop_loss: params["stop_loss"].as_f64().unwrap_or(-0.005),
-                regime_filter: false, // live path: regime gating handled by Elixir rules engine
+                rsi_period: params["rsi_period"].as_u64().unwrap_or(14) as usize,
+                entry_z_threshold: params["entry_z_threshold"].as_f64().unwrap_or(1.5),
+                rsi_oversold: params["rsi_oversold"].as_f64().unwrap_or(30.0),
+                rsi_overbought: params["rsi_overbought"].as_f64().unwrap_or(70.0),
+                stop_z_threshold: params["stop_z_threshold"].as_f64().unwrap_or(3.5),
             };
 
-            let closes = buffer.closes();
+            let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+            let warmup = mr_params.ma_period.max(mr_params.rsi_period + 1);
 
-            // Diagnostic: compute MA and deviation for logging
-            if closes.len() >= mr_params.ma_period {
-                let ma: f64 = closes[closes.len() - mr_params.ma_period..]
-                    .iter()
-                    .sum::<f64>()
-                    / mr_params.ma_period as f64;
-                let deviation = (current_price - ma) / ma;
+            // Diagnostic: compute Z + RSI for logging visibility
+            if candles_ref.len() >= warmup {
+                let z = indicators::z_score(candles_ref, mr_params.ma_period);
+                let r = indicators::rsi(candles_ref, mr_params.rsi_period);
                 tracing::info!(
-                    "[STATUS] MR {} {} | price={:.5} MA{}={:.5} dev={:.4}% (need {:.4}%) | buf={}",
+                    "[STATUS] MR {} {} | price={:.5} Z={:?} RSI={:?} (entry |Z|>{:.2}, RSI<{} or >{}) | buf={}",
                     strategy.instrument,
                     strategy.granularity,
                     current_price,
-                    mr_params.ma_period,
-                    ma,
-                    deviation * 100.0,
-                    mr_params.entry_threshold * 100.0,
-                    closes.len(),
+                    z,
+                    r,
+                    mr_params.entry_z_threshold,
+                    mr_params.rsi_oversold,
+                    mr_params.rsi_overbought,
+                    candles_ref.len(),
                 );
             } else {
                 tracing::info!(
                     "[STATUS] MR {} {} | buffer {}/{} — waiting for data",
                     strategy.instrument,
                     strategy.granularity,
-                    closes.len(),
-                    mr_params.ma_period,
+                    candles_ref.len(),
+                    warmup,
                 );
             }
 
-            if let MRSignal::Enter {
+            let signal = mean_reversion::check_entry(candles_ref, &mr_params);
+            let (direction, ma_value, z_at_entry, rsi_at_entry) = match signal {
+                MREntrySignal::Long {
+                    ma_value,
+                    z_score,
+                    rsi,
+                } => (Direction::Long, ma_value, z_score, rsi),
+                MREntrySignal::Short {
+                    ma_value,
+                    z_score,
+                    rsi,
+                } => (Direction::Short, ma_value, z_score, rsi),
+                MREntrySignal::None => return Ok(None),
+            };
+
+            tracing::info!(
+                "[SIGNAL] MR {:?} entry on {} ({}): price={:.5}, MA{}={:.5}, Z={:.3}, RSI={:.2}",
+                direction,
+                strategy.instrument,
+                strategy.granularity,
+                current_price,
+                mr_params.ma_period,
                 ma_value,
-                deviation_pct,
-            } = mean_reversion::check_entry(&closes, &mr_params)
-            {
-                tracing::info!(
-                    "[SIGNAL] Mean reversion entry on {} ({}): price={:.5}, MA{}={:.5}, deviation={:.4}%",
-                    strategy.instrument, strategy.granularity, current_price, mr_params.ma_period, ma_value, deviation_pct * 100.0
-                );
+                z_at_entry,
+                rsi_at_entry,
+            );
 
-                if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
-                    return Ok(Some(gated));
-                }
-
-                let sl_price = current_price * (1.0 + mr_params.stop_loss);
-                let tp_price = current_price * (1.0 + mr_params.exit_threshold);
-
-                let adx = indicators::adx(&buffer.candles, 14);
-                let indicators_json = serde_json::json!({
-                    "ma_period": mr_params.ma_period,
-                    "ma_value": ma_value,
-                    "price_deviation_pct": deviation_pct,
-                    "adx": adx,
-                });
-                let (_, regime_reason) = rules.decision(&strategy.id);
-                let regime = regime_reason.unwrap_or("unknown").to_string();
-
-                return execute_entry(
-                    state,
-                    strategy,
-                    &Direction::Long,
-                    &strategy.max_position_size,
-                    strategy.risk_pct,
-                    strategy.max_units,
-                    current_price,
-                    sl_price,
-                    Some(tp_price),
-                    &format!(
-                        "BelowMA: MA{}={:.5}, deviation={:.4}%",
-                        mr_params.ma_period,
-                        ma_value,
-                        deviation_pct * 100.0
-                    ),
-                    indicators_json,
-                    regime,
-                    open_positions,
-                )
-                .await;
+            if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
+                return Ok(Some(gated));
             }
+
+            // Compute SL price from Z-extension threshold.
+            // Long:  SL = MA - stop_z_threshold * stdev (price further below MA)
+            // Short: SL = MA + stop_z_threshold * stdev (price further above MA)
+            // stdev is back-derived from (entry_price, ma_value, z_at_entry):
+            //   z = (price - ma) / stdev  =>  stdev = (price - ma) / z
+            // We use ma_value + entry-bar mid close + z_at_entry; for entry-bar
+            // price use current_price (the mid). Z is non-zero by entry guard.
+            let stdev = ((current_price - ma_value) / z_at_entry).abs();
+            let sl_price = match direction {
+                Direction::Long => ma_value - mr_params.stop_z_threshold * stdev,
+                Direction::Short => ma_value + mr_params.stop_z_threshold * stdev,
+            };
+
+            let adx = indicators::adx(candles_ref, 14);
+            let indicators_json = serde_json::json!({
+                "strategy_version": "v1",
+                "ma_period": mr_params.ma_period,
+                "ma_value": ma_value,
+                "z_score": z_at_entry,
+                "rsi": rsi_at_entry,
+                "stdev": stdev,
+                "adx": adx,
+            });
+            let (_, regime_reason) = rules.decision(&strategy.id);
+            let regime = regime_reason.unwrap_or("unknown").to_string();
+
+            return execute_entry(
+                state,
+                strategy,
+                &direction,
+                &strategy.max_position_size,
+                strategy.risk_pct,
+                strategy.max_units,
+                current_price,
+                sl_price,
+                None, // dynamic TP via check_exit
+                &format!(
+                    "MR v1 {:?}: MA{}={:.5}, Z={:.3}, RSI={:.2}",
+                    direction, mr_params.ma_period, ma_value, z_at_entry, rsi_at_entry
+                ),
+                indicators_json,
+                regime,
+                open_positions,
+            )
+            .await;
         }
         "trend_following" => {
             let tf_params = TrendFollowingParams {
@@ -897,9 +927,31 @@ async fn evaluate_exit(
 
     match strategy.strategy_type.as_str() {
         "mean_reversion" => {
-            // Exits are managed OANDA-side SL/TP orders; reconciler syncs DB.
-            // No rust exit checks needed on this arm
-            return Ok(vec![]);
+            // MR v1 dynamic exit: on each bar, check whether Z has crossed
+            // back through zero (return-to-mean) or extended past the stop
+            // threshold (Z-stop). OANDA holds the static SL server-side as
+            // catastrophic protection; this path triggers the primary exit.
+            let mr_params = MeanReversionParams {
+                ma_period: params["ma_period"].as_u64().unwrap_or(20) as usize,
+                rsi_period: params["rsi_period"].as_u64().unwrap_or(14) as usize,
+                entry_z_threshold: params["entry_z_threshold"].as_f64().unwrap_or(1.5),
+                rsi_oversold: params["rsi_oversold"].as_f64().unwrap_or(30.0),
+                rsi_overbought: params["rsi_overbought"].as_f64().unwrap_or(70.0),
+                stop_z_threshold: params["stop_z_threshold"].as_f64().unwrap_or(3.5),
+            };
+            let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+            let direction = positions_for_strategy[0].direction;
+            match mean_reversion::check_exit(candles_ref, &mr_params, direction) {
+                MRExitSignal::ReturnToMean { ma_value, z_score } => {
+                    should_exit = true;
+                    exit_reason = format!("ReturnToMean: MA={:.5}, Z={:.3}", ma_value, z_score);
+                }
+                MRExitSignal::ZStop { z_score } => {
+                    should_exit = true;
+                    exit_reason = format!("ZStop: Z={:.3}", z_score);
+                }
+                MRExitSignal::Hold => {}
+            }
         }
         "trend_following" => {
             let tf_params = TrendFollowingParams {

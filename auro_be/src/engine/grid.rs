@@ -9,22 +9,28 @@ use crate::engine::stats::{self, BacktestStats};
 use crate::engine::trend_following::{run as run_trend_following, TrendFollowingParams};
 use crate::engine::types::{Candle, EntryReason, ExitReason, Granularity, Trade, OHLC};
 
+/// MR v1 grid search config. Parameters reflect the Investopedia baseline
+/// (Z-score + RSI + return-to-mean exit). See `mean_reversion.rs` for semantics.
 #[derive(Debug, Clone)]
 pub struct GridSearchConfig {
     pub instrument: String,
     pub granularity: String,
     pub ma_periods: Vec<usize>,
-    pub entry_thresholds: Vec<f64>,
-    pub exit_thresholds: Vec<f64>,
-    pub stop_losses: Vec<f64>,
+    pub rsi_periods: Vec<usize>,
+    pub entry_z_thresholds: Vec<f64>,
+    pub rsi_oversold_levels: Vec<f64>,
+    pub rsi_overbought_levels: Vec<f64>,
+    pub stop_z_thresholds: Vec<f64>,
 }
 
 impl GridSearchConfig {
     pub fn total_combinations(&self) -> usize {
         self.ma_periods.len()
-            * self.entry_thresholds.len()
-            * self.exit_thresholds.len()
-            * self.stop_losses.len()
+            * self.rsi_periods.len()
+            * self.entry_z_thresholds.len()
+            * self.rsi_oversold_levels.len()
+            * self.rsi_overbought_levels.len()
+            * self.stop_z_thresholds.len()
     }
 }
 
@@ -240,44 +246,53 @@ pub fn run_mean_grid(candles: &[Candle], config: &GridSearchConfig) -> Vec<GridS
     let mut results = Vec::new();
 
     for &ma_period in &config.ma_periods {
-        for &entry_threshold in &config.entry_thresholds {
-            for &exit_threshold in &config.exit_thresholds {
-                for &stop_loss in &config.stop_losses {
-                    let params = MeanReversionParams {
-                        ma_period,
-                        entry_threshold,
-                        exit_threshold,
-                        stop_loss,
-                        regime_filter: true,
-                    };
+        for &rsi_period in &config.rsi_periods {
+            for &entry_z_threshold in &config.entry_z_thresholds {
+                for &rsi_oversold in &config.rsi_oversold_levels {
+                    for &rsi_overbought in &config.rsi_overbought_levels {
+                        for &stop_z_threshold in &config.stop_z_thresholds {
+                            let params = MeanReversionParams {
+                                ma_period,
+                                rsi_period,
+                                entry_z_threshold,
+                                rsi_oversold,
+                                rsi_overbought,
+                                stop_z_threshold,
+                            };
 
-                    let start = Instant::now();
-                    let trades = run_mean_reversion(candles, &params);
-                    let duration_ms = start.elapsed().as_millis();
+                            let start = Instant::now();
+                            let trades = run_mean_reversion(candles, &params);
+                            let duration_ms = start.elapsed().as_millis();
 
-                    let bt_stats = stats::calculate_backtest_stats(&trades);
-                    let (status, reason_flagged) = flag_result(
-                        &bt_stats,
-                        "mean_reversion",
-                        trades.last().map(|t| t.exit_time),
-                    );
+                            let bt_stats = stats::calculate_backtest_stats(&trades);
+                            let (status, reason_flagged) = flag_result(
+                                &bt_stats,
+                                "mean_reversion",
+                                trades.last().map(|t| t.exit_time),
+                            );
 
-                    results.push(GridSearchResult {
-                        strategy_type: "mean_reversion".to_string(),
-                        strategy_name: format!("MeanReversion_MA{}", ma_period),
-                        params_json: serde_json::json!({
-                            "ma_period": ma_period,
-                            "entry_threshold": entry_threshold,
-                            "exit_threshold": exit_threshold,
-                            "stop_loss": stop_loss,
-                            "regime_filter": true,
-                        }),
-                        stats: bt_stats,
-                        trades,
-                        status,
-                        reason_flagged,
-                        duration_ms,
-                    });
+                            results.push(GridSearchResult {
+                                strategy_type: "mean_reversion".to_string(),
+                                strategy_name: format!(
+                                    "MeanReversion_MA{}_RSI{}_Z{:.1}",
+                                    ma_period, rsi_period, entry_z_threshold
+                                ),
+                                params_json: serde_json::json!({
+                                    "ma_period": ma_period,
+                                    "rsi_period": rsi_period,
+                                    "entry_z_threshold": entry_z_threshold,
+                                    "rsi_oversold": rsi_oversold,
+                                    "rsi_overbought": rsi_overbought,
+                                    "stop_z_threshold": stop_z_threshold,
+                                }),
+                                stats: bt_stats,
+                                trades,
+                                status,
+                                reason_flagged,
+                                duration_ms,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -362,6 +377,7 @@ fn entry_reason_to_string(reason: &EntryReason) -> String {
         EntryReason::BelowMA { .. } => "BelowMA".to_string(),
         EntryReason::CrossAbove { .. } => "CrossAbove".to_string(),
         EntryReason::CrossBelow { .. } => "CrossBelow".to_string(),
+        EntryReason::MeanReversionEntry { .. } => "MeanReversionEntry".to_string(),
     }
 }
 
@@ -379,6 +395,8 @@ fn exit_reason_to_string(reason: &ExitReason) -> String {
         ExitReason::TimeExit => "TimeExit".to_string(),
         ExitReason::EndOfData => "EndOfData".to_string(),
         ExitReason::TrendReversal => "TrendReversal".to_string(),
+        ExitReason::ReturnToMean => "ReturnToMean".to_string(),
+        ExitReason::ZStop => "ZStop".to_string(),
     }
 }
 
@@ -409,6 +427,17 @@ fn entry_reason_to_json(reason: &EntryReason) -> serde_json::Value {
             serde_json::json!({
                 "fast_ma": fast_ma,
                 "slow_ma": slow_ma,
+            })
+        }
+        EntryReason::MeanReversionEntry {
+            ma_value,
+            z_score,
+            rsi,
+        } => {
+            serde_json::json!({
+                "ma_value": ma_value,
+                "z_score": z_score,
+                "rsi": rsi,
             })
         }
     }
@@ -444,13 +473,19 @@ pub async fn store_results(
             .map(|t| t.exit_time)
             .unwrap_or_else(Utc::now);
 
+        // MR v1 rebuild: all new backtest rows are tagged 'v1'. Trend following
+        // is unchanged but writes 'v1' too so the column is consistent; if TF
+        // ever gets its own rebuild it gets its own version bump.
+        let strategy_version = "v1";
+
         sqlx::query(
             r#"
             INSERT INTO backtest_runs
                 (id, strategy_name, strategy_type, instrument, granularity, parameters,
                  start_date, end_date, total_return, win_rate, sharpe_ratio, max_drawdown,
-                 num_trades, avg_win, avg_loss, status, reason_flagged, execution_duration_ms)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                 num_trades, avg_win, avg_loss, status, reason_flagged, execution_duration_ms,
+                 strategy_version)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
             "#,
         )
         .bind(run_id)
@@ -471,6 +506,7 @@ pub async fn store_results(
         .bind(&result.status)
         .bind(&result.reason_flagged)
         .bind(result.duration_ms as i32)
+        .bind(strategy_version)
         .execute(pool)
         .await?;
 

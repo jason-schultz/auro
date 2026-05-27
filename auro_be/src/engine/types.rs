@@ -270,13 +270,34 @@ pub enum ExitReason {
     TrendReversal,
     TimeExit,
     EndOfData,
+    /// MR v1: price has crossed back through the MA (Z crossed zero from entry side).
+    ReturnToMean,
+    /// MR v1: Z extended beyond `stop_z_threshold` in the adverse direction.
+    ZStop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EntryReason {
-    BelowMA { ma_value: f64, deviation_pct: f64 },
-    CrossAbove { fast_ma: f64, slow_ma: f64 },
-    CrossBelow { fast_ma: f64, slow_ma: f64 },
+    /// Legacy v0 mean reversion entry — kept for stored backtest compat.
+    /// Remove once all v0 backtest rows have been purged or migrated.
+    BelowMA {
+        ma_value: f64,
+        deviation_pct: f64,
+    },
+    CrossAbove {
+        fast_ma: f64,
+        slow_ma: f64,
+    },
+    CrossBelow {
+        fast_ma: f64,
+        slow_ma: f64,
+    },
+    /// MR v1: bidirectional Z-score + RSI confirmed entry. Direction is on the Trade itself.
+    MeanReversionEntry {
+        ma_value: f64,
+        z_score: f64,
+        rsi: f64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]

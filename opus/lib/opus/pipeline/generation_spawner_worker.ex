@@ -167,15 +167,17 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
   # Mutation — Gaussian with linearly-decaying sigma
   # ---------------------------------------------------------------------------
 
+  # MR v1 (Investopedia baseline): mutate Z-score + RSI params.
   defp mutate_params("mean_reversion", params, _granularity, generation) do
     sf = sigma_fraction(generation)
 
     %{
       "ma_period" => mutate_integer(params["ma_period"], sf, 5, 200),
-      "entry_threshold" => mutate_float(params["entry_threshold"], sf, -0.05, -0.0005),
-      "exit_threshold" => mutate_float(params["exit_threshold"], sf, 0.0, 0.05),
-      "stop_loss" => mutate_float(params["stop_loss"], sf, -0.10, -0.001),
-      "regime_filter" => true
+      "rsi_period" => mutate_integer(params["rsi_period"], sf, 5, 30),
+      "entry_z_threshold" => mutate_float(params["entry_z_threshold"], sf, 1.0, 3.0),
+      "rsi_oversold" => mutate_float(params["rsi_oversold"], sf, 15.0, 40.0),
+      "rsi_overbought" => mutate_float(params["rsi_overbought"], sf, 60.0, 85.0),
+      "stop_z_threshold" => mutate_float(params["stop_z_threshold"], sf, 2.0, 6.0)
     }
   end
 
