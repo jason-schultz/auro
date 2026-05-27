@@ -109,8 +109,8 @@ mod tests {
     fn flat_prices_produce_no_cross() {
         let candles: Vec<Candle> = (0..250).map(|i| make_candle(100.0, i)).collect();
         let ports = compute_ports(&candles, &params(50, 200)).unwrap();
-        assert_eq!(ports["bullish_cross"], false);
-        assert_eq!(ports["bearish_cross"], false);
+        assert!(!ports["bullish_cross"]);
+        assert!(!ports["bearish_cross"]);
     }
 
     #[test]
