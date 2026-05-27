@@ -44,89 +44,81 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
     SPX500_USD NAS100_USD US30_USD UK100_GBP DE30_EUR JP225_USD AU200_AUD EU50_EUR
   ]
 
-  # Seed params are the starting point for mutation — exact values matter less
-  # in exploratory mode since gen-1 children are immediately mutated.
-  # MR seeds use the v1 Investopedia-baseline params (Z-score + RSI + return-to-mean
-  # exit). The Z threshold stays at the textbook 1.5 across timeframes; only
-  # ma_period varies (kept at 20 — mutation will explore around it).
+  # Seed params per strategy class. Two shapes coexist during the migration:
+  # - MR uses the legacy flat shape (will migrate to composite in a follow-up).
+  # - TF uses the new composite shape — see decision-canonical-strategy-shape.
+  # TF v1 ships with fixed 50/200 (Britannica textbook) across all granularities;
+  # no mutation per the textbook-baselines-then-composites principle.
+  @mr_seed %{
+    "ma_period" => 20,
+    "rsi_period" => 14,
+    "entry_z_threshold" => 1.5,
+    "rsi_oversold" => 30.0,
+    "rsi_overbought" => 70.0,
+    "stop_z_threshold" => 3.5
+  }
+
   @seed_params %{
     "H1" => %{
-      "trend_following" => %{
-        "fast_period" => 10,
-        "slow_period" => 50,
-        "stop_loss" => -0.02,
-        "take_profit" => nil,
-        "confirm_bars" => 4,
-        "trailing_k" => 2.5,
-        "regime_filter" => true
-      },
-      "mean_reversion" => %{
-        "ma_period" => 20,
-        "rsi_period" => 14,
-        "entry_z_threshold" => 1.5,
-        "rsi_oversold" => 30.0,
-        "rsi_overbought" => 70.0,
-        "stop_z_threshold" => 3.5
-      }
+      "trend_following" => :composite_tf_v1,
+      "mean_reversion" => @mr_seed
     },
     "H4" => %{
-      "trend_following" => %{
-        "fast_period" => 10,
-        "slow_period" => 30,
-        "stop_loss" => -0.025,
-        "take_profit" => nil,
-        "confirm_bars" => 3,
-        "trailing_k" => 2.5,
-        "regime_filter" => true
-      },
-      "mean_reversion" => %{
-        "ma_period" => 20,
-        "rsi_period" => 14,
-        "entry_z_threshold" => 1.5,
-        "rsi_oversold" => 30.0,
-        "rsi_overbought" => 70.0,
-        "stop_z_threshold" => 3.5
-      }
+      "trend_following" => :composite_tf_v1,
+      "mean_reversion" => @mr_seed
     },
     "M15" => %{
-      "trend_following" => %{
-        "fast_period" => 10,
-        "slow_period" => 30,
-        "stop_loss" => -0.015,
-        "take_profit" => nil,
-        "confirm_bars" => 12,
-        "trailing_k" => 2.5,
-        "regime_filter" => true
-      },
-      "mean_reversion" => %{
-        "ma_period" => 20,
-        "rsi_period" => 14,
-        "entry_z_threshold" => 1.5,
-        "rsi_oversold" => 30.0,
-        "rsi_overbought" => 70.0,
-        "stop_z_threshold" => 3.5
-      }
+      "trend_following" => :composite_tf_v1,
+      "mean_reversion" => @mr_seed
     },
     "M5" => %{
-      "trend_following" => %{
-        "fast_period" => 20,
-        "slow_period" => 60,
-        "stop_loss" => -0.01,
-        "take_profit" => nil,
-        "confirm_bars" => 24,
-        "trailing_k" => 2.5,
-        "regime_filter" => true
-      },
-      "mean_reversion" => %{
-        "ma_period" => 20,
-        "rsi_period" => 14,
-        "entry_z_threshold" => 1.5,
-        "rsi_oversold" => 30.0,
-        "rsi_overbought" => 70.0,
-        "stop_z_threshold" => 3.5
-      }
+      "trend_following" => :composite_tf_v1,
+      "mean_reversion" => @mr_seed
     }
   }
+
+  # Build the composite-shape Strategy JSON for TF v1.
+  # 50/200 is the Britannica golden-cross textbook standard.
+  # stop_loss_pct -0.02 is not from textbook — it's a standard practitioner
+  # default; documented as judgment, not citation.
+  defp build_tf_v1_composite(instrument, granularity) do
+    %{
+      "strategy_id" => nil,
+      "strategy_name" => "tf_v1_#{instrument}_#{granularity}",
+      "version" => "v1_composite",
+      "instrument" => instrument,
+      "granularity" => granularity,
+      "components" => %{
+        "tf" => %{
+          "type" => "TrendFollowing",
+          "params" => %{"fast_period" => 50, "slow_period" => 200}
+        }
+      },
+      "entry" => %{
+        "long" => "tf.bullish_cross",
+        "short" => "tf.bearish_cross"
+      },
+      "exit" => %{
+        "long" => "tf.bearish_cross",
+        "short" => "tf.bullish_cross"
+      },
+      "stop" => %{"type" => "FixedPct", "params" => %{"pct" => -0.02}},
+      "sizing" => %{"type" => "RiskPct", "params" => %{"pct" => 0.01}}
+    }
+  end
+
+  defp resolve_params(strategy_type, instrument, granularity, seed) do
+    case seed do
+      :composite_tf_v1 ->
+        build_tf_v1_composite(instrument, granularity)
+
+      params when is_map(params) ->
+        params
+
+      other ->
+        raise "unsupported seed config for #{strategy_type}: #{inspect(other)}"
+    end
+  end
 
   @impl Mix.Task
   def run(args) do
@@ -192,14 +184,32 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
 
             {s2, sk2 + 1, f2}
           else
+            parameters =
+              resolve_params(
+                strategy_type,
+                instrument,
+                granularity,
+                params_for_gran[strategy_type]
+              )
+
             attrs = %{
               instrument: instrument,
               granularity: granularity,
               strategy_type: strategy_type,
-              parameters: params_for_gran[strategy_type]
+              parameters: parameters
             }
 
-            case Coordinator.submit_evo_seed_exploratory(attrs) do
+            # TF v1 is composite-shape and does NOT evolve (textbook 50/200 fixed).
+            # Use submit_evo_seed (non-exploratory) so the seed itself is backtested
+            # and the spawner promotes it directly without mutating gen-1 children.
+            # MR continues to use exploratory mode for evo.
+            submit_fn =
+              case strategy_type do
+                "trend_following" -> &Coordinator.submit_evo_seed/1
+                _ -> &Coordinator.submit_evo_seed_exploratory/1
+              end
+
+            case submit_fn.(attrs) do
               {:ok, config} ->
                 Mix.shell().info(
                   "  [seed] #{strategy_type} #{instrument} #{granularity} → #{config.id}"

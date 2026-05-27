@@ -8,5 +8,6 @@ pub mod pipeline;
 pub mod risk_defaults;
 pub mod rules;
 pub mod stats;
+pub mod strategy;
 pub mod trend_following;
 pub mod types;

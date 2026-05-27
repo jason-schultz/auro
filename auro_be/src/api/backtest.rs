@@ -59,25 +59,18 @@ pub async fn run_grid_search(
 
     let results = match strategy.as_str() {
         "trend_following" => {
+            // TF v1 (composite shape): fixed textbook 50/200 per
+            // [[decision-canonical-strategy-shape]] Option A.
             let config = grid::TrendGridConfig {
                 instrument: instrument.clone(),
                 granularity: timeframe.clone(),
-                fast_periods: vec![8, 13, 21, 34],
-                slow_periods: vec![50, 89, 144, 200],
-                stop_losses: vec![-0.005, -0.01, -0.015, -0.025],
-                take_profits: vec![
-                    None,
-                    Some(0.01),
-                    Some(0.02),
-                    Some(0.04),
-                    Some(0.06),
-                    Some(0.08),
-                ],
+                fast_period: 50,
+                slow_period: 200,
+                stop_loss_pct: -0.02,
             };
 
             tracing::info!(
-                "Starting trend following grid: {} combinations on {} ({}) with {} candles",
-                config.total_combinations(),
+                "Starting trend following grid (v1_composite, fixed 50/200) on {} ({}) with {} candles",
                 instrument,
                 timeframe,
                 candles.len()
