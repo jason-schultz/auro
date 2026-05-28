@@ -222,117 +222,114 @@ async fn evaluate_entry(
 
     // All strategies use the composite shape. Legacy flat-shape strategies
     // were purged with the DB wipe; see [[decision-canonical-strategy-shape]].
-    match strategy.strategy_type.as_str() {
-        "composite" => {
-            // New canonical strategy shape. All parameters live inside the
-            // Strategy struct (components, entry/exit selectors, stop, sizing).
-            let composite: Strategy = match serde_json::from_value(params.clone()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        "[SKIP ENTRY] composite parse failure for {} {}: {}",
-                        strategy.instrument,
-                        strategy.granularity,
-                        e
-                    );
-                    return Ok(None);
-                }
-            };
-
-            let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
-            let warmup = composite.warmup();
-            if candles_ref.len() < warmup {
-                tracing::info!(
-                    "[STATUS] composite {} {} | buffer {}/{} — waiting for data",
+    if strategy.strategy_type.as_str() == "composite" {
+        // New canonical strategy shape. All parameters live inside the
+        // Strategy struct (components, entry/exit selectors, stop, sizing).
+        let composite: Strategy = match serde_json::from_value(params.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "[SKIP ENTRY] composite parse failure for {} {}: {}",
                     strategy.instrument,
                     strategy.granularity,
-                    candles_ref.len(),
-                    warmup,
+                    e
                 );
                 return Ok(None);
             }
+        };
 
-            let ports = match composite.compute_ports(candles_ref) {
-                Some(p) => p,
-                None => return Ok(None),
-            };
-
+        let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+        let warmup = composite.warmup();
+        if candles_ref.len() < warmup {
             tracing::info!(
-                "[STATUS] composite {} {} | ports={:?} | buf={}",
+                "[STATUS] composite {} {} | buffer {}/{} — waiting for data",
                 strategy.instrument,
                 strategy.granularity,
-                ports,
                 candles_ref.len(),
+                warmup,
             );
+            return Ok(None);
+        }
 
-            let entry_signal = composite.evaluate_entry(&ports);
-            let direction = match entry_signal {
-                EntrySignal::Long => Direction::Long,
-                EntrySignal::Short => Direction::Short,
-                EntrySignal::None => return Ok(None),
-            };
+        let ports = match composite.compute_ports(candles_ref) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
 
-            tracing::info!(
-                "[SIGNAL] Composite {:?} entry on {} ({}): price={:.5}",
-                direction,
-                strategy.instrument,
-                strategy.granularity,
-                current_price,
-            );
+        tracing::info!(
+            "[STATUS] composite {} {} | ports={:?} | buf={}",
+            strategy.instrument,
+            strategy.granularity,
+            ports,
+            candles_ref.len(),
+        );
 
-            if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
-                return Ok(Some(gated));
-            }
+        let entry_signal = composite.evaluate_entry(&ports);
+        let direction = match entry_signal {
+            EntrySignal::Long => Direction::Long,
+            EntrySignal::Short => Direction::Short,
+            EntrySignal::None => return Ok(None),
+        };
 
-            let sl_price = match strategy_mod::compute_stop_price(
-                &composite,
-                current_price,
-                direction,
-                candles_ref,
-            ) {
-                Some(p) => p,
-                None => {
-                    tracing::warn!(
+        tracing::info!(
+            "[SIGNAL] Composite {:?} entry on {} ({}): price={:.5}",
+            direction,
+            strategy.instrument,
+            strategy.granularity,
+            current_price,
+        );
+
+        if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
+            return Ok(Some(gated));
+        }
+
+        let sl_price = match strategy_mod::compute_stop_price(
+            &composite,
+            current_price,
+            direction,
+            candles_ref,
+        ) {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
                         "[SKIP ENTRY] composite {} {} — stop config could not compute SL (component-derived stop returned None)",
                         strategy.instrument,
                         strategy.granularity,
                     );
-                    return Ok(None);
-                }
-            };
-            let units_to_use = match direction {
-                Direction::Long => strategy.max_position_size.clone(),
-                Direction::Short => format!("-{}", strategy.max_position_size),
-            };
+                return Ok(None);
+            }
+        };
+        let units_to_use = match direction {
+            Direction::Long => strategy.max_position_size.clone(),
+            Direction::Short => format!("-{}", strategy.max_position_size),
+        };
 
-            let adx = indicators::adx(candles_ref, 14);
-            let indicators_json = serde_json::json!({
-                "strategy_version": composite.version,
-                "components": composite.components.keys().collect::<Vec<_>>(),
-                "ports": ports,
-                "adx": adx,
-            });
-            let (_, regime_reason) = rules.decision(&strategy.id);
-            let regime = regime_reason.unwrap_or("unknown").to_string();
+        let adx = indicators::adx(candles_ref, 14);
+        let indicators_json = serde_json::json!({
+            "strategy_version": composite.version,
+            "components": composite.components.keys().collect::<Vec<_>>(),
+            "ports": ports,
+            "adx": adx,
+        });
+        let (_, regime_reason) = rules.decision(&strategy.id);
+        let regime = regime_reason.unwrap_or("unknown").to_string();
 
-            return execute_entry(
-                state,
-                strategy,
-                &direction,
-                &units_to_use,
-                strategy.risk_pct,
-                strategy.max_units,
-                current_price,
-                sl_price,
-                None, // no static TP — exit handled by composite strategy's exit selector
-                &format!("Composite {:?} entry", direction),
-                indicators_json,
-                regime,
-                open_positions,
-            )
-            .await;
-        }
-        _ => {}
+        return execute_entry(
+            state,
+            strategy,
+            &direction,
+            &units_to_use,
+            strategy.risk_pct,
+            strategy.max_units,
+            current_price,
+            sl_price,
+            None, // no static TP — exit handled by composite strategy's exit selector
+            &format!("Composite {:?} entry", direction),
+            indicators_json,
+            regime,
+            open_positions,
+        )
+        .await;
     }
     Ok(None)
 }
@@ -714,34 +711,31 @@ async fn evaluate_exit(
 
     // All strategies use the composite shape. Legacy flat-shape strategies
     // were purged with the DB wipe; see [[decision-canonical-strategy-shape]].
-    match strategy.strategy_type.as_str() {
-        "composite" => {
-            // New canonical strategy shape: evaluate the exit selector against
-            // computed component ports. On Exit, close via OANDA.
-            let composite: Strategy = match serde_json::from_value(params.clone()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        "[EXIT CHECK] composite parse failure for {} {}: {}",
-                        strategy.instrument,
-                        strategy.granularity,
-                        e
-                    );
-                    return Ok(vec![]);
-                }
-            };
-            let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
-            let ports = match composite.compute_ports(candles_ref) {
-                Some(p) => p,
-                None => return Ok(vec![]),
-            };
-            let is_long = positions_for_strategy[0].direction == Direction::Long;
-            if matches!(composite.evaluate_exit(&ports, is_long), ExitSignal::Exit) {
-                should_exit = true;
-                exit_reason = format!("CompositeExit (ports={:?})", ports);
+    if strategy.strategy_type.as_str() == "composite" {
+        // New canonical strategy shape: evaluate the exit selector against
+        // computed component ports. On Exit, close via OANDA.
+        let composite: Strategy = match serde_json::from_value(params.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "[EXIT CHECK] composite parse failure for {} {}: {}",
+                    strategy.instrument,
+                    strategy.granularity,
+                    e
+                );
+                return Ok(vec![]);
             }
+        };
+        let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+        let ports = match composite.compute_ports(candles_ref) {
+            Some(p) => p,
+            None => return Ok(vec![]),
+        };
+        let is_long = positions_for_strategy[0].direction == Direction::Long;
+        if matches!(composite.evaluate_exit(&ports, is_long), ExitSignal::Exit) {
+            should_exit = true;
+            exit_reason = format!("CompositeExit (ports={:?})", ports);
         }
-        _ => {}
     }
 
     let mut reports = Vec::<SignalReport>::new();
