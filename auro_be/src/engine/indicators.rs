@@ -1,3 +1,20 @@
+//! Indicator math primitives.
+//!
+//! # Conventions (freeze — do not change without recalibrating thresholds)
+//!
+//! - **Rolling stdev is population (divide by n), not sample (n-1).** Matches
+//!   the Investopedia MR baseline and standard TA convention (Bollinger,
+//!   rolling Z, ATR). Switching to sample stdev would shift every Z-threshold
+//!   ever calibrated.
+//! - **RSI uses Wilder smoothing** (not simple MA). Flat series (avg_gain ==
+//!   avg_loss == 0) returns the neutral 50, not the asymmetric 100. Only-gain
+//!   series returns 100; only-loss series returns 0.
+//! - **All rolling windows reference `candles[candles.len() - period..]`** —
+//!   the most recent `period` bars including the latest closed bar.
+//!
+//! Comparator strictness conventions live next to the signal logic they
+//! govern (see `mean_reversion.rs` and `trend_following.rs`).
+
 use crate::engine::types::{BollingerBands, Candle};
 
 /// Average Directional Index over `period` bars.
@@ -228,6 +245,12 @@ pub fn rsi(candles: &[Candle], period: usize) -> Option<f64> {
         avg_loss = (avg_loss * (p_f - 1.0) + losses[i]) / p_f;
     }
 
+    // Flat series (no movement either direction) → neutral 50, not 100.
+    // Only-gain (avg_loss == 0, avg_gain > 0) → 100. Only-loss falls through
+    // and resolves to 0 via the standard formula.
+    if avg_gain == 0.0 && avg_loss == 0.0 {
+        return Some(50.0);
+    }
     if avg_loss == 0.0 {
         return Some(100.0);
     }
@@ -523,6 +546,18 @@ mod tests {
         assert!(
             r < 5.0,
             "Expected RSI near 0 for all-loss series, got {}",
+            r
+        );
+    }
+
+    #[test]
+    fn rsi_flat_returns_50() {
+        // Zero-delta series (avg_gain == avg_loss == 0) → neutral 50, not 100.
+        let candles: Vec<Candle> = (0..30).map(|i| flat(100.0, i as i64)).collect();
+        let r = rsi(&candles, 14).expect("RSI should compute on flat series");
+        assert!(
+            (r - 50.0).abs() < 1e-9,
+            "Expected RSI=50 for flat series, got {}",
             r
         );
     }

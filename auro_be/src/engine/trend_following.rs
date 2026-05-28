@@ -60,6 +60,11 @@ pub fn compute_ports(
     let prev_fast = sma(candles, n - 1, params.fast_period);
     let prev_slow = sma(candles, n - 1, params.slow_period);
 
+    // Cross detection convention (freeze): inclusive on the prior bar
+    // (`<=`/`>=`), strict on the current bar (`>`/`<`). Required so a flat
+    // touch on the previous bar followed by separation still counts as a
+    // cross — using strict on both sides would silently miss equal-touch
+    // crossovers.
     let bullish_cross = prev_fast <= prev_slow && fast > slow;
     let bearish_cross = prev_fast >= prev_slow && fast < slow;
 

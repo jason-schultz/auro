@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use std::collections::HashMap;
 
-use crate::engine::mean_reversion::{run as run_mean_reversion, MeanReversionParams};
+use crate::engine::mean_reversion::MeanReversionParams;
 use crate::engine::stats::{self, BacktestStats};
 use crate::engine::strategy::{
     self as strategy_mod, Component, EntryExitSelector, PortRef, SizingConfig, StopConfig, Strategy,
@@ -241,14 +241,14 @@ pub async fn load_candles(
     Ok(candles)
 }
 
-/// Runs a grid search over the given candles using the provided configuration.
-///
-/// Parameters:
-/// - `candles`: A slice of [`Candle`] structs.
-/// - `config`: A reference to the [`GridSearchConfig`] struct.
-///
-/// Returns a vector of [`GridSearchResult`] structs.
+/// Runs an MR grid search in the composite strategy shape. Iterates the
+/// cartesian product of the configured param ranges, builds a composite
+/// `Strategy` per combination, and backtests it via the generic strategy runner.
 pub fn run_mean_grid(candles: &[Candle], config: &GridSearchConfig) -> Vec<GridSearchResult> {
+    let granularity = config
+        .granularity
+        .parse::<Granularity>()
+        .unwrap_or(Granularity::H1);
     let mut results = Vec::new();
 
     for &ma_period in &config.ma_periods {
@@ -257,17 +257,45 @@ pub fn run_mean_grid(candles: &[Candle], config: &GridSearchConfig) -> Vec<GridS
                 for &rsi_oversold in &config.rsi_oversold_levels {
                     for &rsi_overbought in &config.rsi_overbought_levels {
                         for &stop_z_threshold in &config.stop_z_thresholds {
-                            let params = MeanReversionParams {
-                                ma_period,
-                                rsi_period,
-                                entry_z_threshold,
-                                rsi_oversold,
-                                rsi_overbought,
-                                stop_z_threshold,
+                            let mut components: HashMap<String, Component> = HashMap::new();
+                            components.insert(
+                                "mr".to_string(),
+                                Component::MeanReversion(MeanReversionParams {
+                                    ma_period,
+                                    rsi_period,
+                                    entry_z_threshold,
+                                    rsi_oversold,
+                                    rsi_overbought,
+                                    stop_z_threshold,
+                                }),
+                            );
+
+                            let strategy = Strategy {
+                                strategy_id: None,
+                                strategy_name: Some(format!(
+                                    "MR_v1_MA{}_RSI{}_Z{:.1}_{}",
+                                    ma_period, rsi_period, entry_z_threshold, config.instrument
+                                )),
+                                version: "v1_composite".to_string(),
+                                instrument: config.instrument.clone(),
+                                granularity,
+                                components,
+                                entry: EntryExitSelector {
+                                    long: PortRef::Direct("mr.long".to_string()),
+                                    short: PortRef::Direct("mr.short".to_string()),
+                                },
+                                exit: EntryExitSelector {
+                                    long: PortRef::Direct("mr.exit_long".to_string()),
+                                    short: PortRef::Direct("mr.exit_short".to_string()),
+                                },
+                                stop: StopConfig::FromComponent {
+                                    component: "mr".to_string(),
+                                },
+                                sizing: SizingConfig::RiskPct { pct: 0.01 },
                             };
 
                             let start = Instant::now();
-                            let trades = run_mean_reversion(candles, &params);
+                            let trades = strategy_mod::run_backtest(candles, &strategy);
                             let duration_ms = start.elapsed().as_millis();
 
                             let bt_stats = stats::calculate_backtest_stats(&trades);
@@ -277,20 +305,14 @@ pub fn run_mean_grid(candles: &[Candle], config: &GridSearchConfig) -> Vec<GridS
                                 trades.last().map(|t| t.exit_time),
                             );
 
+                            let params_json = serde_json::to_value(&strategy).unwrap_or_else(
+                                |_| serde_json::json!({"error": "failed to serialize strategy"}),
+                            );
+
                             results.push(GridSearchResult {
-                                strategy_type: "mean_reversion".to_string(),
-                                strategy_name: format!(
-                                    "MeanReversion_MA{}_RSI{}_Z{:.1}",
-                                    ma_period, rsi_period, entry_z_threshold
-                                ),
-                                params_json: serde_json::json!({
-                                    "ma_period": ma_period,
-                                    "rsi_period": rsi_period,
-                                    "entry_z_threshold": entry_z_threshold,
-                                    "rsi_oversold": rsi_oversold,
-                                    "rsi_overbought": rsi_overbought,
-                                    "stop_z_threshold": stop_z_threshold,
-                                }),
+                                strategy_type: "composite".to_string(),
+                                strategy_name: strategy.strategy_name.clone().unwrap_or_default(),
+                                params_json,
                                 stats: bt_stats,
                                 trades,
                                 status,
@@ -380,7 +402,6 @@ pub fn run_trend_grid(candles: &[Candle], config: &TrendGridConfig) -> Vec<GridS
 /// Returns a string representation of the entry reason.
 fn entry_reason_to_string(reason: &EntryReason) -> String {
     match reason {
-        EntryReason::BelowMA { .. } => "BelowMA".to_string(),
         EntryReason::CrossAbove { .. } => "CrossAbove".to_string(),
         EntryReason::CrossBelow { .. } => "CrossBelow".to_string(),
         EntryReason::MeanReversionEntry { .. } => "MeanReversionEntry".to_string(),
@@ -401,8 +422,6 @@ fn exit_reason_to_string(reason: &ExitReason) -> String {
         ExitReason::TimeExit => "TimeExit".to_string(),
         ExitReason::EndOfData => "EndOfData".to_string(),
         ExitReason::TrendReversal => "TrendReversal".to_string(),
-        ExitReason::ReturnToMean => "ReturnToMean".to_string(),
-        ExitReason::ZStop => "ZStop".to_string(),
     }
 }
 
@@ -414,15 +433,6 @@ fn exit_reason_to_string(reason: &ExitReason) -> String {
 /// Returns a [`serde_json::Value`] representation of the entry reason.
 fn entry_reason_to_json(reason: &EntryReason) -> serde_json::Value {
     match reason {
-        EntryReason::BelowMA {
-            ma_value,
-            deviation_pct,
-        } => {
-            serde_json::json!({
-                "ma_value": ma_value,
-                "deviation_pct": deviation_pct,
-            })
-        }
         EntryReason::CrossAbove { fast_ma, slow_ma } => {
             serde_json::json!({
                 "fast_ma": fast_ma,
