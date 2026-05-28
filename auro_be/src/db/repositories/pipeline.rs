@@ -1,5 +1,6 @@
 use serde_json::Value;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -36,10 +37,15 @@ pub(crate) async fn load_validation_thresholds(
     instrument_class: &str,
     strategy_type: &str,
 ) -> Result<Vec<ValidationThresholdRow>, sqlx::Error> {
-    // Level 1: instrument_class + strategy_type specific.
-    let rows: Vec<ValidationThresholdRow> = sqlx::query_as(
-        "SELECT metric, operator, value FROM validation_thresholds \
-         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = $3 AND strategy_type = $4",
+    // Load all candidate rows matching this stage/timeframe at any specificity
+    // level along instrument_class and strategy_type. Then resolve per-metric
+    // to the most specific applicable rule.
+    let rows: Vec<(String, String, f64, String, String)> = sqlx::query_as(
+        "SELECT metric, operator, value, instrument_class, strategy_type
+         FROM validation_thresholds
+         WHERE stage = $1 AND timeframe_class = $2
+           AND instrument_class IN ($3, 'all')
+           AND strategy_type IN ($4, 'all')",
     )
     .bind(stage)
     .bind(timeframe_class)
@@ -48,34 +54,31 @@ pub(crate) async fn load_validation_thresholds(
     .fetch_all(pool)
     .await?;
 
-    if !rows.is_empty() {
-        return Ok(rows);
+    // Specificity score: higher = more specific. Per metric, keep highest.
+    let mut best: HashMap<String, (i32, ValidationThresholdRow)> = HashMap::new();
+    for (metric, operator, value, ic, st) in rows {
+        let specificity = (if ic == instrument_class { 2 } else { 0 })
+            + (if st == strategy_type { 1 } else { 0 });
+        let entry = best.entry(metric.clone()).or_insert((
+            -1,
+            ValidationThresholdRow {
+                metric: metric.clone(),
+                operator: operator.clone(),
+                value,
+            },
+        ));
+        if specificity > entry.0 {
+            *entry = (
+                specificity,
+                ValidationThresholdRow {
+                    metric,
+                    operator,
+                    value,
+                },
+            );
+        }
     }
-
-    // Level 2: instrument_class + strategy_type='all'.
-    let rows: Vec<ValidationThresholdRow> = sqlx::query_as(
-        "SELECT metric, operator, value FROM validation_thresholds \
-         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = $3 AND strategy_type = 'all'",
-    )
-    .bind(stage)
-    .bind(timeframe_class)
-    .bind(instrument_class)
-    .fetch_all(pool)
-    .await?;
-
-    if !rows.is_empty() {
-        return Ok(rows);
-    }
-
-    // Level 3: catch-all (instrument_class='all', strategy_type='all').
-    sqlx::query_as(
-        "SELECT metric, operator, value FROM validation_thresholds \
-         WHERE stage = $1 AND timeframe_class = $2 AND instrument_class = 'all' AND strategy_type = 'all'",
-    )
-    .bind(stage)
-    .bind(timeframe_class)
-    .fetch_all(pool)
-    .await
+    Ok(best.into_values().map(|(_, row)| row).collect())
 }
 
 pub(crate) async fn upsert_evaluation_running(

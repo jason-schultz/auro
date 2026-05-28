@@ -1,11 +1,10 @@
-use rand::seq::SliceRandom;
+use rand::Rng;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::db::repositories::pipeline as pipeline_repo;
 use crate::engine::grid::load_candles;
-use crate::engine::mean_reversion::{run as run_mean_reversion, MeanReversionParams};
 use crate::engine::stats::{calculate_backtest_stats, BacktestStats};
 use crate::engine::strategy::{self as strategy_mod, Strategy};
 use crate::engine::types::{Candle, Granularity, Trade};
@@ -52,43 +51,15 @@ pub fn instrument_to_class(instrument: &str) -> &'static str {
 }
 
 fn run_strategy(candles: &[Candle], config: &StrategyConfig) -> AppResult<Vec<Trade>> {
-    // Shape detection: composite-shape params have a "components" key. This lets
-    // strategy_type stay logical ("trend_following", "mean_reversion") in the DB
-    // even as MR migrates to the composite shape — dispatch is driven by the
-    // shape of the parameters JSON, not by strategy_type.
-    let is_composite = config
-        .parameters
-        .as_object()
-        .map(|o| o.contains_key("components"))
-        .unwrap_or(false);
-
-    if is_composite {
-        let strategy: Strategy =
-            serde_json::from_value(config.parameters.clone()).map_err(|e| {
-                AppError::BadRequest(format!("invalid composite strategy parameters: {}", e))
-            })?;
-        return Ok(strategy_mod::run_backtest(candles, &strategy));
-    }
-
-    match config.strategy_type.as_str() {
-        "mean_reversion" => {
-            let params: MeanReversionParams = serde_json::from_value(config.parameters.clone())
-                .map_err(|e| {
-                    AppError::BadRequest(format!("invalid mean_reversion parameters: {}", e))
-                })?;
-            Ok(run_mean_reversion(candles, &params))
-        }
-        "trend_following" => Err(AppError::BadRequest(
-            "trend_following old-shape strategies are deprecated. \
-             Rebuild as a composite strategy (TrendFollowing component) — \
-             see [[decision-canonical-strategy-shape]]."
-                .to_string(),
-        )),
-        other => Err(AppError::BadRequest(format!(
-            "unknown strategy_type: {}",
-            other
-        ))),
-    }
+    // All strategies use the composite shape. Pre-composite flat-shape strategies
+    // were purged with the DB wipe; see [[decision-canonical-strategy-shape]].
+    let strategy: Strategy = serde_json::from_value(config.parameters.clone()).map_err(|e| {
+        AppError::BadRequest(format!(
+            "invalid composite strategy parameters for strategy_type={}: {}",
+            config.strategy_type, e
+        ))
+    })?;
+    Ok(strategy_mod::run_backtest(candles, &strategy))
 }
 
 pub fn run_backtest_stats(
@@ -509,7 +480,9 @@ fn sim_stats_from_pnls(pnls: &[f64]) -> SimStats {
 }
 
 fn run_monte_carlo_sims(trades: &[Trade]) -> Value {
-    let mut pnls: Vec<f64> = trades.iter().map(|t| t.pnl_percent).collect();
+    let pool: Vec<f64> = trades.iter().map(|t| t.pnl_percent).collect();
+    let n = pool.len();
+    let mut sample = Vec::with_capacity(n);
     let mut rng = rand::rng();
 
     let mut profitable_count: usize = 0;
@@ -517,8 +490,14 @@ fn run_monte_carlo_sims(trades: &[Trade]) -> Value {
     let mut all_drawdowns: Vec<f64> = Vec::with_capacity(MONTE_CARLO_SIMS);
 
     for _ in 0..MONTE_CARLO_SIMS {
-        pnls.shuffle(&mut rng);
-        let sim = sim_stats_from_pnls(&pnls);
+        sample.clear();
+
+        for _ in 0..n {
+            let idx = rng.random_range(0..n);
+            sample.push(pool[idx]);
+        }
+
+        let sim = sim_stats_from_pnls(&sample);
 
         if sim.total_return > 0.0 {
             profitable_count += 1;
@@ -615,4 +594,129 @@ pub async fn run_monte_carlo(
         stats: stats_json,
         failure_reason,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    use crate::engine::types::{Direction, EntryReason, ExitReason, Trade};
+
+    fn trade_with_pnl(pnl: f64) -> Trade {
+        Trade {
+            direction: Direction::Long,
+            entry_price: 1.0,
+            exit_price: 1.0,
+            entry_time: Utc::now(),
+            exit_time: Utc::now(),
+            pnl_percent: pnl,
+            entry_reason: EntryReason::CrossAbove {
+                fast_ma: 0.0,
+                slow_ma: 0.0,
+            },
+            exit_reason: ExitReason::TrendReversal,
+        }
+    }
+
+    #[test]
+    fn monte_carlo_profitable_pct_varies_with_pool() {
+        let trades = vec![
+            trade_with_pnl(1.0),
+            trade_with_pnl(1.0),
+            trade_with_pnl(1.0),
+            trade_with_pnl(-2.0),
+        ];
+
+        let stats = run_monte_carlo_sims(&trades);
+        let profitable_pct = stats
+            .get("profitable_pct")
+            .and_then(|v| v.as_f64())
+            .expect("profitable_pct should be present");
+
+        assert!(profitable_pct > 0.0, "expected profitable_pct > 0.0");
+        assert!(profitable_pct < 1.0, "expected profitable_pct < 1.0");
+    }
+
+    #[test]
+    fn monte_carlo_results_vary_between_runs() {
+        // Two independent MC runs on the same pool should produce different
+        // median_sharpe values. Under the prior permutation implementation,
+        // median_sharpe was permutation-invariant (computed from the same
+        // multiset) and identical across every run regardless of RNG state —
+        // this assertion would have failed. Under bootstrap-with-replacement,
+        // each run samples a different multiset and the medians diverge.
+        //
+        // Pool needs enough distinct magnitudes that the per-sim sharpe
+        // distribution is approximately continuous; a tiny pool with few
+        // distinct values gives a discrete sharpe distribution whose median
+        // can land on the same atom in both runs.
+        let trades = vec![
+            trade_with_pnl(3.0),
+            trade_with_pnl(2.0),
+            trade_with_pnl(1.5),
+            trade_with_pnl(1.0),
+            trade_with_pnl(0.5),
+            trade_with_pnl(-0.5),
+            trade_with_pnl(-1.0),
+            trade_with_pnl(-1.5),
+            trade_with_pnl(-2.0),
+            trade_with_pnl(-2.5),
+        ];
+
+        let run_a = run_monte_carlo_sims(&trades);
+        let run_b = run_monte_carlo_sims(&trades);
+
+        let median_a = run_a
+            .get("median_sharpe")
+            .and_then(|v| v.as_f64())
+            .expect("median_sharpe should be present");
+        let median_b = run_b
+            .get("median_sharpe")
+            .and_then(|v| v.as_f64())
+            .expect("median_sharpe should be present");
+
+        assert!(
+            (median_a - median_b).abs() > 1e-9,
+            "expected median_sharpe to differ between MC runs (a={}, b={})",
+            median_a,
+            median_b
+        );
+    }
+
+    #[test]
+    fn monte_carlo_all_winners_gives_profitable_pct_1() {
+        let trades = vec![
+            trade_with_pnl(0.5),
+            trade_with_pnl(1.0),
+            trade_with_pnl(2.0),
+            trade_with_pnl(3.0),
+        ];
+
+        let stats = run_monte_carlo_sims(&trades);
+        let profitable_pct = stats
+            .get("profitable_pct")
+            .and_then(|v| v.as_f64())
+            .expect("profitable_pct should be present");
+
+        assert!((profitable_pct - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn monte_carlo_all_losers_gives_profitable_pct_0() {
+        let trades = vec![
+            trade_with_pnl(-0.5),
+            trade_with_pnl(-1.0),
+            trade_with_pnl(-2.0),
+            trade_with_pnl(-3.0),
+        ];
+
+        let stats = run_monte_carlo_sims(&trades);
+        let profitable_pct = stats
+            .get("profitable_pct")
+            .and_then(|v| v.as_f64())
+            .expect("profitable_pct should be present");
+
+        assert!((profitable_pct - 0.0).abs() < f64::EPSILON);
+    }
 }

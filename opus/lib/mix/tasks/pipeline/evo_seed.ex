@@ -113,7 +113,7 @@ defmodule Mix.Tasks.Pipeline.EvoSeed do
           "params" => %{
             "ma_period" => 20,
             "rsi_period" => 14,
-            "entry_z_threshold" => 1.5,
+            "entry_z_threshold" => 2.0,
             "rsi_oversold" => 30.0,
             "rsi_overbought" => 70.0,
             "stop_z_threshold" => 3.5

@@ -107,9 +107,9 @@ mod tests {
             exit_price: 1.0,
             entry_time: Utc::now(),
             exit_time: Utc::now(),
-            entry_reason: EntryReason::BelowMA {
-                ma_value: 0.0,
-                deviation_pct: 0.0,
+            entry_reason: EntryReason::CrossAbove {
+                fast_ma: 0.0,
+                slow_ma: 0.0,
             },
             exit_reason: ExitReason::TakeProfit,
         }

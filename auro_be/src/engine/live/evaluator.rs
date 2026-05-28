@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use crate::db::repositories::{live_queries, live_strategies as live_strategies_repo};
 use crate::engine::indicators;
-use crate::engine::mean_reversion::{self, MREntrySignal, MRExitSignal, MeanReversionParams};
 use crate::engine::rules::{entry_gate_report, Rules};
 use crate::engine::strategy::{self as strategy_mod, EntrySignal, ExitSignal, Strategy};
 use crate::engine::types::{
@@ -221,281 +220,118 @@ async fn evaluate_entry(
         }));
     }
 
-    if let Some(reason) = reject_incomplete_m5_tf_config(strategy) {
-        tracing::warn!(
-            "[SKIP ENTRY] {} {} {}: {}",
-            strategy.strategy_type,
-            strategy.instrument,
-            strategy.granularity,
-            reason
-        );
-
-        return Ok(Some(SignalReport {
-            strategy_id: strategy.id,
-            strategy_type: strategy.strategy_type.clone(),
-            instrument: strategy.instrument.clone(),
-            granularity: strategy.granularity,
-            action: SignalAction::EntryRejected,
-            price: current_price,
-            reason,
-            oanda_trade_id: None,
-        }));
-    }
-
-    // Shape detection: composite-shape params have a "components" key. This lets
-    // strategy_type stay logical ("trend_following", "mean_reversion") even after
-    // a strategy class migrates to the composite shape — dispatch is driven by
-    // the shape of the parameters JSON, not by strategy_type.
-    let dispatch_key: &str = if params
-        .as_object()
-        .map(|o| o.contains_key("components"))
-        .unwrap_or(false)
-    {
-        "composite"
-    } else {
-        strategy.strategy_type.as_str()
-    };
-
-    match dispatch_key {
-        "mean_reversion" => {
-            // MR v1: Z-score + RSI confirmed entry, bidirectional. Static OANDA
-            // SL is set at the Z-extension price; TP is dynamic (return-to-mean)
-            // and handled by Rust check_exit on each bar, so we pass None for TP.
-            let mr_params = MeanReversionParams {
-                ma_period: params["ma_period"].as_u64().unwrap_or(20) as usize,
-                rsi_period: params["rsi_period"].as_u64().unwrap_or(14) as usize,
-                entry_z_threshold: params["entry_z_threshold"].as_f64().unwrap_or(1.5),
-                rsi_oversold: params["rsi_oversold"].as_f64().unwrap_or(30.0),
-                rsi_overbought: params["rsi_overbought"].as_f64().unwrap_or(70.0),
-                stop_z_threshold: params["stop_z_threshold"].as_f64().unwrap_or(3.5),
-            };
-
-            let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
-            let warmup = mr_params.ma_period.max(mr_params.rsi_period + 1);
-
-            // Diagnostic: compute Z + RSI for logging visibility
-            if candles_ref.len() >= warmup {
-                let z = indicators::z_score(candles_ref, mr_params.ma_period);
-                let r = indicators::rsi(candles_ref, mr_params.rsi_period);
-                tracing::info!(
-                    "[STATUS] MR {} {} | price={:.5} Z={:?} RSI={:?} (entry |Z|>{:.2}, RSI<{} or >{}) | buf={}",
+    // All strategies use the composite shape. Legacy flat-shape strategies
+    // were purged with the DB wipe; see [[decision-canonical-strategy-shape]].
+    if strategy.strategy_type.as_str() == "composite" {
+        // New canonical strategy shape. All parameters live inside the
+        // Strategy struct (components, entry/exit selectors, stop, sizing).
+        let composite: Strategy = match serde_json::from_value(params.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "[SKIP ENTRY] composite parse failure for {} {}: {}",
                     strategy.instrument,
                     strategy.granularity,
-                    current_price,
-                    z,
-                    r,
-                    mr_params.entry_z_threshold,
-                    mr_params.rsi_oversold,
-                    mr_params.rsi_overbought,
-                    candles_ref.len(),
-                );
-            } else {
-                tracing::info!(
-                    "[STATUS] MR {} {} | buffer {}/{} — waiting for data",
-                    strategy.instrument,
-                    strategy.granularity,
-                    candles_ref.len(),
-                    warmup,
-                );
-            }
-
-            let signal = mean_reversion::check_entry(candles_ref, &mr_params);
-            let (direction, ma_value, z_at_entry, rsi_at_entry) = match signal {
-                MREntrySignal::Long {
-                    ma_value,
-                    z_score,
-                    rsi,
-                } => (Direction::Long, ma_value, z_score, rsi),
-                MREntrySignal::Short {
-                    ma_value,
-                    z_score,
-                    rsi,
-                } => (Direction::Short, ma_value, z_score, rsi),
-                MREntrySignal::None => return Ok(None),
-            };
-
-            tracing::info!(
-                "[SIGNAL] MR {:?} entry on {} ({}): price={:.5}, MA{}={:.5}, Z={:.3}, RSI={:.2}",
-                direction,
-                strategy.instrument,
-                strategy.granularity,
-                current_price,
-                mr_params.ma_period,
-                ma_value,
-                z_at_entry,
-                rsi_at_entry,
-            );
-
-            if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
-                return Ok(Some(gated));
-            }
-
-            // Compute SL price from Z-extension threshold.
-            // Long:  SL = MA - stop_z_threshold * stdev (price further below MA)
-            // Short: SL = MA + stop_z_threshold * stdev (price further above MA)
-            // stdev is back-derived from (entry_price, ma_value, z_at_entry):
-            //   z = (price - ma) / stdev  =>  stdev = (price - ma) / z
-            // We use ma_value + entry-bar mid close + z_at_entry; for entry-bar
-            // price use current_price (the mid). Z is non-zero by entry guard.
-            let stdev = ((current_price - ma_value) / z_at_entry).abs();
-            let sl_price = match direction {
-                Direction::Long => ma_value - mr_params.stop_z_threshold * stdev,
-                Direction::Short => ma_value + mr_params.stop_z_threshold * stdev,
-            };
-
-            let adx = indicators::adx(candles_ref, 14);
-            let indicators_json = serde_json::json!({
-                "strategy_version": "v1",
-                "ma_period": mr_params.ma_period,
-                "ma_value": ma_value,
-                "z_score": z_at_entry,
-                "rsi": rsi_at_entry,
-                "stdev": stdev,
-                "adx": adx,
-            });
-            let (_, regime_reason) = rules.decision(&strategy.id);
-            let regime = regime_reason.unwrap_or("unknown").to_string();
-
-            return execute_entry(
-                state,
-                strategy,
-                &direction,
-                &strategy.max_position_size,
-                strategy.risk_pct,
-                strategy.max_units,
-                current_price,
-                sl_price,
-                None, // dynamic TP via check_exit
-                &format!(
-                    "MR v1 {:?}: MA{}={:.5}, Z={:.3}, RSI={:.2}",
-                    direction, mr_params.ma_period, ma_value, z_at_entry, rsi_at_entry
-                ),
-                indicators_json,
-                regime,
-                open_positions,
-            )
-            .await;
-        }
-        "composite" => {
-            // New canonical strategy shape. All parameters live inside the
-            // Strategy struct (components, entry/exit selectors, stop, sizing).
-            let composite: Strategy = match serde_json::from_value(params.clone()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        "[SKIP ENTRY] composite parse failure for {} {}: {}",
-                        strategy.instrument,
-                        strategy.granularity,
-                        e
-                    );
-                    return Ok(None);
-                }
-            };
-
-            let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
-            let warmup = composite.warmup();
-            if candles_ref.len() < warmup {
-                tracing::info!(
-                    "[STATUS] composite {} {} | buffer {}/{} — waiting for data",
-                    strategy.instrument,
-                    strategy.granularity,
-                    candles_ref.len(),
-                    warmup,
+                    e
                 );
                 return Ok(None);
             }
+        };
 
-            let ports = match composite.compute_ports(candles_ref) {
-                Some(p) => p,
-                None => return Ok(None),
-            };
-
+        let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+        let warmup = composite.warmup();
+        if candles_ref.len() < warmup {
             tracing::info!(
-                "[STATUS] composite {} {} | ports={:?} | buf={}",
+                "[STATUS] composite {} {} | buffer {}/{} — waiting for data",
                 strategy.instrument,
                 strategy.granularity,
-                ports,
                 candles_ref.len(),
+                warmup,
             );
+            return Ok(None);
+        }
 
-            let entry_signal = composite.evaluate_entry(&ports);
-            let direction = match entry_signal {
-                EntrySignal::Long => Direction::Long,
-                EntrySignal::Short => Direction::Short,
-                EntrySignal::None => return Ok(None),
-            };
+        let ports = match composite.compute_ports(candles_ref) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
 
-            tracing::info!(
-                "[SIGNAL] Composite {:?} entry on {} ({}): price={:.5}",
-                direction,
-                strategy.instrument,
-                strategy.granularity,
-                current_price,
-            );
+        tracing::info!(
+            "[STATUS] composite {} {} | ports={:?} | buf={}",
+            strategy.instrument,
+            strategy.granularity,
+            ports,
+            candles_ref.len(),
+        );
 
-            if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
-                return Ok(Some(gated));
-            }
+        let entry_signal = composite.evaluate_entry(&ports);
+        let direction = match entry_signal {
+            EntrySignal::Long => Direction::Long,
+            EntrySignal::Short => Direction::Short,
+            EntrySignal::None => return Ok(None),
+        };
 
-            let sl_price = match strategy_mod::compute_stop_price(
-                &composite,
-                current_price,
-                direction,
-                candles_ref,
-            ) {
-                Some(p) => p,
-                None => {
-                    tracing::warn!(
+        tracing::info!(
+            "[SIGNAL] Composite {:?} entry on {} ({}): price={:.5}",
+            direction,
+            strategy.instrument,
+            strategy.granularity,
+            current_price,
+        );
+
+        if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
+            return Ok(Some(gated));
+        }
+
+        let sl_price = match strategy_mod::compute_stop_price(
+            &composite,
+            current_price,
+            direction,
+            candles_ref,
+        ) {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
                         "[SKIP ENTRY] composite {} {} — stop config could not compute SL (component-derived stop returned None)",
                         strategy.instrument,
                         strategy.granularity,
                     );
-                    return Ok(None);
-                }
-            };
-            let units_to_use = match direction {
-                Direction::Long => strategy.max_position_size.clone(),
-                Direction::Short => format!("-{}", strategy.max_position_size),
-            };
+                return Ok(None);
+            }
+        };
+        let units_to_use = match direction {
+            Direction::Long => strategy.max_position_size.clone(),
+            Direction::Short => format!("-{}", strategy.max_position_size),
+        };
 
-            let adx = indicators::adx(candles_ref, 14);
-            let indicators_json = serde_json::json!({
-                "strategy_version": composite.version,
-                "components": composite.components.keys().collect::<Vec<_>>(),
-                "ports": ports,
-                "adx": adx,
-            });
-            let (_, regime_reason) = rules.decision(&strategy.id);
-            let regime = regime_reason.unwrap_or("unknown").to_string();
+        let adx = indicators::adx(candles_ref, 14);
+        let indicators_json = serde_json::json!({
+            "strategy_version": composite.version,
+            "components": composite.components.keys().collect::<Vec<_>>(),
+            "ports": ports,
+            "adx": adx,
+        });
+        let (_, regime_reason) = rules.decision(&strategy.id);
+        let regime = regime_reason.unwrap_or("unknown").to_string();
 
-            return execute_entry(
-                state,
-                strategy,
-                &direction,
-                &units_to_use,
-                strategy.risk_pct,
-                strategy.max_units,
-                current_price,
-                sl_price,
-                None, // no static TP — exit handled by composite strategy's exit selector
-                &format!("Composite {:?} entry", direction),
-                indicators_json,
-                regime,
-                open_positions,
-            )
-            .await;
-        }
-        _ => {}
+        return execute_entry(
+            state,
+            strategy,
+            &direction,
+            &units_to_use,
+            strategy.risk_pct,
+            strategy.max_units,
+            current_price,
+            sl_price,
+            None, // no static TP — exit handled by composite strategy's exit selector
+            &format!("Composite {:?} entry", direction),
+            indicators_json,
+            regime,
+            open_positions,
+        )
+        .await;
     }
     Ok(None)
-}
-
-fn reject_incomplete_m5_tf_config(_strategy: &LiveStrategy) -> Option<String> {
-    // Deprecated: old-shape TF strategies (which required confirm_bars/trailing_k)
-    // are no longer supported. Composite-shape TF v1 doesn't use these
-    // parameters. Kept as a no-op for call-site symmetry until callers are
-    // refactored.
-    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -873,72 +709,33 @@ async fn evaluate_exit(
     let mut should_exit = false;
     let mut exit_reason = String::new();
 
-    // Same shape detection as the entry path.
-    let dispatch_key: &str = if params
-        .as_object()
-        .map(|o| o.contains_key("components"))
-        .unwrap_or(false)
-    {
-        "composite"
-    } else {
-        strategy.strategy_type.as_str()
-    };
-
-    match dispatch_key {
-        "mean_reversion" => {
-            // MR v1 dynamic exit: on each bar, check whether Z has crossed
-            // back through zero (return-to-mean) or extended past the stop
-            // threshold (Z-stop). OANDA holds the static SL server-side as
-            // catastrophic protection; this path triggers the primary exit.
-            let mr_params = MeanReversionParams {
-                ma_period: params["ma_period"].as_u64().unwrap_or(20) as usize,
-                rsi_period: params["rsi_period"].as_u64().unwrap_or(14) as usize,
-                entry_z_threshold: params["entry_z_threshold"].as_f64().unwrap_or(1.5),
-                rsi_oversold: params["rsi_oversold"].as_f64().unwrap_or(30.0),
-                rsi_overbought: params["rsi_overbought"].as_f64().unwrap_or(70.0),
-                stop_z_threshold: params["stop_z_threshold"].as_f64().unwrap_or(3.5),
-            };
-            let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
-            let direction = positions_for_strategy[0].direction;
-            match mean_reversion::check_exit(candles_ref, &mr_params, direction) {
-                MRExitSignal::ReturnToMean { ma_value, z_score } => {
-                    should_exit = true;
-                    exit_reason = format!("ReturnToMean: MA={:.5}, Z={:.3}", ma_value, z_score);
-                }
-                MRExitSignal::ZStop { z_score } => {
-                    should_exit = true;
-                    exit_reason = format!("ZStop: Z={:.3}", z_score);
-                }
-                MRExitSignal::Hold => {}
+    // All strategies use the composite shape. Legacy flat-shape strategies
+    // were purged with the DB wipe; see [[decision-canonical-strategy-shape]].
+    if strategy.strategy_type.as_str() == "composite" {
+        // New canonical strategy shape: evaluate the exit selector against
+        // computed component ports. On Exit, close via OANDA.
+        let composite: Strategy = match serde_json::from_value(params.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "[EXIT CHECK] composite parse failure for {} {}: {}",
+                    strategy.instrument,
+                    strategy.granularity,
+                    e
+                );
+                return Ok(vec![]);
             }
+        };
+        let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+        let ports = match composite.compute_ports(candles_ref) {
+            Some(p) => p,
+            None => return Ok(vec![]),
+        };
+        let is_long = positions_for_strategy[0].direction == Direction::Long;
+        if matches!(composite.evaluate_exit(&ports, is_long), ExitSignal::Exit) {
+            should_exit = true;
+            exit_reason = format!("CompositeExit (ports={:?})", ports);
         }
-        "composite" => {
-            // New canonical strategy shape: evaluate the exit selector against
-            // computed component ports. On Exit, close via OANDA.
-            let composite: Strategy = match serde_json::from_value(params.clone()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        "[EXIT CHECK] composite parse failure for {} {}: {}",
-                        strategy.instrument,
-                        strategy.granularity,
-                        e
-                    );
-                    return Ok(vec![]);
-                }
-            };
-            let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
-            let ports = match composite.compute_ports(candles_ref) {
-                Some(p) => p,
-                None => return Ok(vec![]),
-            };
-            let is_long = positions_for_strategy[0].direction == Direction::Long;
-            if matches!(composite.evaluate_exit(&ports, is_long), ExitSignal::Exit) {
-                should_exit = true;
-                exit_reason = format!("CompositeExit (ports={:?})", ports);
-            }
-        }
-        _ => {}
     }
 
     let mut reports = Vec::<SignalReport>::new();
