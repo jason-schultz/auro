@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use anyhow::Context;
+use auro::brokers::oanda::client::OandaClient;
 use auro::config::Config;
 use auro::db::create_pool;
-use auro::oanda::client::OandaClient;
 
 fn parse_trade_realized_pl_from_tx(tx: &serde_json::Value, out: &mut HashMap<String, f64>) {
     if tx.get("type").and_then(|v| v.as_str()) != Some("ORDER_FILL") {

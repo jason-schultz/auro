@@ -2,6 +2,7 @@ use chrono::{DateTime, Timelike, Utc};
 use tokio::sync::broadcast;
 use tokio::time::{interval, Duration as TokioDuration};
 
+use crate::brokers::oanda::models::{Candlestick, StreamMessage};
 use crate::db;
 use crate::db::record_signal_event;
 use crate::db::repositories::live_queries;
@@ -9,7 +10,6 @@ use crate::engine::types::{
     Candle, CandleAccumulator, CandleBuffer, CandleRow, Granularity, OpenPosition, SignalReport,
     OHLC,
 };
-use crate::oanda::models::{Candlestick, StreamMessage};
 use crate::state::{AppState, LastQuote};
 
 pub mod account_cache;
@@ -123,7 +123,7 @@ pub(crate) async fn ingest_closed_candle(
     }
 }
 
-fn parse_candlestick_data(data: &crate::oanda::models::CandlestickData) -> Option<OHLC> {
+fn parse_candlestick_data(data: &crate::brokers::oanda::models::CandlestickData) -> Option<OHLC> {
     Some(OHLC {
         open: data.o.parse().ok()?,
         high: data.h.parse().ok()?,
@@ -418,7 +418,7 @@ mod tests {
     use super::*;
 
     fn mk_candle(time: &str, complete: bool, close: &str) -> Candlestick {
-        let data = crate::oanda::models::CandlestickData {
+        let data = crate::brokers::oanda::models::CandlestickData {
             o: close.to_string(),
             h: close.to_string(),
             l: close.to_string(),
@@ -429,13 +429,13 @@ mod tests {
             time: time.to_string(),
             complete,
             volume: 1,
-            mid: Some(crate::oanda::models::CandlestickData {
+            mid: Some(crate::brokers::oanda::models::CandlestickData {
                 o: data.o.clone(),
                 h: data.h.clone(),
                 l: data.l.clone(),
                 c: data.c.clone(),
             }),
-            bid: Some(crate::oanda::models::CandlestickData {
+            bid: Some(crate::brokers::oanda::models::CandlestickData {
                 o: data.o.clone(),
                 h: data.h.clone(),
                 l: data.l.clone(),

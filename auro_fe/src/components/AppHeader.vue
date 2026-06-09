@@ -54,6 +54,7 @@ const navLinks = [
     { to: "/strategies", label: "Strategies" },
     { to: "/pipeline", label: "Pipeline" },
     { to: "/journal", label: "Journal" },
+    { to: "/accounts", label: "Accounts" },
 ];
 
 function isActive(path: string): boolean {

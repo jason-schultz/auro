@@ -328,7 +328,7 @@ pub async fn backfill_historical(
     })))
 }
 
-fn parse_ohlc(data: &crate::oanda::models::CandlestickData) -> Option<OHLC> {
+fn parse_ohlc(data: &crate::brokers::oanda::models::CandlestickData) -> Option<OHLC> {
     Some(OHLC {
         open: data.o.parse().ok()?,
         high: data.h.parse().ok()?,

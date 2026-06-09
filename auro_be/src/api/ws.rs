@@ -3,7 +3,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 
-use crate::oanda::models::StreamMessage;
+use crate::brokers::oanda::models::StreamMessage;
 use crate::state::AppState;
 
 pub async fn ws_prices(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {

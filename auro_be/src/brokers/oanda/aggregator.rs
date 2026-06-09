@@ -3,9 +3,9 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 
+use crate::brokers::oanda::models::StreamMessage;
 use crate::db;
 use crate::engine::types::{Candle, CandleRow, Granularity, OHLC};
-use crate::oanda::models::StreamMessage;
 
 struct BarBuilder {
     instrument: String,

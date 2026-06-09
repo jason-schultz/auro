@@ -2,6 +2,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::brokers::oanda::client::OandaClient;
 use crate::db::repositories::{live_queries, live_strategies as live_strategies_repo};
 use crate::engine::indicators;
 use crate::engine::rules::{entry_gate_report, Rules};
@@ -9,7 +10,6 @@ use crate::engine::strategy::{self as strategy_mod, EntrySignal, ExitSignal, Str
 use crate::engine::types::{
     Direction, Granularity, LiveStrategy, OpenPosition, SignalAction, SignalReport, StopLossState,
 };
-use crate::oanda::client::OandaClient;
 use crate::state::AppState;
 
 use super::account_cache;
@@ -860,9 +860,10 @@ mod tests {
     use tokio::sync::broadcast;
     use uuid::Uuid;
 
+    use crate::brokers::oanda::client::OandaClient;
+    use crate::brokers::wealthsimple::client::WealthsimpleClient;
     use crate::config::Config;
     use crate::engine::types::{Candle, OHLC};
-    use crate::oanda::client::OandaClient;
     use crate::state::{AppState, LiveState};
 
     fn make_position(trade_id: &str, entry_price: f64) -> OpenPosition {
@@ -1084,6 +1085,7 @@ mod tests {
             oanda_stream_url: "http://127.0.0.1:1".to_string(),
             host: "127.0.0.1".to_string(),
             port: 0,
+            questrade_refresh_token: None,
         };
 
         let oanda = OandaClient::new(
@@ -1094,6 +1096,7 @@ mod tests {
         );
 
         let (price_tx, _) = broadcast::channel(8);
+        let wealthsimple = WealthsimpleClient::new(&db);
         let state = AppState {
             db: db.clone(),
             config,
@@ -1102,6 +1105,8 @@ mod tests {
             live: Arc::new(LiveState::new()),
             price_tx,
             eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap()))),
+            questrade: None,
+            wealthsimple,
         };
 
         let mut buffer = CandleBuffer::new(16);
@@ -1345,6 +1350,7 @@ mod tests {
             oanda_stream_url: "http://127.0.0.1:1".to_string(),
             host: "127.0.0.1".to_string(),
             port: 0,
+            questrade_refresh_token: None,
         };
 
         let oanda = OandaClient::new(
@@ -1355,6 +1361,7 @@ mod tests {
         );
 
         let (price_tx, _) = broadcast::channel(8);
+        let wealthsimple = WealthsimpleClient::new(&db);
         let state = AppState {
             db: db.clone(),
             config,
@@ -1363,6 +1370,8 @@ mod tests {
             live: Arc::new(LiveState::new()),
             price_tx,
             eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap()))),
+            questrade: None,
+            wealthsimple,
         };
 
         {

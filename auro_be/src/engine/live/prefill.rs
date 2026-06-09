@@ -2,12 +2,12 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::collections::HashMap;
 
+use crate::brokers::oanda::client::OandaClient;
 use crate::db::repositories::{live_queries, live_trades as live_trades_repo};
 use crate::engine::rules::Rules;
 use crate::engine::types::{
     BufferKey, Candle, CandleBuffer, Granularity, OpenPosition, StopLossState, OHLC,
 };
-use crate::oanda::client::OandaClient;
 use crate::state::AppState;
 
 /// Pre-fill the in-memory rules cache from the `rules` table.
@@ -343,10 +343,11 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::remove_instrument_entries;
+    use crate::brokers::oanda::client::OandaClient;
+    use crate::brokers::wealthsimple::client::WealthsimpleClient;
     use crate::config::Config;
     use crate::engine::live::prefill::load_instrument_buffers;
     use crate::engine::types::{CandleBuffer, Granularity};
-    use crate::oanda::client::OandaClient;
     use crate::state::{AppState, LiveState};
     use std::collections::HashMap;
 
@@ -359,6 +360,7 @@ mod tests {
             oanda_stream_url: "http://127.0.0.1:1".to_string(),
             host: "127.0.0.1".to_string(),
             port: 0,
+            questrade_refresh_token: None,
         };
 
         let oanda = OandaClient::new(
@@ -369,6 +371,7 @@ mod tests {
         );
 
         let (price_tx, _) = broadcast::channel(8);
+        let wealthsimple = WealthsimpleClient::new(&db);
 
         AppState {
             db,
@@ -378,6 +381,8 @@ mod tests {
             live: Arc::new(LiveState::new()),
             price_tx,
             eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap()))),
+            questrade: None,
+            wealthsimple,
         }
     }
 

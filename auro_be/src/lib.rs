@@ -1,24 +1,26 @@
 pub mod api;
+pub mod brokers;
 pub mod config;
 pub mod db;
 pub mod engine;
 pub mod error;
-pub mod oanda;
 pub mod state;
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
+use brokers::oanda::aggregator::spawn_aggregator;
+use brokers::oanda::backfill::backfill_candles;
+use brokers::oanda::client::OandaClient;
+use brokers::oanda::is_forex_market_open;
+use brokers::oanda::stream::spawn_price_stream;
+use brokers::questrade::client::QuestradeClient;
+use brokers::wealthsimple::client::WealthsimpleClient;
 use config::Config;
 use engine::live::account_cache::spawn_account_refresher;
 use engine::live::instrument_cache::load_instrument_metadata;
 use engine::live::{spawn_htf_poller, spawn_live_evaluator};
 use lru::LruCache;
-use oanda::aggregator::spawn_aggregator;
-use oanda::backfill::backfill_candles;
-use oanda::client::OandaClient;
-use oanda::is_forex_market_open;
-use oanda::stream::spawn_price_stream;
 use state::{AppState, LiveState};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -139,6 +141,33 @@ pub async fn run() -> anyhow::Result<()> {
 
     let (price_tx, _) = broadcast::channel(256);
 
+    let questrade =
+        match QuestradeClient::from_db_or_env(&pool, config.questrade_refresh_token.as_deref())
+            .await
+        {
+            Ok(Some(mut client)) => match client.authenticate().await {
+                Ok(()) => {
+                    tracing::info!("Questrade connected.");
+                    Some(Arc::new(tokio::sync::Mutex::new(client)))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Questrade auth failed: {}. Continuing without Questrade.",
+                        e
+                    );
+                    None
+                }
+            },
+            Ok(None) => {
+                tracing::info!("No Questrade token configured; skipping.");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Questrade init error: {}. Continuing without Questrade.", e);
+                None
+            }
+        };
+
     let state = AppState {
         db: pool.clone(),
         config: config.clone(),
@@ -147,6 +176,8 @@ pub async fn run() -> anyhow::Result<()> {
         live: Arc::new(LiveState::new()),
         price_tx: price_tx.clone(),
         eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
+        questrade,
+        wealthsimple: WealthsimpleClient::new(&pool),
     };
 
     let instrument_metadata = load_instrument_metadata(&state.oanda, &state.db).await;

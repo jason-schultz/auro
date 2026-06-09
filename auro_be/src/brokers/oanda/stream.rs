@@ -1,8 +1,8 @@
 use futures_util::StreamExt;
 use tokio::sync::broadcast;
 
-use crate::oanda::client::OandaClient;
-use crate::oanda::models::StreamMessage;
+use crate::brokers::oanda::client::OandaClient;
+use crate::brokers::oanda::models::StreamMessage;
 
 /// Spawns a background task that connects to the OANDA pricing stream
 /// and broadcasts parsed messages to all subscribers.

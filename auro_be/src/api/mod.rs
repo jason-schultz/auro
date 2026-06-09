@@ -1,5 +1,6 @@
 mod account;
 mod backtest;
+mod brokers;
 mod candles;
 pub mod evaluator;
 mod health;
@@ -7,8 +8,10 @@ mod indicators;
 mod live_strategies;
 mod pipeline;
 mod positions;
+mod questrade;
 mod rules;
 mod strategies;
+mod wealthsimple;
 mod ws;
 
 use axum::routing::{delete, get, post, put};
@@ -117,6 +120,16 @@ pub fn router() -> Router<AppState> {
             post(strategies::toggle_strategy),
         )
         .route("/api/strategies/{id}", delete(strategies::delete_strategy))
+        // Brokers
+        .route("/api/brokers", get(brokers::list_brokers))
+        .route("/api/brokers/wealthsimple", get(wealthsimple::get_accounts))
+        .route(
+            "/api/brokers/wealthsimple",
+            put(wealthsimple::save_accounts),
+        )
+        // Questrade
+        .route("/api/questrade/status", get(questrade::status))
+        .route("/api/questrade/candles", get(questrade::get_candles))
         // WebSocket
         .route("/ws/prices", get(ws::ws_prices))
 }

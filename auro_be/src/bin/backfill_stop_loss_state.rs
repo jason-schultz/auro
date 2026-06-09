@@ -1,7 +1,7 @@
 use anyhow::Context;
+use auro::brokers::oanda::client::OandaClient;
 use auro::config::Config;
 use auro::db::create_pool;
-use auro::oanda::client::OandaClient;
 use serde_json::Value;
 use sqlx::PgPool;
 
