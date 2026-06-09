@@ -1,11 +1,15 @@
 pub mod aggregator;
+pub mod donchian;
 pub mod grid;
 pub mod indicators;
 pub mod kfold;
 pub mod live;
+pub mod ma_filter;
+pub mod macd;
 pub mod mean_reversion;
 pub mod pipeline;
 pub mod risk_defaults;
+pub mod rsi_reversion;
 pub mod rules;
 pub mod stats;
 pub mod strategy;

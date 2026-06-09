@@ -10,7 +10,7 @@ use crate::engine::stats::{self, BacktestStats};
 use crate::engine::strategy::{
     self as strategy_mod, Component, EntryExitSelector, PortRef, SizingConfig, StopConfig, Strategy,
 };
-use crate::engine::trend_following::TrendFollowingParams;
+use crate::engine::trend_following::{MaType, TrendFollowingParams};
 use crate::engine::types::{Candle, EntryReason, ExitReason, Granularity, Trade, OHLC};
 
 /// MR v1 grid search config. Parameters reflect the Investopedia baseline
@@ -292,6 +292,7 @@ pub fn run_mean_grid(candles: &[Candle], config: &GridSearchConfig) -> Vec<GridS
                                     component: "mr".to_string(),
                                 },
                                 sizing: SizingConfig::RiskPct { pct: 0.01 },
+                                max_hold_bars: None,
                             };
 
                             let start = Instant::now();
@@ -341,6 +342,7 @@ pub fn run_trend_grid(candles: &[Candle], config: &TrendGridConfig) -> Vec<GridS
         Component::TrendFollowing(TrendFollowingParams {
             fast_period: config.fast_period,
             slow_period: config.slow_period,
+            ma_type: MaType::Sma,
         }),
     );
 
@@ -366,6 +368,7 @@ pub fn run_trend_grid(candles: &[Candle], config: &TrendGridConfig) -> Vec<GridS
             pct: config.stop_loss_pct,
         },
         sizing: SizingConfig::RiskPct { pct: 0.01 },
+        max_hold_bars: None,
     };
 
     let start = Instant::now();
@@ -405,6 +408,8 @@ fn entry_reason_to_string(reason: &EntryReason) -> String {
         EntryReason::CrossAbove { .. } => "CrossAbove".to_string(),
         EntryReason::CrossBelow { .. } => "CrossBelow".to_string(),
         EntryReason::MeanReversionEntry { .. } => "MeanReversionEntry".to_string(),
+        EntryReason::MacdCross { .. } => "MacdCross".to_string(),
+        EntryReason::DonchianBreakout { .. } => "DonchianBreakout".to_string(),
     }
 }
 
@@ -420,6 +425,7 @@ fn exit_reason_to_string(reason: &ExitReason) -> String {
         ExitReason::StopLoss => "StopLoss".to_string(),
         ExitReason::TrailingStop => "TrailingStop".to_string(),
         ExitReason::TimeExit => "TimeExit".to_string(),
+        ExitReason::TimeStop => "TimeStop".to_string(),
         ExitReason::EndOfData => "EndOfData".to_string(),
         ExitReason::TrendReversal => "TrendReversal".to_string(),
     }
@@ -454,6 +460,21 @@ fn entry_reason_to_json(reason: &EntryReason) -> serde_json::Value {
                 "ma_value": ma_value,
                 "z_score": z_score,
                 "rsi": rsi,
+            })
+        }
+        EntryReason::MacdCross { macd, signal } => {
+            serde_json::json!({
+                "macd": macd,
+                "signal": signal,
+            })
+        }
+        EntryReason::DonchianBreakout {
+            channel_high,
+            channel_low,
+        } => {
+            serde_json::json!({
+                "channel_high": channel_high,
+                "channel_low": channel_low,
             })
         }
     }

@@ -23,8 +23,20 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::indicators;
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MaType {
+    Sma,
+    Ema,
+}
+
+fn default_ma_type() -> MaType {
+    MaType::Sma
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TrendFollowingParams {
@@ -32,6 +44,9 @@ pub struct TrendFollowingParams {
     pub fast_period: usize,
     /// Slow moving-average period. Default 200 (Britannica golden cross).
     pub slow_period: usize,
+    /// Moving-average type. Defaults to SMA for backward compatibility.
+    #[serde(default = "default_ma_type")]
+    pub ma_type: MaType,
 }
 
 /// Compute output ports for the TrendFollowing component at the current bar.
@@ -55,10 +70,10 @@ pub fn compute_ports(
     }
 
     let n = candles.len();
-    let fast = sma(candles, n, params.fast_period);
-    let slow = sma(candles, n, params.slow_period);
-    let prev_fast = sma(candles, n - 1, params.fast_period);
-    let prev_slow = sma(candles, n - 1, params.slow_period);
+    let fast = ma_value(candles, n, params.fast_period, params.ma_type);
+    let slow = ma_value(candles, n, params.slow_period, params.ma_type);
+    let prev_fast = ma_value(candles, n - 1, params.fast_period, params.ma_type);
+    let prev_slow = ma_value(candles, n - 1, params.slow_period, params.ma_type);
 
     // Cross detection convention (freeze): inclusive on the prior bar
     // (`<=`/`>=`), strict on the current bar (`>`/`<`). Required so a flat
@@ -79,6 +94,14 @@ fn sma(candles: &[Candle], end_exclusive: usize, period: usize) -> f64 {
     slice.iter().map(|c| c.mid.close).sum::<f64>() / period as f64
 }
 
+fn ma_value(candles: &[Candle], end_exclusive: usize, period: usize, ma_type: MaType) -> f64 {
+    match ma_type {
+        MaType::Sma => sma(candles, end_exclusive, period),
+        MaType::Ema => indicators::ema(&candles[..end_exclusive], period)
+            .expect("EMA preconditions satisfied by caller"),
+    }
+}
+
 impl Signaler for TrendFollowingParams {
     fn warmup(&self) -> usize {
         self.slow_period + 1
@@ -90,8 +113,8 @@ impl Signaler for TrendFollowingParams {
 
     fn entry_reason(&self, candles: &[Candle], direction: Direction) -> EntryReason {
         let n = candles.len();
-        let fast = sma(candles, n, self.fast_period);
-        let slow = sma(candles, n, self.slow_period);
+        let fast = ma_value(candles, n, self.fast_period, self.ma_type);
+        let slow = ma_value(candles, n, self.slow_period, self.ma_type);
         match direction {
             Direction::Long => EntryReason::CrossAbove {
                 fast_ma: fast,
@@ -133,6 +156,15 @@ mod tests {
         TrendFollowingParams {
             fast_period: fast,
             slow_period: slow,
+            ma_type: MaType::Sma,
+        }
+    }
+
+    fn params_with_type(fast: usize, slow: usize, ma_type: MaType) -> TrendFollowingParams {
+        TrendFollowingParams {
+            fast_period: fast,
+            slow_period: slow,
+            ma_type,
         }
     }
 
@@ -241,5 +273,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ema_bullish_cross_fires_on_upward_acceleration() {
+        let mut prices = vec![100.0; 30];
+        for i in 0..15 {
+            prices.push(95.0 + i as f64);
+        }
+
+        let candles: Vec<Candle> = prices
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| make_candle(p, i as i64))
+            .collect();
+
+        let mut found_bullish = false;
+        for i in 11..candles.len() {
+            let window = &candles[..=i];
+            if let Some(ports) = compute_ports(window, &params_with_type(3, 10, MaType::Ema)) {
+                if ports["bullish_cross"] {
+                    found_bullish = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            found_bullish,
+            "expected at least one EMA bullish cross in an upward-accelerating series"
+        );
+    }
+
+    #[test]
+    fn params_json_without_ma_type_defaults_to_sma() {
+        let params: TrendFollowingParams =
+            serde_json::from_value(serde_json::json!({ "fast_period": 50, "slow_period": 200 }))
+                .expect("trend-following params should parse");
+
+        assert_eq!(params.ma_type, MaType::Sma);
     }
 }
