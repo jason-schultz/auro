@@ -18,7 +18,11 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::engine::donchian::DonchianParams;
+use crate::engine::ma_filter::MaFilterParams;
+use crate::engine::macd::MacdParams;
 use crate::engine::mean_reversion::MeanReversionParams;
+use crate::engine::rsi_reversion::RsiReversionParams;
 use crate::engine::trend_following::TrendFollowingParams;
 use crate::engine::types::{Candle, Direction, EntryReason, ExitReason, Granularity, Trade};
 
@@ -73,6 +77,7 @@ pub struct Strategy {
     pub exit: EntryExitSelector,
     pub stop: StopConfig,
     pub sizing: SizingConfig,
+    pub max_hold_bars: Option<usize>,
 }
 
 /// A named component. Tagged enum: `{"type": "TrendFollowing", "params": { ... }}`.
@@ -87,7 +92,15 @@ pub enum Component {
     TrendFollowing(TrendFollowingParams),
     #[serde(rename = "MeanReversion")]
     MeanReversion(MeanReversionParams),
-    // Future variants: Donchian, LiquiditySweep, etc.
+    #[serde(rename = "Macd")]
+    Macd(MacdParams),
+    #[serde(rename = "Donchian")]
+    Donchian(DonchianParams),
+    #[serde(rename = "MaFilter")]
+    MaFilter(MaFilterParams),
+    #[serde(rename = "RsiReversion")]
+    RsiReversion(RsiReversionParams),
+    // Future variants: LiquiditySweep, etc.
 }
 
 /// Long and short port selectors for entry or exit decisions.
@@ -164,7 +177,19 @@ pub enum StopConfig {
     /// `Signaler::stop_distance` and return `Some(distance)`.
     #[serde(rename = "FromComponent")]
     FromComponent { component: String },
-    // Future: AtrMultiple { k: f64 }, StructuralLevel { source: String }
+    /// SL placed kxATR below (long) / above (short) entry. Volatility-scaled
+    /// for higher timeframes where a fixed pct is too tight.
+    #[serde(rename = "AtrMultiple")]
+    AtrMultiple {
+        k: f64,
+        #[serde(default = "default_atr_period")]
+        period: usize,
+    },
+    // Future: StructuralLevel { source: String }
+}
+
+fn default_atr_period() -> usize {
+    14
 }
 
 /// How to compute position size.
@@ -251,6 +276,10 @@ impl Component {
         match self {
             Component::TrendFollowing(p) => p.warmup(),
             Component::MeanReversion(p) => p.warmup(),
+            Component::Macd(p) => p.warmup(),
+            Component::Donchian(p) => p.warmup(),
+            Component::MaFilter(p) => p.warmup(),
+            Component::RsiReversion(p) => p.warmup(),
         }
     }
 
@@ -258,6 +287,10 @@ impl Component {
         match self {
             Component::TrendFollowing(p) => p.compute(candles),
             Component::MeanReversion(p) => p.compute(candles),
+            Component::Macd(p) => p.compute(candles),
+            Component::Donchian(p) => p.compute(candles),
+            Component::MaFilter(p) => p.compute(candles),
+            Component::RsiReversion(p) => p.compute(candles),
         }
     }
 
@@ -265,6 +298,10 @@ impl Component {
         match self {
             Component::TrendFollowing(p) => p.entry_reason(candles, direction),
             Component::MeanReversion(p) => p.entry_reason(candles, direction),
+            Component::Macd(p) => p.entry_reason(candles, direction),
+            Component::Donchian(p) => p.entry_reason(candles, direction),
+            Component::MaFilter(p) => p.entry_reason(candles, direction),
+            Component::RsiReversion(p) => p.entry_reason(candles, direction),
         }
     }
 
@@ -272,6 +309,10 @@ impl Component {
         match self {
             Component::TrendFollowing(p) => p.stop_price(candles, direction),
             Component::MeanReversion(p) => p.stop_price(candles, direction),
+            Component::Macd(p) => p.stop_price(candles, direction),
+            Component::Donchian(p) => p.stop_price(candles, direction),
+            Component::MaFilter(p) => p.stop_price(candles, direction),
+            Component::RsiReversion(p) => p.stop_price(candles, direction),
         }
     }
 }
@@ -382,6 +423,29 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
                 break;
             }
 
+            if let Some(max_hold_bars) = strategy.max_hold_bars {
+                if j - i >= max_hold_bars {
+                    let exit_price = candles[j].exit_fill_price(direction);
+                    let pnl = match direction {
+                        Direction::Long => (exit_price - entry_price) / entry_price,
+                        Direction::Short => (entry_price - exit_price) / entry_price,
+                    };
+                    trades.push(Trade {
+                        direction,
+                        entry_price,
+                        exit_price,
+                        entry_time,
+                        exit_time: candles[j].time,
+                        pnl_percent: pnl,
+                        entry_reason,
+                        exit_reason: ExitReason::TimeStop,
+                    });
+                    exited = true;
+                    i = j + 1;
+                    break;
+                }
+            }
+
             let exit_ports = match strategy.compute_ports(exit_window) {
                 Some(p) => p,
                 None => {
@@ -456,6 +520,13 @@ pub fn compute_stop_price(
             Direction::Long => entry_price * (1.0 + pct),
             Direction::Short => entry_price * (1.0 - pct),
         }),
+        StopConfig::AtrMultiple { k, period } => {
+            let atr = crate::engine::indicators::atr(candles, *period)?;
+            Some(match direction {
+                Direction::Long => entry_price - k * atr,
+                Direction::Short => entry_price + k * atr,
+            })
+        }
         StopConfig::FromComponent { component } => {
             // Component computes the absolute stop price (it can anchor wherever
             // makes sense — MR uses MA ± k·stdev, not entry ± distance).
@@ -649,6 +720,7 @@ mod tests {
             Component::TrendFollowing(TrendFollowingParams {
                 fast_period: fast,
                 slow_period: slow,
+                ma_type: crate::engine::trend_following::MaType::Sma,
             }),
         );
         Strategy {
@@ -668,6 +740,7 @@ mod tests {
             },
             stop: StopConfig::FixedPct { pct: stop_pct },
             sizing: SizingConfig::RiskPct { pct: 0.01 },
+            max_hold_bars: None,
         }
     }
 
@@ -775,7 +848,37 @@ mod tests {
                 component: "mr".to_string(),
             },
             sizing: SizingConfig::RiskPct { pct: 0.01 },
+            max_hold_bars: None,
         }
+    }
+
+    #[test]
+    fn backtest_exits_at_time_stop_when_max_hold_is_hit() {
+        let mut prices: Vec<f64> = vec![100.0; 50];
+        for i in 0..40 {
+            prices.push(100.0 + i as f64 * 0.2);
+        }
+
+        let candles: Vec<Candle> = prices
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| make_candle(p, i as i64))
+            .collect();
+
+        let mut strategy = tf_strategy(5, 20, -0.2);
+        strategy.max_hold_bars = Some(3);
+
+        let trades = run_backtest(&candles, &strategy);
+        let timed = trades
+            .iter()
+            .find(|t| t.exit_reason == ExitReason::TimeStop)
+            .expect("expected at least one time-stop exit");
+
+        assert_eq!(
+            (timed.exit_time - timed.entry_time).num_hours(),
+            3,
+            "time-stop should close exactly at max_hold_bars"
+        );
     }
 
     #[test]
@@ -886,5 +989,72 @@ mod tests {
         // entry_price argument is ignored for FromComponent — MR anchors at MA.
         let long_stop = compute_stop_price(&strategy, 99.5, Direction::Long, &candles).unwrap();
         assert!((long_stop - 93.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn atr_multiple_stop_price_uses_atr_for_long_and_short() {
+        // Deterministic ATR(period=3)=4.0 from TR sequence 3,4,5.
+        let candles = vec![
+            make_candle(100.0, 0),
+            Candle {
+                time: make_candle(100.0, 1).time,
+                mid: crate::engine::types::OHLC {
+                    open: 100.0,
+                    high: 102.0,
+                    low: 99.0,
+                    close: 101.0,
+                },
+                volume: 1,
+                bid: None,
+                ask: None,
+            },
+            Candle {
+                time: make_candle(100.0, 2).time,
+                mid: crate::engine::types::OHLC {
+                    open: 101.0,
+                    high: 101.0,
+                    low: 97.0,
+                    close: 98.0,
+                },
+                volume: 1,
+                bid: None,
+                ask: None,
+            },
+            Candle {
+                time: make_candle(100.0, 3).time,
+                mid: crate::engine::types::OHLC {
+                    open: 98.0,
+                    high: 103.0,
+                    low: 100.0,
+                    close: 102.0,
+                },
+                volume: 1,
+                bid: None,
+                ask: None,
+            },
+        ];
+
+        let mut strategy = tf_strategy(5, 20, -0.02);
+        strategy.stop = StopConfig::AtrMultiple { k: 2.0, period: 3 };
+
+        let long_stop = compute_stop_price(&strategy, 100.0, Direction::Long, &candles).unwrap();
+        let short_stop = compute_stop_price(&strategy, 100.0, Direction::Short, &candles).unwrap();
+
+        assert!((long_stop - 92.0).abs() < 1e-9, "long_stop={}", long_stop);
+        assert!(
+            (short_stop - 108.0).abs() < 1e-9,
+            "short_stop={}",
+            short_stop
+        );
+    }
+
+    #[test]
+    fn atr_multiple_stop_price_returns_none_when_buffer_too_small() {
+        let candles: Vec<Candle> = (0..14).map(|i| make_candle(100.0, i)).collect();
+        let mut strategy = tf_strategy(5, 20, -0.02);
+        strategy.stop = StopConfig::AtrMultiple { k: 3.0, period: 14 };
+
+        let stop = compute_stop_price(&strategy, 100.0, Direction::Long, &candles);
+        assert!(stop.is_none());
     }
 }
