@@ -3,6 +3,7 @@ mod common;
 use auro::api;
 use auro::engine::types::{Direction, Granularity, OpenPosition, StopLossState};
 use axum::http::{Method, StatusCode};
+use chrono::Utc;
 use futures_util::future::join_all;
 use tower::util::ServiceExt;
 
@@ -13,6 +14,7 @@ fn sample_position(trade_id: &str) -> OpenPosition {
         instrument: "EUR_USD".to_string(),
         direction: Direction::Long,
         entry_price: 1.12345,
+        entry_time: Utc::now(),
         units: "1000".to_string(),
         stop_loss_state: StopLossState::Initial,
         granularity: Granularity::H1,

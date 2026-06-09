@@ -10,6 +10,7 @@ pub struct QuestradeClient {
     base_url: String,
     stream_url: String,
     api_key: String,
+    refresh_token: Option<String>,
     account_id: String,
 }
 

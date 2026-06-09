@@ -220,118 +220,118 @@ async fn evaluate_entry(
         }));
     }
 
-    // All strategies use the composite shape. Legacy flat-shape strategies
-    // were purged with the DB wipe; see [[decision-canonical-strategy-shape]].
-    if strategy.strategy_type.as_str() == "composite" {
-        // New canonical strategy shape. All parameters live inside the
-        // Strategy struct (components, entry/exit selectors, stop, sizing).
-        let composite: Strategy = match serde_json::from_value(params.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    "[SKIP ENTRY] composite parse failure for {} {}: {}",
-                    strategy.instrument,
-                    strategy.granularity,
-                    e
-                );
-                return Ok(None);
-            }
-        };
-
-        let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
-        let warmup = composite.warmup();
-        if candles_ref.len() < warmup {
-            tracing::info!(
-                "[STATUS] composite {} {} | buffer {}/{} — waiting for data",
+    // All live strategies use the composite shape. `strategy_type` is a
+    // lineage label (mean_reversion/trend_following/etc.), not a parse key.
+    let composite: Strategy = match serde_json::from_value(params.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                "[SKIP ENTRY] composite parse failure for {} {}: {}",
                 strategy.instrument,
                 strategy.granularity,
-                candles_ref.len(),
-                warmup,
+                e
             );
             return Ok(None);
         }
+    };
 
-        let ports = match composite.compute_ports(candles_ref) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
+    let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+    let warmup = composite.warmup();
+    if candles_ref.len() < warmup {
         tracing::info!(
-            "[STATUS] composite {} {} | ports={:?} | buf={}",
+            "[STATUS] composite {} {} | buffer {}/{} — waiting for data",
             strategy.instrument,
             strategy.granularity,
-            ports,
             candles_ref.len(),
+            warmup,
         );
-
-        let entry_signal = composite.evaluate_entry(&ports);
-        let direction = match entry_signal {
-            EntrySignal::Long => Direction::Long,
-            EntrySignal::Short => Direction::Short,
-            EntrySignal::None => return Ok(None),
-        };
-
-        tracing::info!(
-            "[SIGNAL] Composite {:?} entry on {} ({}): price={:.5}",
-            direction,
-            strategy.instrument,
-            strategy.granularity,
-            current_price,
-        );
-
-        if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
-            return Ok(Some(gated));
-        }
-
-        let sl_price = match strategy_mod::compute_stop_price(
-            &composite,
-            current_price,
-            direction,
-            candles_ref,
-        ) {
-            Some(p) => p,
-            None => {
-                tracing::warn!(
-                        "[SKIP ENTRY] composite {} {} — stop config could not compute SL (component-derived stop returned None)",
-                        strategy.instrument,
-                        strategy.granularity,
-                    );
-                return Ok(None);
-            }
-        };
-        let units_to_use = match direction {
-            Direction::Long => strategy.max_position_size.clone(),
-            Direction::Short => format!("-{}", strategy.max_position_size),
-        };
-
-        let adx = indicators::adx(candles_ref, 14);
-        let indicators_json = serde_json::json!({
-            "strategy_version": composite.version,
-            "components": composite.components.keys().collect::<Vec<_>>(),
-            "ports": ports,
-            "adx": adx,
-        });
-        let (_, regime_reason) = rules.decision(&strategy.id);
-        let regime = regime_reason.unwrap_or("unknown").to_string();
-
-        return execute_entry(
-            state,
-            strategy,
-            &direction,
-            &units_to_use,
-            strategy.risk_pct,
-            strategy.max_units,
-            current_price,
-            sl_price,
-            None, // no static TP — exit handled by composite strategy's exit selector
-            &format!("Composite {:?} entry", direction),
-            indicators_json,
-            regime,
-            open_positions,
-        )
-        .await;
+        return Ok(None);
     }
-    Ok(None)
+
+    let ports = match composite.compute_ports(candles_ref) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    tracing::info!(
+        "[STATUS] composite {} {} | ports={:?} | buf={}",
+        strategy.instrument,
+        strategy.granularity,
+        ports,
+        candles_ref.len(),
+    );
+
+    let entry_signal = composite.evaluate_entry(&ports);
+    let direction = match entry_signal {
+        EntrySignal::Long => Direction::Long,
+        EntrySignal::Short => Direction::Short,
+        EntrySignal::None => return Ok(None),
+    };
+
+    tracing::info!(
+        "[SIGNAL] Composite {:?} entry on {} ({}): price={:.5}",
+        direction,
+        strategy.instrument,
+        strategy.granularity,
+        current_price,
+    );
+
+    if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
+        return Ok(Some(gated));
+    }
+
+    let sl_price = match strategy_mod::compute_stop_price(
+        &composite,
+        current_price,
+        direction,
+        candles_ref,
+    ) {
+        Some(p) => p,
+        None => {
+            tracing::warn!(
+                "[SKIP ENTRY] composite {} {} — stop config could not compute SL (component-derived stop returned None)",
+                strategy.instrument,
+                strategy.granularity,
+            );
+            return Ok(None);
+        }
+    };
+    let units_to_use = match direction {
+        Direction::Long => strategy.max_position_size.clone(),
+        Direction::Short => format!("-{}", strategy.max_position_size),
+    };
+
+    let adx = indicators::adx(candles_ref, 14);
+    let indicators_json = serde_json::json!({
+        "strategy_version": composite.version,
+        "components": composite.components.keys().collect::<Vec<_>>(),
+        "ports": ports,
+        "adx": adx,
+    });
+    let (_, regime_reason) = rules.decision(&strategy.id);
+    let regime = regime_reason.unwrap_or("unknown").to_string();
+    let entry_time = candles_ref
+        .last()
+        .map(|c| c.time)
+        .unwrap_or_else(chrono::Utc::now);
+
+    execute_entry(
+        state,
+        strategy,
+        &direction,
+        &units_to_use,
+        strategy.risk_pct,
+        strategy.max_units,
+        current_price,
+        sl_price,
+        None, // no static TP — exit handled by composite strategy's exit selector
+        &format!("Composite {:?} entry", direction),
+        indicators_json,
+        regime,
+        entry_time,
+        open_positions,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -348,6 +348,7 @@ async fn execute_entry(
     entry_reason: &str,
     indicators_at_entry: serde_json::Value,
     regime_at_entry: String,
+    entry_time: chrono::DateTime<chrono::Utc>,
     open_positions: &mut HashMap<String, OpenPosition>,
 ) -> Result<Option<SignalReport>, Box<dyn std::error::Error + Send + Sync>> {
     let mut units_to_use = static_units.to_string();
@@ -664,6 +665,7 @@ async fn execute_entry(
                     granularity: strategy.granularity,
                     direction: *direction,
                     entry_price: fill_price,
+                    entry_time,
                     units: units_to_use.clone(),
                     stop_loss_state: initial_sl_state,
                     worst_price: fill_price,
@@ -709,50 +711,68 @@ async fn evaluate_exit(
     let mut should_exit = false;
     let mut exit_reason = String::new();
 
-    // All strategies use the composite shape. Legacy flat-shape strategies
-    // were purged with the DB wipe; see [[decision-canonical-strategy-shape]].
-    if strategy.strategy_type.as_str() == "composite" {
-        // New canonical strategy shape: evaluate the exit selector against
-        // computed component ports. On Exit, close via OANDA.
-        let composite: Strategy = match serde_json::from_value(params.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    "[EXIT CHECK] composite parse failure for {} {}: {}",
-                    strategy.instrument,
-                    strategy.granularity,
-                    e
-                );
-                return Ok(vec![]);
-            }
-        };
-        let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
-        let ports = match composite.compute_ports(candles_ref) {
-            Some(p) => p,
-            None => return Ok(vec![]),
-        };
-        let is_long = positions_for_strategy[0].direction == Direction::Long;
-        if matches!(composite.evaluate_exit(&ports, is_long), ExitSignal::Exit) {
-            should_exit = true;
-            exit_reason = format!("CompositeExit (ports={:?})", ports);
+    // All live strategies use the composite shape. `strategy_type` is a
+    // lineage label (mean_reversion/trend_following/etc.), not a parse key.
+    let composite: Strategy = match serde_json::from_value(params.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                "[EXIT CHECK] composite parse failure for {} {}: {}",
+                strategy.instrument,
+                strategy.granularity,
+                e
+            );
+            return Ok(vec![]);
         }
+    };
+    let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+    let ports = match composite.compute_ports(candles_ref) {
+        Some(p) => p,
+        None => return Ok(vec![]),
+    };
+    let is_long = positions_for_strategy[0].direction == Direction::Long;
+    if matches!(composite.evaluate_exit(&ports, is_long), ExitSignal::Exit) {
+        should_exit = true;
+        exit_reason = format!("CompositeExit (ports={:?})", ports);
     }
+    let max_hold_bars = composite.max_hold_bars;
 
     let mut reports = Vec::<SignalReport>::new();
 
-    if should_exit {
+    if should_exit || max_hold_bars.is_some() {
         for pos in &positions_for_strategy {
+            let bars_held = buffer
+                .candles
+                .iter()
+                .filter(|c| c.time > pos.entry_time)
+                .count();
+            let time_stop_reason = max_hold_bars.and_then(|limit| {
+                if bars_held >= limit {
+                    Some(format!(
+                        "TimeStop (bars_held={} max_hold_bars={})",
+                        bars_held, limit
+                    ))
+                } else {
+                    None
+                }
+            });
+
+            if !should_exit && time_stop_reason.is_none() {
+                continue;
+            }
+
             let trade_id = pos.trade_id.clone();
             let direction = pos.direction;
             let entry_price = pos.entry_price;
             let instrument = pos.instrument.clone();
+            let close_reason = time_stop_reason.unwrap_or_else(|| exit_reason.clone());
 
             tracing::info!(
                 "[EXIT SIGNAL] {} on {} ({}): {}",
                 direction,
                 instrument,
                 strategy.granularity,
-                exit_reason
+                close_reason
             );
 
             match state.oanda.close_trade(&trade_id, None).await {
@@ -775,7 +795,7 @@ async fn evaluate_exit(
                         strategy.granularity,
                         fill_price,
                         pnl * 100.0,
-                        exit_reason
+                        close_reason
                     );
 
                     sqlx::query(
@@ -788,7 +808,7 @@ async fn evaluate_exit(
                     .bind(fill_price)
                     .bind(pnl)
                     .bind(realized_pl)
-                    .bind(&exit_reason)
+                    .bind(&close_reason)
                     .bind(pos.stop_loss_state.as_str())
                     .bind(&trade_id)
                     .execute(&state.db)
@@ -813,7 +833,7 @@ async fn evaluate_exit(
                         granularity: strategy.granularity,
                         action,
                         price: fill_price,
-                        reason: exit_reason.clone(),
+                        reason: close_reason,
                         oanda_trade_id: Some(trade_id.clone()),
                     });
                 }
@@ -833,7 +853,7 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::sync::{Arc, Mutex};
 
-    use axum::routing::post;
+    use axum::routing::{post, put};
     use axum::{Json, Router};
     use chrono::{Duration, Utc};
     use lru::LruCache;
@@ -853,6 +873,7 @@ mod tests {
             granularity: Granularity::H1,
             direction: Direction::Long,
             entry_price,
+            entry_time: Utc::now() - Duration::hours(2),
             units: "1000".to_string(),
             stop_loss_state: StopLossState::Initial,
             worst_price: entry_price,
@@ -867,6 +888,17 @@ mod tests {
             "orderFillTransaction": {
                 "tradeOpened": { "tradeID": "lock-test-trade-1" },
                 "price": "4.00000"
+            }
+        }))
+    }
+
+    async fn mock_close_handler() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "orderFillTransaction": {
+                "price": "0.00000",
+                "tradesClosed": [
+                    { "tradeID": "lock-test-trade-1", "realizedPL": "1.00" }
+                ]
             }
         }))
     }
@@ -971,15 +1003,30 @@ mod tests {
 
         sqlx::query(
               "INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, risk_pct, max_units)
-               VALUES ($1, 'trend_following', $2, 'H1', $3, true, '1000', 0.0, NULL)",
+               VALUES ($1, 'mean_reversion', $2, 'H1', $3, true, '1000', 0.0, NULL)",
         )
         .bind(strategy_a)
         .bind(&instrument)
         .bind(serde_json::json!({
-            "fast_period": 2,
-            "slow_period": 3,
-            "stop_loss": -0.02,
-            "take_profit": 0.05
+            "strategy_id": null,
+            "strategy_name": "gate_regression_a",
+            "version": "v1_composite",
+            "instrument": instrument.clone(),
+            "granularity": "H1",
+            "components": {
+                "tf": {
+                    "type": "TrendFollowing",
+                    "params": {
+                        "fast_period": 2,
+                        "slow_period": 3,
+                        "ma_type": "sma"
+                    }
+                }
+            },
+            "entry": {"long": "tf.bullish_cross", "short": "tf.bearish_cross"},
+            "exit": {"long": "tf.bearish_cross", "short": "tf.bullish_cross"},
+            "stop": {"type": "FixedPct", "params": {"pct": -0.02}},
+            "sizing": {"type": "RiskPct", "params": {"pct": 0.01}}
         }))
         .execute(&db)
         .await
@@ -987,22 +1034,42 @@ mod tests {
 
         sqlx::query(
               "INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, risk_pct, max_units)
-               VALUES ($1, 'trend_following', $2, 'H1', $3, true, '1000', 0.0, NULL)",
+               VALUES ($1, 'mean_reversion', $2, 'H1', $3, true, '1000', 0.0, NULL)",
         )
         .bind(strategy_b)
         .bind(&instrument)
         .bind(serde_json::json!({
-            "fast_period": 2,
-            "slow_period": 3,
-            "stop_loss": -0.02,
-            "take_profit": 0.05,
+            "strategy_id": null,
+            "strategy_name": "gate_regression_b",
+            "version": "v1_composite",
+            "instrument": instrument.clone(),
+            "granularity": "H1",
+            "components": {
+                "tf": {
+                    "type": "TrendFollowing",
+                    "params": {
+                        "fast_period": 2,
+                        "slow_period": 3,
+                        "ma_type": "sma"
+                    }
+                }
+            },
+            "entry": {"long": "tf.bullish_cross", "short": "tf.bearish_cross"},
+            "exit": {"long": "tf.bearish_cross", "short": "tf.bullish_cross"},
+            "stop": {"type": "FixedPct", "params": {"pct": -0.02}},
+            "sizing": {"type": "RiskPct", "params": {"pct": 0.01}},
             "variant": "b"
         }))
         .execute(&db)
         .await
         .unwrap();
 
-        let app = Router::new().route("/v3/accounts/:account_id/orders", post(mock_order_handler));
+        let app = Router::new()
+            .route("/v3/accounts/:account_id/orders", post(mock_order_handler))
+            .route(
+                "/v3/accounts/:account_id/trades/:trade_id/close",
+                put(mock_close_handler),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1113,6 +1180,263 @@ mod tests {
         sqlx::query("DELETE FROM live_strategies WHERE id = $1 OR id = $2")
             .bind(strategy_a)
             .bind(strategy_b)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn evaluate_and_apply_closes_on_composite_exit_for_non_composite_label() {
+        let db_url = match std::env::var("AURO_TEST_DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => return,
+        };
+
+        let db = match sqlx::PgPool::connect(&db_url).await {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS trading_config (
+                key VARCHAR(50) PRIMARY KEY,
+                value JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )"#,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS live_strategies (
+                id UUID PRIMARY KEY,
+                strategy_type VARCHAR(50) NOT NULL,
+                instrument VARCHAR(20) NOT NULL,
+                granularity VARCHAR(5) NOT NULL,
+                parameters JSONB NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT false,
+                max_position_size VARCHAR(20) NOT NULL DEFAULT '1000',
+                risk_pct DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                max_units BIGINT NULL
+            )"#,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS live_trades (
+                id BIGSERIAL PRIMARY KEY,
+                live_strategy_id UUID,
+                oanda_trade_id VARCHAR(50),
+                instrument VARCHAR(20) NOT NULL,
+                direction VARCHAR(10) NOT NULL,
+                units VARCHAR(20) NOT NULL,
+                entry_price DOUBLE PRECISION,
+                exit_price DOUBLE PRECISION,
+                entry_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                exit_time TIMESTAMPTZ,
+                stop_loss_price DOUBLE PRECISION,
+                take_profit_price DOUBLE PRECISION,
+                pnl DOUBLE PRECISION,
+                pnl_percent DOUBLE PRECISION,
+                entry_reason TEXT,
+                exit_reason TEXT,
+                status VARCHAR(20) NOT NULL DEFAULT 'open',
+                indicators_at_entry JSONB,
+                regime_at_entry VARCHAR(120),
+                sizing_metadata JSONB,
+                stop_loss_state_at_close VARCHAR(20),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )"#,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO trading_config (key, value) VALUES ('trading_enabled', $1::jsonb)
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+        )
+        .bind("\"true\"")
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let strategy_id = Uuid::new_v4();
+        let instrument = "LT_EXIT_H1".to_string();
+
+        sqlx::query("DELETE FROM live_trades WHERE live_strategy_id = $1")
+            .bind(strategy_id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        sqlx::query("DELETE FROM live_strategies WHERE id = $1")
+            .bind(strategy_id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, risk_pct, max_units)
+             VALUES ($1, 'mean_reversion', $2, 'H1', $3, true, '1000', 0.0, NULL)",
+        )
+        .bind(strategy_id)
+        .bind(&instrument)
+        .bind(serde_json::json!({
+            "strategy_id": null,
+            "strategy_name": "gate_exit_regression",
+            "version": "v1_composite",
+            "instrument": instrument.clone(),
+            "granularity": "H1",
+            "components": {
+                "tf": {
+                    "type": "TrendFollowing",
+                    "params": {
+                        "fast_period": 2,
+                        "slow_period": 3,
+                        "ma_type": "sma"
+                    }
+                }
+            },
+            "entry": {"long": "tf.bullish_cross", "short": "tf.bearish_cross"},
+            "exit": {"long": "tf.bearish_cross", "short": "tf.bullish_cross"},
+            "stop": {"type": "FixedPct", "params": {"pct": -0.02}},
+            "sizing": {"type": "RiskPct", "params": {"pct": 0.01}}
+        }))
+        .execute(&db)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            r#"INSERT INTO live_trades
+                (live_strategy_id, oanda_trade_id, instrument, direction, units,
+                 entry_price, stop_loss_price, take_profit_price, status)
+                VALUES ($1, 'lock-test-trade-1', $2, 'Long', '1000', 1.0000, 0.9800, 1.0500, 'open')"#,
+        )
+        .bind(strategy_id)
+        .bind(&instrument)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let app = Router::new()
+            .route("/v3/accounts/:account_id/orders", post(mock_order_handler))
+            .route(
+                "/v3/accounts/:account_id/trades/:trade_id/close",
+                put(mock_close_handler),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let config = Config {
+            database_url: db_url,
+            oanda_api_key: "test-key".to_string(),
+            oanda_account_id: "test-account".to_string(),
+            oanda_base_url: format!("http://{}", addr),
+            oanda_stream_url: "http://127.0.0.1:1".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 0,
+        };
+
+        let oanda = OandaClient::new(
+            &config.oanda_base_url,
+            &config.oanda_stream_url,
+            &config.oanda_api_key,
+            &config.oanda_account_id,
+        );
+
+        let (price_tx, _) = broadcast::channel(8);
+        let state = AppState {
+            db: db.clone(),
+            config,
+            oanda,
+            start_time: Utc::now(),
+            live: Arc::new(LiveState::new()),
+            price_tx,
+            eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap()))),
+        };
+
+        {
+            let mut positions = state.live.open_positions.write().await;
+            positions.insert(
+                "lock-test-trade-1".to_string(),
+                OpenPosition {
+                    strategy_id,
+                    trade_id: "lock-test-trade-1".to_string(),
+                    instrument: instrument.clone(),
+                    granularity: Granularity::H1,
+                    direction: Direction::Long,
+                    entry_price: 1.0,
+                    entry_time: Utc::now() - Duration::hours(4),
+                    units: "1000".to_string(),
+                    stop_loss_state: StopLossState::Initial,
+                    worst_price: 1.0,
+                    best_price: 1.0,
+                    transition_failed_at: None,
+                    strategy_type: "mean_reversion".to_string(),
+                },
+            );
+        }
+
+        let mut buffer = CandleBuffer::new(16);
+        let base = Utc::now();
+        for (idx, close) in [1.0, 2.0, 3.0, 0.0].iter().enumerate() {
+            buffer.push(Candle {
+                time: base + Duration::minutes(idx as i64),
+                mid: OHLC {
+                    open: *close,
+                    high: *close,
+                    low: *close,
+                    close: *close,
+                },
+                volume: 1,
+                bid: None,
+                ask: None,
+            });
+        }
+
+        let reports = evaluate_and_apply(&state, &instrument, Granularity::H1, &buffer, 0.0)
+            .await
+            .unwrap();
+
+        assert!(
+            reports
+                .iter()
+                .any(|r| matches!(r.action, SignalAction::ClosedLong)),
+            "expected composite exit to close long trade for non-composite strategy_type label"
+        );
+
+        let positions = state.live.open_positions.read().await;
+        assert!(
+            positions.is_empty(),
+            "expected in-memory position to be removed"
+        );
+        drop(positions);
+
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM live_trades WHERE oanda_trade_id = 'lock-test-trade-1'",
+        )
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+        assert_eq!(status.as_deref(), Some("closed"));
+
+        sqlx::query("DELETE FROM live_trades WHERE live_strategy_id = $1")
+            .bind(strategy_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM live_strategies WHERE id = $1")
+            .bind(strategy_id)
             .execute(&db)
             .await
             .unwrap();
