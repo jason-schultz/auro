@@ -169,10 +169,10 @@ mod tests {
     use lru::LruCache;
     use tokio::sync::broadcast;
 
+    use crate::brokers::oanda::client::OandaClient;
     use crate::config::Config;
     use crate::engine::indicators::atr_pct;
     use crate::engine::types::{Candle, CandleBuffer, OHLC};
-    use crate::oanda::client::OandaClient;
     use crate::state::{AppState, LiveState};
 
     use super::*;

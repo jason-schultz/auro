@@ -1,8 +1,8 @@
 use anyhow::Context;
+use auro::brokers::oanda::client::OandaClient;
+use auro::brokers::oanda::models::CandlestickData;
 use auro::config::Config;
 use auro::db::create_pool;
-use auro::oanda::client::OandaClient;
-use auro::oanda::models::CandlestickData;
 use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use tokio::time::{sleep, Duration as TokioDuration};

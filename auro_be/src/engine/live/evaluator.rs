@@ -2,6 +2,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::brokers::oanda::client::OandaClient;
 use crate::db::repositories::{live_queries, live_strategies as live_strategies_repo};
 use crate::engine::indicators;
 use crate::engine::rules::{entry_gate_report, Rules};
@@ -9,7 +10,6 @@ use crate::engine::strategy::{self as strategy_mod, EntrySignal, ExitSignal, Str
 use crate::engine::types::{
     Direction, Granularity, LiveStrategy, OpenPosition, SignalAction, SignalReport, StopLossState,
 };
-use crate::oanda::client::OandaClient;
 use crate::state::AppState;
 
 use super::account_cache;
@@ -860,9 +860,9 @@ mod tests {
     use tokio::sync::broadcast;
     use uuid::Uuid;
 
+    use crate::brokers::oanda::client::OandaClient;
     use crate::config::Config;
     use crate::engine::types::{Candle, OHLC};
-    use crate::oanda::client::OandaClient;
     use crate::state::{AppState, LiveState};
 
     fn make_position(trade_id: &str, entry_price: f64) -> OpenPosition {

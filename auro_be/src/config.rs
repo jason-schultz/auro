@@ -9,6 +9,9 @@ pub struct Config {
     pub oanda_stream_url: String,
     pub host: String,
     pub port: u16,
+    /// Initial Questrade refresh token. Only needed on first run to seed the DB.
+    /// After that the DB row rotates automatically and this env var is ignored.
+    pub questrade_refresh_token: Option<String>,
 }
 
 impl Config {
@@ -20,6 +23,7 @@ impl Config {
             oanda_base_url: env::var("OANDA_BASE_URL")?,
             oanda_stream_url: env::var("OANDA_STREAM_URL")?,
             host: env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+            questrade_refresh_token: env::var("QUESTRADE_REFRESH_TOKEN").ok(),
             port: env::var("PORT")
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()

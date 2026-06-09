@@ -1,9 +1,9 @@
 use chrono::{Duration, Utc};
 use sqlx::PgPool;
 
+use crate::brokers::oanda::client::OandaClient;
 use crate::db;
 use crate::engine::types::{Candle, CandleRow, Granularity, OHLC};
-use crate::oanda::client::OandaClient;
 
 const BACKFILL_INSTRUMENTS: &[&str] = &[
     "EUR_USD", "USD_CAD", "GBP_USD", "USD_JPY", "AUD_USD", "XAU_USD",
@@ -103,7 +103,7 @@ async fn backfill_instrument(
     Ok(total_count)
 }
 
-fn parse_ohlc(data: &crate::oanda::models::CandlestickData) -> Option<OHLC> {
+fn parse_ohlc(data: &crate::brokers::oanda::models::CandlestickData) -> Option<OHLC> {
     Some(OHLC {
         open: data.o.parse().ok()?,
         high: data.h.parse().ok()?,

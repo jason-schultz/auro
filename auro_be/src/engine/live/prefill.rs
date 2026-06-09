@@ -2,12 +2,12 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::collections::HashMap;
 
+use crate::brokers::oanda::client::OandaClient;
 use crate::db::repositories::{live_queries, live_trades as live_trades_repo};
 use crate::engine::rules::Rules;
 use crate::engine::types::{
     BufferKey, Candle, CandleBuffer, Granularity, OpenPosition, StopLossState, OHLC,
 };
-use crate::oanda::client::OandaClient;
 use crate::state::AppState;
 
 /// Pre-fill the in-memory rules cache from the `rules` table.
@@ -343,10 +343,10 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::remove_instrument_entries;
+    use crate::brokers::oanda::client::OandaClient;
     use crate::config::Config;
     use crate::engine::live::prefill::load_instrument_buffers;
     use crate::engine::types::{CandleBuffer, Granularity};
-    use crate::oanda::client::OandaClient;
     use crate::state::{AppState, LiveState};
     use std::collections::HashMap;
 

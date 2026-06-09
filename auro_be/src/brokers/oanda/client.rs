@@ -2,6 +2,8 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use super::models::*;
+use crate::brokers::client::BrokerClient;
+use crate::brokers::{BrokerAccount, BrokerKind, BrokerStatus};
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone)]
@@ -509,5 +511,40 @@ impl OandaClient {
             .map_err(|e| AppError::Oanda(format!("Failed to parse transactions: {}", e)))?;
 
         Ok(body)
+    }
+}
+
+impl BrokerClient for OandaClient {
+    async fn broker_status(&mut self) -> BrokerStatus {
+        match self.get_account().await {
+            Err(e) => BrokerStatus {
+                broker: BrokerKind::Oanda,
+                display_name: "OANDA",
+                connected: false,
+                error: Some(e.to_string()),
+                accounts: vec![],
+            },
+            Ok(account) => {
+                let cash: f64 = account.balance.parse().unwrap_or(0.0);
+                let unrealized: f64 = account.unrealized_pl.parse().unwrap_or(0.0);
+                let buying_power: Option<f64> = account.margin_available.parse().ok();
+                BrokerStatus {
+                    broker: BrokerKind::Oanda,
+                    display_name: "OANDA",
+                    connected: true,
+                    error: None,
+                    accounts: vec![BrokerAccount {
+                        id: account.id.clone(),
+                        name: format!("Practice ({})", account.id),
+                        account_type: "Practice".into(),
+                        currency: account.currency,
+                        cash: Some(cash),
+                        market_value: None,
+                        total_equity: Some(cash + unrealized),
+                        buying_power,
+                    }],
+                }
+            }
+        }
     }
 }

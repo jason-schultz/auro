@@ -7,13 +7,15 @@ use lru::LruCache;
 use sqlx::PgPool;
 
 use crate::api::evaluator::EvaluateResponse;
+use crate::brokers::oanda::client::OandaClient;
+use crate::brokers::oanda::models::StreamMessage;
+use crate::brokers::questrade::client::QuestradeClient;
+use crate::brokers::wealthsimple::client::WealthsimpleClient;
 use crate::config::Config;
 use crate::engine::live::account_cache::AccountSnapshot;
 use crate::engine::live::instrument_cache::InstrumentMeta;
 use crate::engine::rules::Rules;
 use crate::engine::types::{BufferKey, CandleAccumulator, CandleBuffer, Granularity, OpenPosition};
-use crate::oanda::client::OandaClient;
-use crate::oanda::models::StreamMessage;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +26,8 @@ pub struct AppState {
     pub live: Arc<LiveState>,
     pub price_tx: broadcast::Sender<StreamMessage>,
     pub eval_cache: Arc<Mutex<LruCache<String, EvaluateResponse>>>,
+    pub questrade: Option<Arc<tokio::sync::Mutex<QuestradeClient>>>,
+    pub wealthsimple: WealthsimpleClient,
 }
 
 pub struct LiveState {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use sqlx::PgPool;
 
-use crate::oanda::client::OandaClient;
+use crate::brokers::oanda::client::OandaClient;
 
 #[derive(Debug, Clone)]
 pub struct InstrumentMeta {
@@ -98,7 +98,7 @@ pub async fn load_instrument_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oanda::models::Instrument;
+    use crate::brokers::oanda::models::Instrument;
 
     #[test]
     fn parses_trailing_distance_bounds_from_oanda_instrument_json() {
