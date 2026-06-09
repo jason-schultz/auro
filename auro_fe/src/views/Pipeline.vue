@@ -79,7 +79,10 @@
                             <td :class="cellClass('granularity', c, 2, 'text-xs text-muted-foreground')">
                                 {{ c.granularity }}
                             </td>
-                            <td :class="cellClass('generation', c, 3, 'text-xs')">
+                            <td :class="cellClass('variant', c, 3, 'text-xs text-muted-foreground')">
+                                {{ variantLabel(c) }}
+                            </td>
+                            <td :class="cellClass('generation', c, 4, 'text-xs')">
                                 <template v-if="c.evo_generation != null">
                                     <span class="text-primary">G{{ c.evo_generation }}</span>
                                     <span class="text-muted-foreground"> C{{ childRank(c) }}</span>
@@ -91,25 +94,25 @@
                                     <span class="text-muted-foreground">—</span>
                                 </template>
                             </td>
-                            <td :class="cellClass('stage', c, 4, 'text-muted-foreground text-xs')">
+                            <td :class="cellClass('stage', c, 5, 'text-muted-foreground text-xs')">
                                 {{ stageLabel(c.stage) }}
                             </td>
-                            <td :class="cellClass('status', c, 5)">
+                            <td :class="cellClass('status', c, 6)">
                                 <StatusBadge :status="c.status" />
                             </td>
-                            <td :class="cellClass('sharpe', c, 6, `text-xs ${sharpeColor(sharpeStat(c))}`)">
+                            <td :class="cellClass('sharpe', c, 7, `text-xs ${sharpeColor(sharpeStat(c))}`)">
                                 {{ fmt(sharpeStat(c)) }}
                             </td>
-                            <td :class="cellClass('trades', c, 7, 'text-xs text-muted-foreground')">
+                            <td :class="cellClass('trades', c, 8, 'text-xs text-muted-foreground')">
                                 {{ tradesStat(c) ?? "—" }}
                             </td>
-                            <td :class="cellClass('drawdown', c, 8, 'text-xs text-red-400')">
+                            <td :class="cellClass('drawdown', c, 9, 'text-xs text-red-400')">
                                 {{ formatTablePercent(drawdownStat(c), { decimals: 1 }) }}
                             </td>
-                            <td :class="cellClass('score', c, 9, `text-xs ${scoreColor(c.score)}`)">
+                            <td :class="cellClass('score', c, 10, `text-xs ${scoreColor(c.score)}`)">
                                 {{ c.score != null ? c.score.toFixed(3) : "—" }}
                             </td>
-                            <td :class="cellClass('failure_reason', c, 10, 'text-xs text-muted-foreground max-w-50 truncate')" :title="c.failure_reason ?? undefined">
+                            <td :class="cellClass('failure_reason', c, 11, 'text-xs text-muted-foreground max-w-50 truncate')" :title="c.failure_reason ?? undefined">
                                 {{ c.failure_reason || "—" }}
                             </td>
                         </tr>
@@ -140,6 +143,8 @@ import type { PipelineConfig } from "@/types/pipeline";
 const strategyOptions = [
     { value: "trend_following", label: "Trend Following" },
     { value: "mean_reversion", label: "Mean Reversion" },
+    { value: "donchian", label: "Donchian" },
+    { value: "macd", label: "MACD" },
 ];
 
 const granularityOptions = [
@@ -174,6 +179,7 @@ const {
     childRank,
     load,
     toggleSort,
+    variantLabel,
     stageLabel,
     sharpeStat,
     tradesStat,

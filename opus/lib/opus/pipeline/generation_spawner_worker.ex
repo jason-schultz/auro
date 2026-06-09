@@ -48,49 +48,98 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
     total = length(configs)
     terminal_count = Enum.count(configs, &terminal?/1)
 
-    if terminal_count < total do
-      Logger.info(
-        "[EvoEngine] lineage=#{lineage_id} gen=#{evo_generation}: " <>
-          "#{terminal_count}/#{total} terminal — snoozing"
-      )
+    cond do
+      total == 0 ->
+        Logger.warning(
+          "[EvoEngine] lineage=#{lineage_id} gen=#{evo_generation}: no configs found — terminating lineage"
+        )
 
-      {:snooze, 30}
-    else
-      best = Enum.max_by(configs, &(&1.score || 0.0))
-      best_score = best.score || 0.0
+        :ok
 
-      max_gen = max_generations_for(best.strategy_type)
+      terminal_count < total ->
+        Logger.info(
+          "[EvoEngine] lineage=#{lineage_id} gen=#{evo_generation}: " <>
+            "#{terminal_count}/#{total} terminal — snoozing"
+        )
 
-      cond do
-        best_score <= 0.0 ->
-          Logger.info(
-            "[EvoEngine] lineage=#{lineage_id} gen=#{evo_generation}: " <>
-              "no viable children (best_score=#{best_score}) — terminating lineage"
-          )
+        {:snooze, 30}
+
+      true ->
+        children = build_children_with_stats(configs)
+
+        # Exploratory seed at gen 0 is a non-backtested placeholder (score force-set
+        # at creation, no eval rows). Its sole role is to spawn gen 1 — fitness/
+        # termination logic can't apply because there are no stats. Spawn directly.
+        # (Safe: gen>=1 children always have eval rows by the time they're terminal,
+        # and non-exploratory seeds are backtested, so only this case has zero stats.)
+        if Enum.all?(children, &(is_nil(&1.bt_stats) and is_nil(&1.wf_stats))) do
+          seed = Enum.max_by(configs, &(&1.score || 0.0))
+
+          if evo_generation < max_generations_for(seed.strategy_type) do
+            Logger.info(
+              "[EvoEngine] lineage=#{lineage_id} gen=#{evo_generation}: " <>
+                "un-evaluated exploratory seed — spawning #{@children_per_gen} children for gen #{evo_generation + 1}"
+            )
+
+            spawn_next_generation(seed, lineage_id, evo_generation + 1)
+          else
+            Logger.info(
+              "[EvoEngine] lineage=#{lineage_id}: un-evaluated seed at max_gen — terminating"
+            )
+          end
 
           :ok
+        else
+          {parent, best_fitness} = select_parent(children)
+          max_gen = max_generations_for(parent.strategy_type)
 
-        evo_generation >= max_gen ->
-          Logger.info(
-            "[EvoEngine] lineage=#{lineage_id} max generations reached " <>
-              "(gen=#{evo_generation}, max=#{max_gen}) — " <>
-              "promoting #{best.id} (score=#{Float.round(best_score, 4)})"
-          )
+          cond do
+            best_fitness <= 0.0 ->
+              Logger.info(
+                "[EvoEngine] lineage=#{lineage_id} gen=#{evo_generation}: " <>
+                  "no viable children (best_fitness=#{Float.round(best_fitness, 4)}) — terminating lineage"
+              )
 
-          Coordinator.promote_to_live(to_string(best.id))
-          :ok
+              :ok
 
-        true ->
-          next_gen = evo_generation + 1
+            evo_generation >= max_gen ->
+              validated = Enum.filter(configs, fn c -> (c.score || 0.0) > 0.0 end)
 
-          Logger.info(
-            "[EvoEngine] lineage=#{lineage_id} gen=#{evo_generation} winner=#{best.id} " <>
-              "(score=#{Float.round(best_score, 4)}) — spawning #{@children_per_gen} children for gen #{next_gen}"
-          )
+              case validated do
+                [] ->
+                  Logger.info(
+                    "[EvoEngine] lineage=#{lineage_id} gen=#{evo_generation}: " <>
+                      "reached max generations (max=#{max_gen}) with no validated winner — terminating lineage"
+                  )
 
-          spawn_next_generation(best, lineage_id, next_gen)
-          :ok
-      end
+                  :ok
+
+                winners ->
+                  winner = Enum.max_by(winners, &(&1.score || 0.0))
+                  winner_score = winner.score || 0.0
+
+                  Logger.info(
+                    "[EvoEngine] lineage=#{lineage_id} max generations reached " <>
+                      "(gen=#{evo_generation}, max=#{max_gen}) — " <>
+                      "promoting validated winner #{winner.id} (score=#{Float.round(winner_score, 4)})"
+                  )
+
+                  Coordinator.promote_to_live(to_string(winner.id))
+                  :ok
+              end
+
+            true ->
+              next_gen = evo_generation + 1
+
+              Logger.info(
+                "[EvoEngine] lineage=#{lineage_id} gen=#{evo_generation} parent=#{parent.id} " <>
+                  "(fitness=#{Float.round(best_fitness, 4)}) — spawning #{@children_per_gen} children for gen #{next_gen}"
+              )
+
+              spawn_next_generation(parent, lineage_id, next_gen)
+              :ok
+          end
+        end
     end
   end
 
@@ -99,6 +148,8 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
   # promotes at gen 0 — no spawning. Other classes (MR) keep the default evo
   # depth.
   defp max_generations_for("trend_following"), do: 0
+  defp max_generations_for("donchian"), do: 0
+  defp max_generations_for("rsi2_dipbuy"), do: 0
   defp max_generations_for(_), do: @max_generations
 
   # ---------------------------------------------------------------------------
@@ -123,6 +174,116 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
       from e in StrategyEvaluation,
         where: e.strategy_config_id == ^config_id and e.status == "failed"
     )
+  end
+
+  defp build_children_with_stats(configs) do
+    config_ids = Enum.map(configs, & &1.id)
+
+    stats_rows =
+      Repo.all(
+        from e in StrategyEvaluation,
+          where:
+            e.strategy_config_id in ^config_ids and
+              e.stage in ["backtest", "walk_forward"],
+          select: {e.strategy_config_id, e.stage, e.stats}
+      )
+
+    stats_by_id =
+      Enum.reduce(stats_rows, %{}, fn {config_id, stage, stats}, acc ->
+        child_stats = Map.get(acc, config_id, %{bt_stats: nil, wf_stats: nil})
+
+        updated =
+          case stage do
+            "backtest" -> %{child_stats | bt_stats: stats}
+            "walk_forward" -> %{child_stats | wf_stats: stats}
+            _ -> child_stats
+          end
+
+        Map.put(acc, config_id, updated)
+      end)
+
+    Enum.map(configs, fn config ->
+      child_stats = Map.get(stats_by_id, config.id, %{bt_stats: nil, wf_stats: nil})
+
+      %{
+        config: config,
+        bt_stats: child_stats.bt_stats,
+        wf_stats: child_stats.wf_stats
+      }
+    end)
+  end
+
+  @doc false
+  def breeding_fitness_oos(wf_stats) when is_map(wf_stats) do
+    oos_sharpe = metric(wf_stats, "oos_sharpe")
+    retention = metric(wf_stats, "sharpe_retention")
+    oos_trades = metric(wf_stats, "oos_num_trades")
+
+    retention_capped = max(0.0, min(retention, 1.5))
+    oos_sharpe * retention_capped * :math.log(oos_trades + 1.0)
+  end
+
+  def breeding_fitness_oos(_), do: 0.0
+
+  @doc false
+  def breeding_fitness_insample(bt_stats) when is_map(bt_stats) do
+    expectancy = metric(bt_stats, "expectancy")
+
+    if expectancy > 0.0 do
+      sharpe = metric(bt_stats, "sharpe")
+      num_trades = metric(bt_stats, "num_trades")
+      sharpe * :math.log(num_trades + 1.0)
+    else
+      0.0
+    end
+  end
+
+  def breeding_fitness_insample(_), do: 0.0
+
+  @doc false
+  def select_parent(children_with_stats) do
+    wf_reachers = Enum.filter(children_with_stats, fn child -> not is_nil(child.wf_stats) end)
+
+    candidates = if wf_reachers == [], do: children_with_stats, else: wf_reachers
+
+    Enum.reduce(candidates, {nil, -1.0e308}, fn child, {best_config, best_fitness} ->
+      fitness =
+        if wf_reachers == [] do
+          breeding_fitness_insample(child.bt_stats)
+        else
+          breeding_fitness_oos(child.wf_stats)
+        end
+
+      if fitness > best_fitness do
+        {child.config, fitness}
+      else
+        {best_config, best_fitness}
+      end
+    end)
+  end
+
+  defp metric(stats, key) when is_map(stats) do
+    atom_key =
+      case key do
+        "oos_sharpe" -> :oos_sharpe
+        "sharpe_retention" -> :sharpe_retention
+        "oos_num_trades" -> :oos_num_trades
+        "sharpe" -> :sharpe
+        "num_trades" -> :num_trades
+        "expectancy" -> :expectancy
+        _ -> nil
+      end
+
+    value =
+      Map.get(stats, key) ||
+        if(atom_key, do: Map.get(stats, atom_key), else: nil) ||
+        0.0
+
+    cond do
+      is_integer(value) -> value * 1.0
+      is_float(value) -> value
+      true -> 0.0
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -221,6 +382,14 @@ defmodule Opus.Pipeline.GenerationSpawnerWorker do
     # never calls into this branch. Raise loudly if it ever does — that
     # indicates a misconfiguration upstream.
     raise "trend_following is non-evolving (textbook v1); mutate_params should never be called"
+  end
+
+  defp mutate_params("donchian", _params, _granularity, _generation) do
+    raise "donchian is non-evolving (textbook v1); mutate_params should never be called"
+  end
+
+  defp mutate_params("rsi2_dipbuy", _params, _granularity, _generation) do
+    raise "rsi2_dipbuy is non-evolving baseline; mutate_params should never be called"
   end
 
   # sigma decays linearly: 20% at gen 1 → 4% at gen 5
