@@ -51,7 +51,8 @@ pub(crate) async fn run_prefill_buffers(state: &AppState) {
 }
 
 /// Pre-fill candle buffers from the database for all strategy rows.
-/// Loads up to 200 candles per (instrument, granularity) pair.
+/// Loads up to each granularity's `buffer_capacity()` per
+/// (instrument, granularity) pair.
 async fn prefill_buffers(
     state: &AppState,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
@@ -116,6 +117,7 @@ async fn prefill_open_positions(
                 granularity: row.granularity,
                 direction: row.direction,
                 entry_price: row.entry_price,
+                entry_time: row.entry_time,
                 units,
                 stop_loss_state: determine_stop_loss_state(
                     trade,

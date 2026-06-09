@@ -130,6 +130,7 @@ async fn concurrent_exposure_limit_skips() {
                     granularity: Granularity::H1,
                     direction: Direction::Long,
                     entry_price: 1.0,
+                    entry_time: Utc::now(),
                     units: "8000".to_string(),
                     stop_loss_state: StopLossState::Initial,
                     worst_price: 1.0,

@@ -1,9 +1,15 @@
 use chrono::{DateTime, Timelike, Utc};
 use tokio::sync::broadcast;
+use tokio::time::{interval, Duration as TokioDuration};
 
+use crate::db;
 use crate::db::record_signal_event;
-use crate::engine::types::{CandleAccumulator, CandleBuffer, Granularity, OpenPosition};
-use crate::oanda::models::StreamMessage;
+use crate::db::repositories::live_queries;
+use crate::engine::types::{
+    Candle, CandleAccumulator, CandleBuffer, CandleRow, Granularity, OpenPosition, SignalReport,
+    OHLC,
+};
+use crate::oanda::models::{Candlestick, StreamMessage};
 use crate::state::{AppState, LastQuote};
 
 pub mod account_cache;
@@ -19,6 +25,242 @@ pub mod trade_management;
 pub(crate) use evaluator::{evaluate_and_apply, is_trading_enabled};
 pub use pricing::{format_price, format_price_with_precision};
 pub(crate) use time::{compute_slot_time, time_slot};
+
+pub(crate) async fn ingest_closed_candle(
+    state: &AppState,
+    instrument: &str,
+    granularity: Granularity,
+    closed: Candle,
+    current_mid: f64,
+    evaluate: bool,
+) -> Vec<SignalReport> {
+    let key = (instrument.to_string(), granularity);
+
+    let buffer_snapshot = {
+        let mut buffers = state.live.buffers.write().await;
+        let buffer = buffers
+            .entry(key)
+            .or_insert_with(|| CandleBuffer::new(granularity.buffer_capacity()));
+        buffer.push(closed.clone());
+        buffer.current_mid = current_mid;
+
+        tracing::debug!(
+            "{} candle closed for {}: Open={:.5} High={:.5} Low={:.5} Close={:.5}, buffer_len={}",
+            granularity,
+            instrument,
+            closed.mid.open,
+            closed.mid.high,
+            closed.mid.low,
+            closed.mid.close,
+            buffer.candles.len()
+        );
+        buffer.clone()
+    };
+
+    let row = CandleRow {
+        instrument: instrument.to_string(),
+        granularity,
+        complete: true,
+        candle: closed,
+    };
+
+    if let Err(e) = db::upsert_candle(&state.db, &row).await {
+        tracing::error!(
+            "Failed to persist {} candle for {}: {}",
+            granularity,
+            instrument,
+            e
+        );
+        return vec![];
+    }
+    *state.live.last_candle_persisted.write().await = Some(Utc::now());
+
+    if !evaluate {
+        return vec![];
+    }
+
+    match evaluate_and_apply(
+        state,
+        instrument,
+        granularity,
+        &buffer_snapshot,
+        current_mid,
+    )
+    .await
+    {
+        Ok(reports) => {
+            if !reports.is_empty() {
+                tracing::info!(
+                    "Strategy evaluation produced {} signals for {} {}",
+                    reports.len(),
+                    instrument,
+                    granularity
+                );
+                for report in &reports {
+                    tracing::debug!("[REPORT] {:?}", report);
+
+                    if let Err(e) = record_signal_event(&state.db, report).await {
+                        tracing::warn!(
+                            "Failed to record signal_event for {} {}: {}",
+                            report.instrument,
+                            report.granularity,
+                            e
+                        );
+                    }
+                }
+            }
+            reports
+        }
+        Err(e) => {
+            tracing::error!(
+                "Strategy evaluation error for {} {}: {}",
+                instrument,
+                granularity,
+                e
+            );
+            vec![]
+        }
+    }
+}
+
+fn parse_candlestick_data(data: &crate::oanda::models::CandlestickData) -> Option<OHLC> {
+    Some(OHLC {
+        open: data.o.parse().ok()?,
+        high: data.h.parse().ok()?,
+        low: data.l.parse().ok()?,
+        close: data.c.parse().ok()?,
+    })
+}
+
+fn parse_complete_candle(candle: &Candlestick) -> Option<Candle> {
+    if !candle.complete {
+        return None;
+    }
+
+    let time = DateTime::parse_from_rfc3339(&candle.time)
+        .ok()?
+        .with_timezone(&Utc);
+    let mid = parse_candlestick_data(candle.mid.as_ref()?)?;
+
+    Some(Candle {
+        time,
+        mid,
+        volume: candle.volume,
+        bid: candle.bid.as_ref().and_then(parse_candlestick_data),
+        ask: candle.ask.as_ref().and_then(parse_candlestick_data),
+    })
+}
+
+fn select_new_complete_candles(
+    candles: &[Candlestick],
+    last_buffer_time: Option<DateTime<Utc>>,
+) -> Vec<Candle> {
+    let mut selected: Vec<Candle> = Vec::new();
+
+    for candle in candles {
+        let Some(parsed) = parse_complete_candle(candle) else {
+            continue;
+        };
+        let is_newer_than_buffer = last_buffer_time.map(|t| parsed.time > t).unwrap_or(true);
+        if !is_newer_than_buffer {
+            continue;
+        }
+
+        selected.push(parsed);
+    }
+
+    selected.sort_by_key(|c| c.time);
+    selected
+}
+
+fn should_evaluate_polled_candle(index: usize, total: usize) -> bool {
+    index + 1 == total
+}
+
+pub fn spawn_htf_poller(state: AppState) {
+    tokio::spawn(async move {
+        tracing::info!("HTF poller started (H4/D from OANDA complete candles)");
+
+        let mut interval = interval(TokioDuration::from_secs(300));
+
+        loop {
+            interval.tick().await;
+
+            for granularity in [Granularity::H4, Granularity::D] {
+                let instruments = match live_queries::enabled_strategy_instruments_for_granularity(
+                    &state.db,
+                    granularity.as_str(),
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "HTF poller failed to list enabled instruments for {}: {}",
+                            granularity,
+                            e
+                        );
+                        continue;
+                    }
+                };
+
+                for instrument in instruments {
+                    let last_buffer_time = {
+                        let buffers = state.live.buffers.read().await;
+                        buffers
+                            .get(&(instrument.clone(), granularity))
+                            .and_then(|b| b.candles.last().map(|c| c.time))
+                    };
+
+                    let response = match state
+                        .oanda
+                        .get_candles(&instrument, granularity.as_str(), Some(8), None, None)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(
+                                "HTF poller failed to fetch {} {} candles: {}",
+                                instrument,
+                                granularity,
+                                e
+                            );
+                            continue;
+                        }
+                    };
+
+                    let new_closed =
+                        select_new_complete_candles(&response.candles, last_buffer_time);
+
+                    if new_closed.is_empty() {
+                        continue;
+                    }
+
+                    let current_mid = {
+                        let quotes = state.live.last_quotes.read().await;
+                        quotes.get(&instrument).map(|q| q.mid)
+                    };
+
+                    let total_new = new_closed.len();
+                    for (i, closed) in new_closed.into_iter().enumerate() {
+                        let mid_for_eval = current_mid.unwrap_or(closed.mid.close);
+                        let evaluate = should_evaluate_polled_candle(i, total_new);
+
+                        let _ = ingest_closed_candle(
+                            &state,
+                            &instrument,
+                            granularity,
+                            closed,
+                            mid_for_eval,
+                            evaluate,
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+    });
+}
 
 pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: AppState) {
     tokio::spawn(async move {
@@ -102,17 +344,10 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                     };
 
                     if current_minute != prev_minute {
-                        // M1 boundary crossed — check each granularity.
-                        // D is intentionally excluded: time_slot returns a constant 0 (no
-                        // wall-clock day boundary) and the OANDA session day closes at 17:00 ET,
-                        // not UTC midnight. D buffers are pre-filled from DB on startup; live
-                        // accumulation is deferred until session-aware boundary logic is added.
-                        for granularity in &[
-                            Granularity::M5,
-                            Granularity::M15,
-                            Granularity::H1,
-                            Granularity::H4,
-                        ] {
+                        // M1 boundary crossed — check UTC-aligned rollup granularities.
+                        // H4 and D are sourced from OANDA complete candles via poller to match
+                        // the NY-session anchored historical/backfill alignment.
+                        for granularity in &[Granularity::M5, Granularity::M15, Granularity::H1] {
                             let key = (instrument.clone(), *granularity);
 
                             let slot = time_slot(*granularity, current_hour, current_minute);
@@ -131,122 +366,15 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                                 continue;
                             };
 
-                            // Candle boundary crossed for this granularity
-                            let buffer_snapshot = {
-                                let mut buffers = state.live.buffers.write().await;
-                                let buffer = buffers.entry(key.clone()).or_insert_with(|| {
-                                    CandleBuffer::new(granularity.buffer_capacity())
-                                });
-                                buffer.push(closed_candle.clone());
-                                buffer.current_mid = mid;
-
-                                tracing::debug!(
-                                    "{} candle closed for {}: Open={:.5} High={:.5} Low={:.5} Close={:.5}, buffer_len={}",
-                                    granularity,
-                                    instrument,
-                                    closed_candle.mid.open,
-                                    closed_candle.mid.high,
-                                    closed_candle.mid.low,
-                                    closed_candle.mid.close,
-                                    buffer.candles.len()
-                                );
-                                buffer.clone()
-                            };
-
-                            if let Err(e) = sqlx::query(
-                                r#"INSERT INTO candles (
-                                    instrument, granularity, timestamp, open, high, low, close, volume, complete,
-                                    bid_open, bid_high, bid_low, bid_close,
-                                    ask_open, ask_high, ask_low, ask_close
-                                )
-                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $10, $11, $12, $13, $14, $15, $16)
-                                ON CONFLICT (instrument, granularity, timestamp) DO UPDATE SET
-                                    open = EXCLUDED.open,
-                                    high = EXCLUDED.high,
-                                    low = EXCLUDED.low,
-                                    close = EXCLUDED.close,
-                                    volume = EXCLUDED.volume,
-                                    complete = EXCLUDED.complete,
-                                    bid_open = EXCLUDED.bid_open,
-                                    bid_high = EXCLUDED.bid_high,
-                                    bid_low = EXCLUDED.bid_low,
-                                    bid_close = EXCLUDED.bid_close,
-                                    ask_open = EXCLUDED.ask_open,
-                                    ask_high = EXCLUDED.ask_high,
-                                    ask_low = EXCLUDED.ask_low,
-                                    ask_close = EXCLUDED.ask_close"#
-                            )
-                            .bind(instrument)
-                            .bind(granularity.as_str())
-                            .bind(closed_candle.time)
-                            .bind(closed_candle.mid.open)
-                            .bind(closed_candle.mid.high)
-                            .bind(closed_candle.mid.low)
-                            .bind(closed_candle.mid.close)
-                            .bind(closed_candle.volume)
-                            .bind(closed_candle.bid.as_ref().map(|o| o.open))
-                            .bind(closed_candle.bid.as_ref().map(|o| o.high))
-                            .bind(closed_candle.bid.as_ref().map(|o| o.low))
-                            .bind(closed_candle.bid.as_ref().map(|o| o.close))
-                            .bind(closed_candle.ask.as_ref().map(|o| o.open))
-                            .bind(closed_candle.ask.as_ref().map(|o| o.high))
-                            .bind(closed_candle.ask.as_ref().map(|o| o.low))
-                            .bind(closed_candle.ask.as_ref().map(|o| o.close))
-                            .execute(&state.db)
-                            .await
-                            {
-                                tracing::error!(
-                                    "Failed to persist {} candle for {}: {}",
-                                    granularity,
-                                    instrument,
-                                    e
-                                );
-                            } else {
-                                *state.live.last_candle_persisted.write().await = Some(Utc::now());
-                            }
-
-                            match evaluate_and_apply(
+                            let _ = ingest_closed_candle(
                                 &state,
                                 instrument,
                                 *granularity,
-                                &buffer_snapshot,
+                                closed_candle,
                                 mid,
+                                true,
                             )
-                            .await
-                            {
-                                Ok(reports) => {
-                                    if !reports.is_empty() {
-                                        tracing::info!(
-                                            "Strategy evaluation produced {} signals for {} {}",
-                                            reports.len(),
-                                            instrument,
-                                            granularity
-                                        );
-                                        for report in &reports {
-                                            tracing::debug!("[REPORT] {:?}", report);
-
-                                            if let Err(e) =
-                                                record_signal_event(&state.db, report).await
-                                            {
-                                                tracing::warn!(
-                                                    "Failed to record signal_event for {} {}: {}",
-                                                    report.instrument,
-                                                    report.granularity,
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "Strategy evaluation error for {} {}: {}",
-                                        instrument,
-                                        granularity,
-                                        e
-                                    );
-                                }
-                            }
+                            .await;
                         }
                     }
 
@@ -283,4 +411,82 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_candle(time: &str, complete: bool, close: &str) -> Candlestick {
+        let data = crate::oanda::models::CandlestickData {
+            o: close.to_string(),
+            h: close.to_string(),
+            l: close.to_string(),
+            c: close.to_string(),
+        };
+
+        Candlestick {
+            time: time.to_string(),
+            complete,
+            volume: 1,
+            mid: Some(crate::oanda::models::CandlestickData {
+                o: data.o.clone(),
+                h: data.h.clone(),
+                l: data.l.clone(),
+                c: data.c.clone(),
+            }),
+            bid: Some(crate::oanda::models::CandlestickData {
+                o: data.o.clone(),
+                h: data.h.clone(),
+                l: data.l.clone(),
+                c: data.c.clone(),
+            }),
+            ask: Some(data),
+        }
+    }
+
+    #[test]
+    fn select_new_complete_candles_respects_complete_and_timestamp() {
+        let last = DateTime::parse_from_rfc3339("2026-06-01T21:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let candles = vec![
+            mk_candle("2026-06-01T21:00:00Z", true, "100.0"),
+            mk_candle("2026-06-02T01:00:00Z", false, "101.0"),
+            mk_candle("2026-06-02T05:00:00Z", true, "102.0"),
+        ];
+
+        let picked = select_new_complete_candles(&candles, Some(last));
+        assert_eq!(picked.len(), 1);
+        assert_eq!(
+            picked[0].time,
+            DateTime::parse_from_rfc3339("2026-06-02T05:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        assert_eq!(picked[0].mid.close, 102.0);
+
+        let multi_new = vec![
+            mk_candle("2026-06-02T01:00:00Z", true, "101.0"),
+            mk_candle("2026-06-02T05:00:00Z", true, "102.0"),
+        ];
+        let picked_multi = select_new_complete_candles(&multi_new, Some(last));
+        assert_eq!(picked_multi.len(), 2);
+        assert!(picked_multi[0].time < picked_multi[1].time);
+
+        let stale_only = vec![
+            mk_candle("2026-06-01T21:00:00Z", true, "100.0"),
+            mk_candle("2026-06-02T01:00:00Z", false, "101.0"),
+        ];
+        assert!(select_new_complete_candles(&stale_only, Some(last)).is_empty());
+    }
+
+    #[test]
+    fn should_evaluate_polled_candle_only_for_latest() {
+        assert!(!should_evaluate_polled_candle(0, 3));
+        assert!(!should_evaluate_polled_candle(1, 3));
+        assert!(should_evaluate_polled_candle(2, 3));
+        assert!(should_evaluate_polled_candle(0, 1));
+    }
 }

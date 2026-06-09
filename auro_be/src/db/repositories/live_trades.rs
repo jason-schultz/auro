@@ -101,6 +101,7 @@ pub(crate) struct PrefillOpenPositionRow {
     pub instrument: String,
     pub direction: Direction,
     pub entry_price: f64,
+    pub entry_time: DateTime<Utc>,
     pub oanda_trade_id: String,
     pub strategy_type: String,
     pub granularity: Granularity,
@@ -231,7 +232,7 @@ pub(crate) async fn find_open_trade_with_strategy_by_oanda_id(
     oanda_trade_id: &str,
 ) -> Result<Option<PrefillOpenPositionRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT lt.live_strategy_id, lt.instrument, lt.direction, lt.entry_price, \
+        "SELECT lt.live_strategy_id, lt.instrument, lt.direction, lt.entry_price, lt.entry_time, \
         lt.oanda_trade_id, ls.strategy_type, ls.granularity \
         FROM live_trades lt \
         JOIN live_strategies ls ON ls.id = lt.live_strategy_id \

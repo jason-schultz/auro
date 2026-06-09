@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use config::Config;
 use engine::live::account_cache::spawn_account_refresher;
 use engine::live::instrument_cache::load_instrument_metadata;
-use engine::live::spawn_live_evaluator;
+use engine::live::{spawn_htf_poller, spawn_live_evaluator};
 use lru::LruCache;
 use oanda::aggregator::spawn_aggregator;
 use oanda::backfill::backfill_candles;
@@ -160,6 +160,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let evaluator_rx = price_tx.subscribe();
     spawn_live_evaluator(evaluator_rx, state.clone());
+    spawn_htf_poller(state.clone());
     spawn_account_refresher(state.clone());
 
     let stream_instruments: Vec<String> =

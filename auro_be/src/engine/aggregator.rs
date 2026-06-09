@@ -1,81 +1,3 @@
-use std::collections::HashMap;
-
-use chrono::{DateTime, Timelike, Utc};
-
-use crate::engine::types::{Candle, OHLC};
-
-pub fn aggregate_candles(candles: &[Candle], minutes: usize) -> Vec<Candle> {
-    let mut aggregated = Vec::new();
-    let mut buckets: HashMap<DateTime<Utc>, Vec<Candle>> = HashMap::new();
-    for candle in candles {
-        let bucket = snap_to_minutes(candle.time, minutes);
-        buckets.entry(bucket).or_default().push(candle.clone());
-    }
-    for (time, chunk) in buckets {
-        let first = chunk.first().unwrap();
-        let last = chunk.last().unwrap();
-        aggregated.push(Candle {
-            time,
-            mid: OHLC {
-                open: first.mid.open,
-                high: chunk
-                    .iter()
-                    .map(|c| c.mid.high)
-                    .fold(f64::NEG_INFINITY, f64::max),
-                low: chunk
-                    .iter()
-                    .map(|c| c.mid.low)
-                    .fold(f64::INFINITY, f64::min),
-                close: last.mid.close,
-            },
-            volume: chunk.iter().map(|c| c.volume).sum(),
-            bid: None,
-            ask: None,
-        });
-    }
-    aggregated.sort_by_key(|c| c.time);
-    aggregated
-}
-
-fn snap_to_minutes(timestamp: DateTime<Utc>, minutes: usize) -> DateTime<Utc> {
-    if minutes >= 1440 {
-        // Daily — snap to midnight
-        timestamp
-            .with_hour(0)
-            .unwrap()
-            .with_minute(0)
-            .unwrap()
-            .with_second(0)
-            .unwrap()
-            .with_nanosecond(0)
-            .unwrap()
-    } else if minutes >= 60 {
-        // Hourly — snap to hour boundary
-        let hours = minutes / 60;
-        let snapped_hour = (timestamp.hour() as usize / hours) * hours;
-        timestamp
-            .with_hour(snapped_hour as u32)
-            .unwrap()
-            .with_minute(0)
-            .unwrap()
-            .with_second(0)
-            .unwrap()
-            .with_nanosecond(0)
-            .unwrap()
-    } else {
-        // Sub-hourly — snap to minute boundary
-        let minute = timestamp.minute() as usize;
-        let snapped_minute = (minute / minutes) * minutes;
-        timestamp
-            .with_minute(snapped_minute as u32)
-            .unwrap()
-            .with_second(0)
-            .unwrap()
-            .with_nanosecond(0)
-            .unwrap()
-    }
-}
-
 pub fn granularity_to_minutes(granularity: String) -> usize {
     match granularity.as_str() {
         "M1" => 1,
@@ -84,7 +6,7 @@ pub fn granularity_to_minutes(granularity: String) -> usize {
         "M30" => 30,
         "H1" => 60,
         "H4" => 240,
-        "D1" => 1440,
+        "D" => 1440,
         n => n[1..].parse().unwrap_or(0),
     }
 }
