@@ -2,12 +2,13 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use auro::api::evaluator::EvaluateResponse;
+use auro::brokers::oanda::client::OandaClient;
+use auro::brokers::wealthsimple::client::WealthsimpleClient;
 use auro::config::Config;
 use auro::engine::live::sizing::{
     check_concurrent_exposure, compute_units, SizingDecision, SizingInput, SkipReason,
 };
 use auro::engine::types::{Direction, Granularity, OpenPosition, StopLossState};
-use auro::oanda::client::OandaClient;
 use auro::state::{AppState, LastQuote, LiveState};
 use chrono::Utc;
 use lru::LruCache;
@@ -24,6 +25,7 @@ fn build_state() -> AppState {
         oanda_stream_url: "http://127.0.0.1:1".to_string(),
         host: "127.0.0.1".to_string(),
         port: 0,
+        questrade_refresh_token: None,
     };
 
     let oanda = OandaClient::new(
@@ -38,6 +40,7 @@ fn build_state() -> AppState {
         .expect("valid lazy test db url");
 
     let (price_tx, _) = broadcast::channel(8);
+    let wealthsimple = WealthsimpleClient::new(&db);
 
     AppState {
         db,
@@ -49,6 +52,8 @@ fn build_state() -> AppState {
         eval_cache: Arc::new(Mutex::new(LruCache::<String, EvaluateResponse>::new(
             NonZeroUsize::new(8).unwrap(),
         ))),
+        questrade: None,
+        wealthsimple,
     }
 }
 

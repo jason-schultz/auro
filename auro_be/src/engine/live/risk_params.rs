@@ -170,6 +170,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     use crate::brokers::oanda::client::OandaClient;
+    use crate::brokers::wealthsimple::client::WealthsimpleClient;
     use crate::config::Config;
     use crate::engine::indicators::atr_pct;
     use crate::engine::types::{Candle, CandleBuffer, OHLC};
@@ -210,6 +211,7 @@ mod tests {
             oanda_stream_url: "http://127.0.0.1:1".to_string(),
             host: "127.0.0.1".to_string(),
             port: 0,
+            questrade_refresh_token: None,
         };
 
         let oanda = OandaClient::new(
@@ -220,6 +222,7 @@ mod tests {
         );
 
         let (price_tx, _) = broadcast::channel(8);
+        let wealthsimple = WealthsimpleClient::new(&db);
 
         AppState {
             db,
@@ -229,6 +232,8 @@ mod tests {
             live: Arc::new(LiveState::new()),
             price_tx,
             eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap()))),
+            questrade: None,
+            wealthsimple,
         }
     }
 
