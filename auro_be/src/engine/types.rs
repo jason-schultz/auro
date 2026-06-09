@@ -269,6 +269,7 @@ pub enum ExitReason {
     TrailingStop,
     TrendReversal,
     TimeExit,
+    TimeStop,
     EndOfData,
 }
 
@@ -284,6 +285,10 @@ pub enum EntryReason {
         z_score: f64,
         rsi: f64,
     },
+    /// MACD crossover entry metadata.
+    MacdCross { macd: f64, signal: f64 },
+    /// Donchian breakout entry metadata using prior entry channel bounds.
+    DonchianBreakout { channel_high: f64, channel_low: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
@@ -335,15 +340,15 @@ impl Granularity {
 
     /// How many candles to hold in the in-memory buffer for this granularity.
     /// Sized so that each buffer covers roughly the same useful lookback window
-    /// and always has enough candles for the longest indicator (ADX-14, MA-60).
+    /// and always has enough candles for the longest indicator (ADX-14, MA-200).
     pub fn buffer_capacity(&self) -> usize {
         match self {
             Granularity::M1 => 500,  // ~8 hours
             Granularity::M5 => 500,  // ~42 hours
             Granularity::M15 => 400, // ~4 days
-            Granularity::H1 => 200,  // ~8 days
-            Granularity::H4 => 100,  // ~17 days
-            Granularity::D => 60,    // ~3 months
+            Granularity::H1 => 256,  // supports MA-200 with headroom
+            Granularity::H4 => 256,  // supports MA-200 with headroom
+            Granularity::D => 300,   // 3× period for EMA convergence on 100-bar indicators
         }
     }
 }
@@ -417,6 +422,7 @@ pub struct OpenPosition {
     pub granularity: Granularity,
     pub direction: Direction,
     pub entry_price: f64,
+    pub entry_time: DateTime<Utc>,
     pub units: String,
     pub stop_loss_state: StopLossState,
     pub worst_price: f64,
@@ -688,9 +694,9 @@ mod tests {
         assert_eq!(Granularity::M1.buffer_capacity(), 500);
         assert_eq!(Granularity::M5.buffer_capacity(), 500);
         assert_eq!(Granularity::M15.buffer_capacity(), 400);
-        assert_eq!(Granularity::H1.buffer_capacity(), 200);
-        assert_eq!(Granularity::H4.buffer_capacity(), 100);
-        assert_eq!(Granularity::D.buffer_capacity(), 60);
+        assert_eq!(Granularity::H1.buffer_capacity(), 256);
+        assert_eq!(Granularity::H4.buffer_capacity(), 256);
+        assert_eq!(Granularity::D.buffer_capacity(), 300);
     }
 
     #[test]
