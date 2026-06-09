@@ -14,13 +14,31 @@ export function statusBadgeClass(status: string | null | undefined): string {
 }
 
 export function strategyTypeBadgeClass(strategyType: string): string {
-    return strategyType === "mean_reversion"
-        ? "bg-blue-500/10 text-blue-400"
-        : "bg-violet-500/10 text-violet-400";
+    switch (strategyType) {
+        case "mean_reversion":
+            return "bg-blue-500/10 text-blue-400";
+        case "donchian":
+            return "bg-amber-500/10 text-amber-400";
+        case "macd":
+            return "bg-teal-500/10 text-teal-400";
+        default:
+            return "bg-violet-500/10 text-violet-400";
+    }
 }
 
 export function strategyTypeBadgeLabel(strategyType: string): string {
-    return strategyType === "mean_reversion" ? "Mean Rev" : "Trend";
+    switch (strategyType) {
+        case "mean_reversion":
+            return "Mean Rev";
+        case "donchian":
+            return "Donchian";
+        case "macd":
+            return "MACD";
+        case "trend_following":
+            return "Trend";
+        default:
+            return strategyType;
+    }
 }
 
 export function tradeExitReasonBadgeClass(exitReason: string): string {

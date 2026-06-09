@@ -25,6 +25,7 @@ config :opus, OpusWeb.Endpoint,
 config :opus, Oban,
   repo: Opus.Repo,
   plugins: [
+    Oban.Plugins.Lifeline,
     {Oban.Plugins.Cron,
      timezone: "Etc/UTC",
      crontab: [

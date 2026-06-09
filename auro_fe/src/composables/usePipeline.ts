@@ -8,6 +8,33 @@ import type {
     PipelineSummary,
 } from "../types/pipeline";
 
+interface VariantParams {
+    fast_period?: number;
+    slow_period?: number;
+    signal_period?: number;
+    ma_type?: string;
+    ma_period?: number;
+    entry_z_threshold?: number;
+    entry_threshold?: number;
+    entry_period?: number;
+    exit_period?: number;
+}
+
+// Read a component's params from either the composite shape
+// (parameters.components.{tf,mr,dc,macd}.params) or the legacy flat shape
+// (params at the top level).
+function componentParams(
+    c: PipelineConfig,
+    comp: "tf" | "mr" | "dc" | "macd",
+): VariantParams | null {
+    const p = c.parameters as unknown as Record<string, unknown>;
+    if (!p) return null;
+    const components = p.components as
+        | Record<string, { params?: VariantParams }>
+        | undefined;
+    return components?.[comp]?.params ?? (p as VariantParams);
+}
+
 export function usePipeline() {
     const loading = ref(false);
     const configs = ref<PipelineConfig[]>([]);
@@ -39,6 +66,39 @@ export function usePipeline() {
     function childRank(c: PipelineConfig): number {
         if (c.lineage_id == null || c.evo_generation == null) return 0;
         return childRankMap.value.get(`${c.lineage_id}:${c.evo_generation}:${c.config_id}`) ?? 0;
+    }
+
+    // Compact label identifying which seed/variant a config is, read from its
+    // parameters. Handles both the composite shape (components.{tf,mr}.params)
+    // and the legacy flat shape. Distinguishes e.g. 50/200 sma vs 13/34 ema TF,
+    // which otherwise look identical on the page (same instrument/type/gen).
+    function variantLabel(c: PipelineConfig): string {
+        if (c.strategy_type === "trend_following") {
+            const p = componentParams(c, "tf");
+            if (p?.fast_period != null && p?.slow_period != null) {
+                return p.ma_type
+                    ? `${p.fast_period}/${p.slow_period} ${p.ma_type}`
+                    : `${p.fast_period}/${p.slow_period}`;
+            }
+        } else if (c.strategy_type === "mean_reversion") {
+            const p = componentParams(c, "mr");
+            const z = p?.entry_z_threshold ?? p?.entry_threshold;
+            const parts: string[] = [];
+            if (z != null) parts.push(`z${z}`);
+            if (p?.ma_period != null) parts.push(`ma${p.ma_period}`);
+            if (parts.length) return parts.join(" ");
+        } else if (c.strategy_type === "donchian") {
+            const p = componentParams(c, "dc");
+            if (p?.entry_period != null && p?.exit_period != null) {
+                return `${p.entry_period}/${p.exit_period}`;
+            }
+        } else if (c.strategy_type === "macd") {
+            const p = componentParams(c, "macd");
+            if (p?.fast_period != null && p?.slow_period != null && p?.signal_period != null) {
+                return `${p.fast_period}/${p.slow_period}/${p.signal_period}`;
+            }
+        }
+        return "—";
     }
 
     const filtered = computed(() => {
@@ -90,6 +150,8 @@ export function usePipeline() {
                 return c.strategy_type;
             case "granularity":
                 return c.granularity;
+            case "variant":
+                return variantLabel(c);
             case "generation":
                 return c.evo_generation ?? c.depth ?? -1;
             case "stage":
@@ -197,6 +259,7 @@ export function usePipeline() {
         load,
         toggleSort,
         strategyLabel,
+        variantLabel,
         stageLabel,
         statusClass,
         sharpeStat,

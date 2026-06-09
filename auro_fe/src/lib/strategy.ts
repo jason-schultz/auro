@@ -3,6 +3,8 @@ import type { StrategyParameters } from "../types/strategy";
 export function strategyTypeLabel(type: string): string {
     if (type === "trend_following") return "Trend";
     if (type === "mean_reversion") return "Mean Rev";
+    if (type === "donchian") return "Donchian";
+    if (type === "macd") return "MACD";
     return type;
 }
 
