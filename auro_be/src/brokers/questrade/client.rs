@@ -1,12 +1,13 @@
 use std::collections::HashMap;
+use std::time::Duration as StdDuration;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use reqwest::Client;
 use sqlx::PgPool;
 
 use super::models::{
     AccountBalancesResponse, AccountsResponse, CandlesResponse, EquityCandle, QuestradeAccount,
-    SymbolSearchResponse, TokenResponse,
+    QuoteResult, QuotesResponse, SymbolSearchResponse, TokenResponse,
 };
 use crate::brokers::client::BrokerClient;
 use crate::brokers::{BrokerAccount, BrokerKind, BrokerStatus};
@@ -55,8 +56,16 @@ impl QuestradeClient {
             (None, None) => return Ok(None),
         };
 
+        let http = Client::builder()
+            .timeout(StdDuration::from_secs(30))
+            .connect_timeout(StdDuration::from_secs(10))
+            .build()
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to build Questrade HTTP client: {}", e))
+            })?;
+
         Ok(Some(Self {
-            http: Client::new(),
+            http,
             pool: pool.clone(),
             refresh_token,
             access_token: None,
@@ -157,31 +166,59 @@ impl QuestradeClient {
         Ok(format!("{}v1/{}", server, path))
     }
 
-    pub async fn get_account_balances(
-        &mut self,
-        account_id: &str,
-    ) -> AppResult<AccountBalancesResponse> {
+    async fn request(&mut self, builder: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
         self.ensure_authenticated().await?;
 
-        let url = self.api_url(&format!("accounts/{}/balances", account_id))?;
-        let resp = self
-            .http
-            .get(&url)
+        // Clone before send so we can retry once on 401.
+        // try_clone returns None only for streaming bodies; all our requests are GET with no body.
+        let retry = builder.try_clone();
+
+        let resp = builder
             .header("Authorization", self.bearer()?)
             .send()
             .await
-            .map_err(|e| {
-                AppError::Internal(format!("Questrade get_account_balances failed: {}", e))
-            })?;
+            .map_err(|e| AppError::Internal(format!("Questrade request failed: {}", e)))?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(rb) = retry {
+                tracing::warn!("Questrade 401 — forcing re-auth and retrying");
+                self.authenticate().await?;
+                let resp = rb
+                    .header("Authorization", self.bearer()?)
+                    .send()
+                    .await
+                    .map_err(|e| AppError::Internal(format!("Questrade retry failed: {}", e)))?;
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(AppError::BrokerHttp {
+                        broker: "Questrade",
+                        status: status.as_u16(),
+                        body,
+                    });
+                }
+                return Ok(resp);
+            }
+        }
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!(
-                "Questrade balances error ({}): {}",
-                status, body
-            )));
+            return Err(AppError::BrokerHttp {
+                broker: "Questrade",
+                status: status.as_u16(),
+                body,
+            });
         }
+        Ok(resp)
+    }
+
+    pub async fn get_account_balances(
+        &mut self,
+        account_id: &str,
+    ) -> AppResult<AccountBalancesResponse> {
+        let url = self.api_url(&format!("accounts/{}/balances", account_id))?;
+        let resp = self.request(self.http.get(&url)).await?;
 
         resp.json()
             .await
@@ -189,25 +226,8 @@ impl QuestradeClient {
     }
 
     pub async fn get_accounts(&mut self) -> AppResult<Vec<QuestradeAccount>> {
-        self.ensure_authenticated().await?;
-
         let url = self.api_url("accounts")?;
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", self.bearer()?)
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("Questrade get_accounts failed: {}", e)))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!(
-                "Questrade accounts error ({}): {}",
-                status, body
-            )));
-        }
+        let resp = self.request(self.http.get(&url)).await?;
 
         let parsed: AccountsResponse = resp.json().await.map_err(|e| {
             AppError::Internal(format!("Failed to parse Questrade accounts: {}", e))
@@ -217,7 +237,6 @@ impl QuestradeClient {
     }
 
     /// Resolve a ticker symbol to Questrade's numeric symbol ID.
-    /// Prefers an exact match on TSX; falls back to any exchange.
     /// Result is cached in memory for the lifetime of the client.
     pub async fn search_symbol(&mut self, ticker: &str) -> AppResult<i64> {
         let upper = ticker.to_uppercase();
@@ -225,26 +244,10 @@ impl QuestradeClient {
             return Ok(id);
         }
 
-        self.ensure_authenticated().await?;
-
         let url = self.api_url("symbols/search")?;
         let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", self.bearer()?)
-            .query(&[("prefix", &upper)])
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("Questrade symbol search failed: {}", e)))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!(
-                "Questrade symbol search error ({}): {}",
-                status, body
-            )));
-        }
+            .request(self.http.get(&url).query(&[("prefix", upper.as_str())]))
+            .await?;
 
         let parsed: SymbolSearchResponse = resp
             .json()
@@ -259,23 +262,11 @@ impl QuestradeClient {
             );
         }
 
-        // Prefer: exact + TSX + tradable → exact + TSX → exact + tradable → exact → first
+        // Exact match + tradable is the happy path; fall back to exact, then first result.
         let result = parsed
             .symbols
             .iter()
-            .find(|s| s.symbol == upper && s.listing_exchange == "TSX" && s.is_tradable)
-            .or_else(|| {
-                parsed
-                    .symbols
-                    .iter()
-                    .find(|s| s.symbol == upper && s.listing_exchange == "TSX")
-            })
-            .or_else(|| {
-                parsed
-                    .symbols
-                    .iter()
-                    .find(|s| s.symbol == upper && s.is_tradable)
-            })
+            .find(|s| s.symbol == upper && s.is_tradable)
             .or_else(|| parsed.symbols.iter().find(|s| s.symbol == upper))
             .or_else(|| parsed.symbols.first())
             .ok_or_else(|| AppError::Internal(format!("Symbol not found: {}", upper)))?;
@@ -293,9 +284,26 @@ impl QuestradeClient {
         Ok(result.symbol_id)
     }
 
-    /// Fetch daily (or other interval) candles for a resolved symbol ID.
+    /// Max days per request that keeps bar count safely under Questrade's 20k limit.
+    fn interval_chunk_days(interval: &str) -> i64 {
+        match interval {
+            "OneMinute" => 20,
+            "TwoMinutes" | "ThreeMinutes" | "FourMinutes" => 40,
+            "FiveMinutes" | "TenMinutes" => 90,
+            "FifteenMinutes" | "TwentyMinutes" | "HalfHour" => 180,
+            _ => 365, // OneHour, FourHours, OneDay, etc.
+        }
+    }
+
+    /// Fetch candles for a resolved symbol ID, paginating automatically so that
+    /// any date range works regardless of Questrade's 20k-bar per-request cap.
     /// `start` / `end` are "YYYY-MM-DD"; `interval` is a Questrade interval string
-    /// (e.g. "OneDay", "OneHour", "FifteenMinutes").
+    /// (e.g. "OneDay", "OneHour", "FiveMinutes").
+    ///
+    /// Pagination walks newest → oldest: Questrade returns 400 for ranges older
+    /// than its data-retention window, and walking backward means hitting that
+    /// boundary truncates the result instead of discarding the newer chunks.
+    /// A 400 on the very first (newest) chunk is a real error and propagates.
     pub async fn get_candles(
         &mut self,
         symbol_id: i64,
@@ -303,45 +311,68 @@ impl QuestradeClient {
         end: &str,
         interval: &str,
     ) -> AppResult<Vec<EquityCandle>> {
-        self.ensure_authenticated().await?;
+        let chunk_days = Self::interval_chunk_days(interval);
 
-        // Questrade expects RFC3339 with fractional seconds; use Eastern time so
-        // TSX daily bars are aligned correctly (EDT = -04:00 most of the year).
-        let start_time = format!("{}T00:00:00.000000-05:00", start);
-        let end_time = format!("{}T23:59:59.999999-05:00", end);
+        let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")
+            .map_err(|e| AppError::Internal(format!("Invalid start date '{}': {}", start, e)))?;
+        let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")
+            .map_err(|e| AppError::Internal(format!("Invalid end date '{}': {}", end, e)))?;
 
-        let url = self.api_url(&format!("markets/candles/{}", symbol_id))?;
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", self.bearer()?)
-            .query(&[
-                ("startTime", start_time.as_str()),
-                ("endTime", end_time.as_str()),
-                ("interval", interval),
-            ])
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("Questrade get_candles failed: {}", e)))?;
+        let mut all_candles: Vec<EquityCandle> = Vec::new();
+        let mut chunk_end = end_date;
+        let mut fetched_any_chunk = false;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!(
-                "Questrade candles error ({}): {}",
-                status, body
-            )));
-        }
+        while chunk_end >= start_date {
+            let chunk_start = {
+                let candidate = chunk_end - Duration::days(chunk_days - 1);
+                if candidate > start_date {
+                    candidate
+                } else {
+                    start_date
+                }
+            };
 
-        let parsed: CandlesResponse = resp
-            .json()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to parse candles: {}", e)))?;
+            // Questrade expects RFC3339 with fractional seconds; -05:00 aligns TSX daily bars.
+            let start_time = format!("{}T00:00:00.000000-05:00", chunk_start);
+            let end_time = format!("{}T23:59:59.999999-05:00", chunk_end);
 
-        Ok(parsed
-            .candles
-            .into_iter()
-            .map(|c| EquityCandle {
+            let url = self.api_url(&format!("markets/candles/{}", symbol_id))?;
+            let result = self
+                .request(self.http.get(&url).query(&[
+                    ("startTime", start_time.as_str()),
+                    ("endTime", end_time.as_str()),
+                    ("interval", interval),
+                ]))
+                .await;
+
+            let resp = match result {
+                Err(e @ AppError::BrokerHttp { status: 400, .. }) if fetched_any_chunk => {
+                    tracing::info!(
+                        "Questrade candles {}..{} hit data-retention boundary ({}); stopping pagination",
+                        chunk_start, chunk_end, e
+                    );
+                    break;
+                }
+                Err(e) => return Err(e),
+                Ok(r) => r,
+            };
+            fetched_any_chunk = true;
+
+            let parsed: CandlesResponse = resp
+                .json()
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to parse candles: {}", e)))?;
+
+            tracing::debug!(
+                "Questrade candles symbolId={} interval={} {}..{}: {} bars",
+                symbol_id,
+                interval,
+                chunk_start,
+                chunk_end,
+                parsed.candles.len()
+            );
+
+            all_candles.extend(parsed.candles.into_iter().map(|c| EquityCandle {
                 time: c.start,
                 open: c.open,
                 high: c.high,
@@ -349,8 +380,42 @@ impl QuestradeClient {
                 close: c.close,
                 volume: c.volume,
                 vwap: c.vwap,
-            })
-            .collect())
+            }));
+
+            chunk_end = chunk_start - Duration::days(1);
+        }
+
+        // ISO 8601 strings sort lexicographically; dedup handles any chunk-boundary overlap.
+        all_candles.sort_by(|a, b| a.time.cmp(&b.time));
+        all_candles.dedup_by(|a, b| a.time == b.time);
+
+        Ok(all_candles)
+    }
+
+    /// Fetch current quotes for one or more symbol IDs.
+    /// Questrade: GET /v1/markets/quotes?ids=1234,5678
+    pub async fn get_quotes(&mut self, symbol_ids: &[i64]) -> AppResult<Vec<QuoteResult>> {
+        if symbol_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let ids_str = symbol_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let url = self.api_url("markets/quotes")?;
+        let resp = self
+            .request(self.http.get(&url).query(&[("ids", ids_str.as_str())]))
+            .await?;
+
+        let parsed: QuotesResponse = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to parse Questrade quotes: {}", e)))?;
+
+        Ok(parsed.quotes)
     }
 }
 

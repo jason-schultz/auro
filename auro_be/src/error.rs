@@ -23,6 +23,13 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error("{broker} API error ({status}): {body}")]
+    BrokerHttp {
+        broker: &'static str,
+        status: u16,
+        body: String,
+    },
 }
 
 impl IntoResponse for AppError {
@@ -56,6 +63,10 @@ impl IntoResponse for AppError {
                 )
             }
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
+            AppError::BrokerHttp { .. } => {
+                tracing::error!("Broker error: {}", self);
+                (StatusCode::BAD_GATEWAY, self.to_string())
+            }
         };
 
         let body = serde_json::json!({ "error": message });

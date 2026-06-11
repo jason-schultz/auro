@@ -94,3 +94,19 @@ pub struct EquityCandle {
     pub volume: f64,
     pub vwap: Option<f64>,
 }
+
+/// Single quote entry from GET /v1/markets/quotes?ids=...
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuoteResult {
+    pub symbol: String,
+    pub symbol_id: i64,
+    pub last_trade_price: Option<f64>,
+    pub bid_price: Option<f64>,
+    pub ask_price: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuotesResponse {
+    pub quotes: Vec<QuoteResult>,
+}
