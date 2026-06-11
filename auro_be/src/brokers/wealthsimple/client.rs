@@ -111,6 +111,23 @@ impl WealthsimpleClient {
 
         Ok(())
     }
+
+    /// Update current_price for a list of (position_id, price) pairs.
+    pub async fn update_position_prices(&self, updates: &[(i32, f64)]) -> AppResult<()> {
+        for (position_id, price) in updates {
+            sqlx::query!(
+                "UPDATE wealthsimple_positions SET current_price = $1, updated_at = NOW() WHERE id = $2",
+                price,
+                position_id,
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("DB error updating position price {}: {}", position_id, e))
+            })?;
+        }
+        Ok(())
+    }
 }
 
 impl BrokerClient for WealthsimpleClient {
