@@ -1,5 +1,6 @@
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use super::models::*;
 use crate::brokers::client::BrokerClient;
@@ -15,10 +16,18 @@ pub struct OandaClient {
     account_id: String,
 }
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
 impl OandaClient {
     pub fn new(base_url: &str, stream_url: &str, api_key: &str, account_id: &str) -> Self {
+        let http_client = Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .expect("failed to build OANDA HTTP client");
+
         Self {
-            http_client: Client::new(),
+            http_client,
             base_url: base_url.trim_end_matches('/').to_string(),
             stream_url: stream_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
@@ -39,6 +48,7 @@ impl OandaClient {
             .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
@@ -77,6 +87,7 @@ impl OandaClient {
             .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
@@ -107,6 +118,7 @@ impl OandaClient {
             .get(&url)
             .bearer_auth(&self.api_key)
             .query(&[("instruments", &instruments_param)])
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
@@ -157,6 +169,7 @@ impl OandaClient {
             .get(&url)
             .bearer_auth(&self.api_key)
             .query(&query)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
@@ -242,6 +255,7 @@ impl OandaClient {
             .post(&url)
             .bearer_auth(&self.api_key)
             .json(&body)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
@@ -265,94 +279,6 @@ impl OandaClient {
         Ok(resp_body)
     }
 
-    // --- Trades ---
-    pub async fn modify_trade_stop_loss(
-        &self,
-        trade_id: &str,
-        sl_price: &str,
-    ) -> AppResult<serde_json::Value> {
-        let url = format!(
-            "{}/v3/accounts/{}/trades/{}/orders",
-            self.base_url, self.account_id, trade_id
-        );
-
-        let body = json!({"stopLoss": {"price": sl_price, "timeInForce": "GTC"}});
-
-        let resp = self
-            .http_client
-            .put(&url)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AppError::Oanda(e.to_string()))?;
-
-        let status = resp.status();
-        let resp_body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::Oanda(format!("Failed to parse modify SL response: {}", e)))?;
-
-        if !status.is_success() {
-            let error_msg = resp_body["errorMessage"]
-                .as_str()
-                .unwrap_or("Unknown error");
-            return Err(AppError::Oanda(format!(
-                "Modify SL failed ({}): {}",
-                status, error_msg
-            )));
-        }
-
-        Ok(resp_body)
-    }
-
-    pub async fn replace_with_trailing_stop(
-        &self,
-        trade_id: &str,
-        distance: &str,
-    ) -> AppResult<serde_json::Value> {
-        let url = format!(
-            "{}/v3/accounts/{}/trades/{}/orders",
-            self.base_url, self.account_id, trade_id
-        );
-
-        // Atomic: cancel SL+TP, create trailing SL, all in one call
-        let body = serde_json::json!({
-            "stopLoss": null,
-            "takeProfit": null,
-            "trailingStopLoss": { "distance": distance, "timeInForce": "GTC" }
-        });
-
-        let response = self
-            .http_client
-            .put(&url)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AppError::Oanda(e.to_string()))?;
-
-        let status = response.status();
-        let resp_body: serde_json::Value = response.json().await.map_err(|e| {
-            AppError::Oanda(format!(
-                "Failed to parse replace with trailing response: {}",
-                e
-            ))
-        })?;
-
-        if !status.is_success() {
-            let error_msg = resp_body["errorMessage"]
-                .as_str()
-                .unwrap_or("Unknown error");
-            return Err(AppError::Oanda(format!(
-                "OANDA replace with trailing failed ({}): {}",
-                status, error_msg
-            )));
-        }
-
-        Ok(resp_body)
-    }
-
     pub async fn get_open_trades(&self) -> AppResult<serde_json::Value> {
         let url = format!(
             "{}/v3/accounts/{}/openTrades",
@@ -363,6 +289,7 @@ impl OandaClient {
             .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
@@ -401,6 +328,7 @@ impl OandaClient {
             .put(&url)
             .bearer_auth(&self.api_key)
             .json(&body)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
@@ -436,6 +364,7 @@ impl OandaClient {
             .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
@@ -465,6 +394,7 @@ impl OandaClient {
             .http_client
             .get(&url)
             .bearer_auth(&self.api_key)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
@@ -495,6 +425,7 @@ impl OandaClient {
             .get(&url)
             .bearer_auth(&self.api_key)
             .query(&[("id", since_id), ("type", "ORDER_FILL")])
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;

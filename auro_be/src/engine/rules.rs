@@ -125,7 +125,7 @@ impl Rules {
 /// `Some(SignalReport)` describing the gate if blocked.
 ///
 /// Used at every `execute_entry` call site in `evaluate_entry`. Mirrors the
-/// existing `position_already_open` rejection pattern — callers short-circuit
+/// existing entry-rejection short-circuit pattern — callers short-circuit
 /// with `return Ok(Some(report))` when this returns `Some`.
 ///
 /// The same helper handles both strategy types because the policy is keyed by

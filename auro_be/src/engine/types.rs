@@ -389,25 +389,13 @@ pub struct LiveStrategy {
 
 #[derive(Clone, Debug)]
 pub enum StopLossState {
-    Initial,       // SL/TP as set on entry
-    Breakeven,     // SL moved to entry price, TP unchanged
     Trailing,      // SL replaced with trailing, TP removed
     NotApplicable, // mean reversion or other non-managed strategy
 }
 
 impl StopLossState {
-    pub fn initial_for_strategy_type(strategy_type: &str) -> Self {
-        match strategy_type {
-            "trend_following" => StopLossState::Initial,
-            "mean_reversion" => StopLossState::NotApplicable,
-            _ => StopLossState::NotApplicable,
-        }
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
-            StopLossState::Initial => "Initial",
-            StopLossState::Breakeven => "Breakeven",
             StopLossState::Trailing => "Trailing",
             StopLossState::NotApplicable => "NotApplicable",
         }
@@ -427,7 +415,6 @@ pub struct OpenPosition {
     pub stop_loss_state: StopLossState,
     pub worst_price: f64,
     pub best_price: f64,
-    pub transition_failed_at: Option<DateTime<Utc>>,
     pub strategy_type: String,
 }
 

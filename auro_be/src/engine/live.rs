@@ -320,16 +320,7 @@ pub fn spawn_live_evaluator(mut rx: broadcast::Receiver<StreamMessage>, state: A
                         };
 
                         for pos in &positions_snapshot {
-                            if let Err(e) =
-                                trade_management::evaluate_trade_management(&state, pos, mid).await
-                            {
-                                tracing::error!(
-                                    "Trade management error for {} {}: {}",
-                                    pos.instrument,
-                                    pos.trade_id,
-                                    e
-                                );
-                            }
+                            trade_management::update_mae_mfe(&state, pos, mid).await;
                         }
                     }
 

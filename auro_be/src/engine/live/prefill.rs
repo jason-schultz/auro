@@ -6,7 +6,7 @@ use crate::brokers::oanda::client::OandaClient;
 use crate::db::repositories::{live_queries, live_trades as live_trades_repo};
 use crate::engine::rules::Rules;
 use crate::engine::types::{
-    BufferKey, Candle, CandleBuffer, Granularity, OpenPosition, StopLossState, OHLC,
+    BufferKey, Candle, CandleBuffer, Direction, Granularity, OpenPosition, StopLossState, OHLC,
 };
 use crate::state::AppState;
 
@@ -108,6 +108,9 @@ async fn prefill_open_positions(
             continue;
         };
 
+        let (worst_price, best_price) =
+            reconstruct_extremes(row.direction, row.entry_price, row.mae_pct, row.mfe_pct);
+
         open_positions.insert(
             trade_id.to_string(),
             OpenPosition {
@@ -119,14 +122,9 @@ async fn prefill_open_positions(
                 entry_price: row.entry_price,
                 entry_time: row.entry_time,
                 units,
-                stop_loss_state: determine_stop_loss_state(
-                    trade,
-                    row.strategy_type.as_str(),
-                    row.entry_price,
-                ),
-                worst_price: row.entry_price,
-                best_price: row.entry_price,
-                transition_failed_at: None,
+                stop_loss_state: determine_stop_loss_state(trade, trade_id),
+                worst_price,
+                best_price,
                 strategy_type: row.strategy_type,
             },
         );
@@ -303,33 +301,33 @@ pub(crate) async fn unload_instrument_buffers(state: &AppState, instrument: &str
     removed_total
 }
 
-fn determine_stop_loss_state(
-    trade: &serde_json::Value,
-    strategy_type: &str,
-    entry_price: f64,
-) -> StopLossState {
-    match strategy_type {
-        "mean_reversion" => return StopLossState::NotApplicable,
-        "trend_following" => {}
-        _ => return StopLossState::NotApplicable,
-    }
-
-    // Trailing stop present -> already in trailing state
+fn determine_stop_loss_state(trade: &serde_json::Value, trade_id: &str) -> StopLossState {
     if trade.get("trailingStopLossOrder").is_some() {
         return StopLossState::Trailing;
     }
 
-    // Fixed SL present, check if it's at entry price (within precision tolerance)
-    if let Some(sl) = trade.get("stopLossOrder") {
-        if let Some(sl_price) = sl["price"].as_str().and_then(|s| s.parse::<f64>().ok()) {
-            // Use a small tolerance because of price formatting precision
-            if (sl_price - entry_price).abs() / entry_price < 0.0001 {
-                return StopLossState::Breakeven;
-            }
-        }
+    // Fixed SL/TP at OANDA is the normal shape for non-trailing trades.
+    // Only an entirely unprotected trade is worth a warning.
+    if trade.get("stopLossOrder").is_none() {
+        tracing::warn!("open trade {} has no stop loss order", trade_id);
     }
 
-    StopLossState::Initial
+    StopLossState::NotApplicable
+}
+
+fn reconstruct_extremes(
+    direction: Direction,
+    entry_price: f64,
+    mae_pct: Option<f64>,
+    mfe_pct: Option<f64>,
+) -> (f64, f64) {
+    let mae = mae_pct.unwrap_or(0.0).max(0.0);
+    let mfe = mfe_pct.unwrap_or(0.0).max(0.0);
+
+    match direction {
+        Direction::Long => (entry_price * (1.0 - mae), entry_price * (1.0 + mfe)),
+        Direction::Short => (entry_price * (1.0 + mae), entry_price * (1.0 - mfe)),
+    }
 }
 
 #[cfg(test)]
@@ -347,7 +345,7 @@ mod tests {
     use crate::brokers::wealthsimple::client::WealthsimpleClient;
     use crate::config::Config;
     use crate::engine::live::prefill::load_instrument_buffers;
-    use crate::engine::types::{CandleBuffer, Granularity};
+    use crate::engine::types::{CandleBuffer, Direction, Granularity};
     use crate::state::{AppState, LiveState};
     use std::collections::HashMap;
 
@@ -417,6 +415,22 @@ mod tests {
         assert!(buffers
             .keys()
             .all(|(instrument, _)| instrument.as_str() == "USD_JPY"));
+    }
+
+    #[test]
+    fn reconstruct_extremes_long_uses_mae_mfe_magnitudes() {
+        let (worst, best) =
+            super::reconstruct_extremes(Direction::Long, 100.0, Some(0.1), Some(0.2));
+        assert!((worst - 90.0).abs() < 1e-9);
+        assert!((best - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reconstruct_extremes_short_uses_mae_mfe_magnitudes() {
+        let (worst, best) =
+            super::reconstruct_extremes(Direction::Short, 100.0, Some(0.1), Some(0.2));
+        assert!((worst - 110.0).abs() < 1e-9);
+        assert!((best - 80.0).abs() < 1e-9);
     }
 
     #[tokio::test]
