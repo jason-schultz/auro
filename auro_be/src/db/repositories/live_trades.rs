@@ -105,6 +105,8 @@ pub(crate) struct PrefillOpenPositionRow {
     pub oanda_trade_id: String,
     pub strategy_type: String,
     pub granularity: Granularity,
+    pub mae_pct: Option<f64>,
+    pub mfe_pct: Option<f64>,
 }
 
 pub(crate) async fn fetch_live_aggregates(
@@ -233,7 +235,7 @@ pub(crate) async fn find_open_trade_with_strategy_by_oanda_id(
 ) -> Result<Option<PrefillOpenPositionRow>, sqlx::Error> {
     sqlx::query_as(
         "SELECT lt.live_strategy_id, lt.instrument, lt.direction, lt.entry_price, lt.entry_time, \
-        lt.oanda_trade_id, ls.strategy_type, ls.granularity \
+        lt.oanda_trade_id, ls.strategy_type, ls.granularity, lt.mae_pct, lt.mfe_pct \
         FROM live_trades lt \
         JOIN live_strategies ls ON ls.id = lt.live_strategy_id \
         WHERE lt.oanda_trade_id = $1 AND lt.status = 'open'",

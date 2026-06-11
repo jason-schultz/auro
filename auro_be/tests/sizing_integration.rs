@@ -77,6 +77,7 @@ fn risk_pct_dynamic_computes_expected_units_range() {
         risk_pct: 0.01,
         entry_price: 50.0,
         sl_price: 45.0,
+        quote_to_home_rate: 1.0,
         instrument: "XAU_USD",
         instrument_min_units: 1,
         instrument_max_units: None,
@@ -102,6 +103,7 @@ fn below_minimum_units_skips() {
         risk_pct: 0.01,
         entry_price: 1.0,
         sl_price: 0.9,
+        quote_to_home_rate: 1.0,
         instrument: "EUR_USD",
         instrument_min_units: 20_000,
         instrument_max_units: None,
@@ -124,7 +126,7 @@ async fn concurrent_exposure_limit_skips() {
         let mut positions = state.live.open_positions.write().await;
         for idx in 0..6 {
             let trade_id = format!("t{idx}");
-            let instrument = format!("INST_{idx}");
+            let instrument = "EUR_USD".to_string();
             instruments.push(instrument.clone());
             positions.insert(
                 trade_id.clone(),
@@ -137,10 +139,9 @@ async fn concurrent_exposure_limit_skips() {
                     entry_price: 1.0,
                     entry_time: Utc::now(),
                     units: "8000".to_string(),
-                    stop_loss_state: StopLossState::Initial,
+                    stop_loss_state: StopLossState::NotApplicable,
                     worst_price: 1.0,
                     best_price: 1.0,
-                    transition_failed_at: None,
                     strategy_type: "mean_reversion".to_string(),
                 },
             );
@@ -162,6 +163,6 @@ async fn concurrent_exposure_limit_skips() {
         }
     }
 
-    let result = check_concurrent_exposure(&state, 3_000.0, 100_000.0).await;
+    let result = check_concurrent_exposure(&state, 3_000.0, 100_000.0, "USD").await;
     assert_eq!(result, Err(SkipReason::ExceedsConcurrentExposure));
 }
