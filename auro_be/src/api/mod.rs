@@ -127,6 +127,10 @@ pub fn router() -> Router<AppState> {
             "/api/brokers/wealthsimple",
             put(wealthsimple::save_accounts),
         )
+        .route(
+            "/api/brokers/wealthsimple/refresh-prices",
+            post(wealthsimple::refresh_prices),
+        )
         // Questrade
         .route("/api/questrade/status", get(questrade::status))
         .route("/api/questrade/candles", get(questrade::get_candles))
