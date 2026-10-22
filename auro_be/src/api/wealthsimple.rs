@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use axum::extract::State;
@@ -43,10 +44,10 @@ pub async fn refresh_prices(State(state): State<AppState>) -> AppResult<Json<Val
     let mut symbol_to_id: HashMap<String, i64> = HashMap::new();
     for pos in &positions {
         let sym = pos.symbol.to_uppercase();
-        if !symbol_to_id.contains_key(&sym) {
-            match client.search_symbol(&sym).await {
+        if let Entry::Vacant(slot) = symbol_to_id.entry(sym) {
+            match client.search_symbol(slot.key()).await {
                 Ok(id) => {
-                    symbol_to_id.insert(sym, id);
+                    slot.insert(id);
                 }
                 Err(e) => {
                     tracing::warn!("Could not resolve symbol {}: {}", pos.symbol, e);

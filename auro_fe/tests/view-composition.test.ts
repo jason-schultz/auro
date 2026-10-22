@@ -45,10 +45,11 @@ describe("view composition contracts", () => {
         expect(journal).toContain("<DataTableScaffold");
     });
 
-    it("keeps placeholder views aligned with shared shell components", () => {
+    it("keeps StrategyEditor composed from editor components", () => {
         const strategyEditor = readViewTemplate("StrategyEditor.vue");
 
-        expect(strategyEditor).toContain("<ViewHeader");
-        expect(strategyEditor).toContain("<DataCard");
+        expect(strategyEditor).toContain("<EditorCandleChart");
+        expect(strategyEditor).toContain("<PortRefNode");
+        expect(strategyEditor).toContain("<BadgePill");
     });
 });

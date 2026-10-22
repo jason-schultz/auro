@@ -49,6 +49,7 @@ async function mountPipelineTable() {
             childRank: vi.fn(() => 1),
             load: vi.fn(async () => undefined),
             toggleSort: vi.fn(),
+            variantLabel: vi.fn(() => "v1"),
             stageLabel: vi.fn(() => "Backtest"),
             sharpeStat: vi.fn(() => 1.1),
             tradesStat: vi.fn(() => 42),
@@ -138,6 +139,7 @@ async function mountStrategiesTable() {
                 { key: "win_rate", label: "BT Win%", sortable: true },
                 { key: "sharpe_ratio", label: "IS Sharpe", sortable: true },
                 { key: "oos_sharpe", label: "OOS Sharpe", sortable: true },
+                { key: "kfold", label: "K-Fold", sortable: true },
                 { key: "max_drawdown", label: "DD", sortable: true },
                 { key: "num_trades", label: "BT #", sortable: true },
                 { key: "live_num_trades", label: "Live #", sortable: true },
@@ -176,8 +178,8 @@ describe("datatable structure contracts", () => {
         expect(headers.length).toBe(cells.length);
         expect(headers[0].classes()).toContain("sticky");
         expect(cells[0].classes()).toContain("sticky");
-        expect(headers[6].classes()).toContain("text-right");
-        expect(cells[6].classes()).toContain("tabular-nums");
+        expect(headers[7].classes()).toContain("text-right");
+        expect(cells[7].classes()).toContain("tabular-nums");
     });
 
     it("keeps Strategies header/data counts aligned and sticky first column", async () => {
