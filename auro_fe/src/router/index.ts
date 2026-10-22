@@ -13,6 +13,11 @@ const routes = [
     component: () => import("@/views/Strategies.vue"),
   },
   {
+    path: "/strategies/new",
+    name: "strategy-editor",
+    component: () => import("@/views/StrategyEditor.vue"),
+  },
+  {
     path: "/journal",
     name: "journal",
     component: () => import("@/views/Journal.vue"),

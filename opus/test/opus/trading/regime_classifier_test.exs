@@ -165,6 +165,15 @@ defmodule Opus.Trading.RegimeClassifierTest do
       assert reason =~ "no regime data"
     end
 
+    test "composite is self-gated regardless of regime" do
+      for regime <- [:trending, :choppy, :uncertain, :unknown] do
+        assert {true, reason} =
+                 RegimeClassifier.policy_for_inputs("composite", regime, [{"D", adx(18)}])
+
+        assert reason =~ "composite self-gated"
+      end
+    end
+
     test "unknown strategy_type falls through to disabled" do
       assert {false, reason} =
                RegimeClassifier.policy("scalp", :trending, adx(35), adx(32), adx(30))

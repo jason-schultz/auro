@@ -27,15 +27,6 @@
             </div>
 
             <div class="flex items-center gap-3">
-                <span class="flex items-center gap-1.5">
-                    <span
-                        class="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"
-                    />
-                    <span class="text-[10px] text-muted-foreground"
-                        >Connected</span
-                    >
-                </span>
-                <span class="text-[10px] text-[#3a3a4a]">·</span>
                 <span class="text-[10px] text-muted-foreground font-mono"
                     >Paper Trading</span
                 >

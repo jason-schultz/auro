@@ -1,5 +1,7 @@
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
+import { getApiErrorMessage, opusApi } from "../services/api";
+
 export type RegimeState = "trending" | "choppy" | "uncertain" | "unknown";
 
 export interface RegimeHeatmapCell {
@@ -36,17 +38,11 @@ export function useRegimeHeatmap() {
         error.value = null;
 
         try {
-            const response = await fetch("/opus/regimes/heatmap");
-            const body = (await response.json()) as RegimeHeatmapResponse | { error: string };
-
-            if (!response.ok || !("rows" in body)) {
-                throw new Error("error" in body ? body.error : "Failed to load regime heatmap");
-            }
-
+            const body = await opusApi.get<RegimeHeatmapResponse>("/regimes/heatmap");
             rows.value = body.rows;
             granularities.value = body.granularities;
         } catch (e) {
-            error.value = e instanceof Error ? e.message : "Failed to load regime heatmap";
+            error.value = getApiErrorMessage(e, "Failed to load regime heatmap");
             rows.value = [];
             granularities.value = [];
         } finally {

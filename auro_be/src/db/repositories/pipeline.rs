@@ -126,3 +126,23 @@ pub(crate) async fn finalize_evaluation(
 
     Ok(())
 }
+
+/// How many configs with this instrument and strategy type have had a holdout
+/// evaluation, including any in progress. Every look at the sealed window by
+/// a sibling candidate weakens what a pass there proves.
+pub(crate) async fn count_holdout_looks(
+    pool: &PgPool,
+    instrument: &str,
+    strategy_type: &str,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT \
+         FROM strategy_evaluations e \
+         JOIN strategy_configs c ON c.id = e.strategy_config_id \
+         WHERE e.stage = 'holdout' AND c.instrument = $1 AND c.strategy_type = $2",
+    )
+    .bind(instrument)
+    .bind(strategy_type)
+    .fetch_one(pool)
+    .await
+}

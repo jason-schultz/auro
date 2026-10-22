@@ -1,5 +1,7 @@
 import { ref } from "vue";
 
+import { getApiErrorMessage, opusApi } from "../services/api";
+
 interface BreakdownEntry {
     pnl_cad: number;
     trades: number;
@@ -34,16 +36,9 @@ export function useJournalKpis() {
         error.value = null;
 
         try {
-            const response = await fetch("/opus/journal/kpis");
-            const body = (await response.json()) as JournalKpis | { error: string };
-
-            if (!response.ok || !("trade_count" in body)) {
-                throw new Error("error" in body ? body.error : "Failed to load KPIs");
-            }
-
-            kpis.value = body;
+            kpis.value = await opusApi.get<JournalKpis>("/journal/kpis");
         } catch (e) {
-            error.value = e instanceof Error ? e.message : "Failed to load KPIs";
+            error.value = getApiErrorMessage(e, "Failed to load KPIs");
             kpis.value = null;
         } finally {
             loading.value = false;

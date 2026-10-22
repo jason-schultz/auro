@@ -83,16 +83,6 @@ pub(crate) struct TradeDetailRow {
     pub parameters: Option<Value>,
     pub granularity: Option<String>,
     pub enabled: Option<bool>,
-    pub max_position_size: Option<String>,
-    pub backtest_run_id: Option<Uuid>,
-    pub bt_strategy_name: Option<String>,
-    pub bt_total_return: Option<f64>,
-    pub bt_win_rate: Option<f64>,
-    pub bt_sharpe_ratio: Option<f64>,
-    pub bt_max_drawdown: Option<f64>,
-    pub bt_num_trades: Option<i32>,
-    pub bt_avg_win: Option<f64>,
-    pub bt_avg_loss: Option<f64>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -175,22 +165,23 @@ pub(crate) async fn list_live_trades(
         LEFT JOIN live_strategies ls ON ls.id = lt.live_strategy_id
     "#;
 
+    // `select_cols` is a literal; `status` and `limit` are bound parameters.
     match status {
         Some(status) if status != "all" => {
-            sqlx::query_as::<_, LiveTradeListRow>(&format!(
+            sqlx::query_as::<_, LiveTradeListRow>(sqlx::AssertSqlSafe(format!(
                 "{} WHERE lt.status = $1 ORDER BY lt.entry_time DESC LIMIT $2",
                 select_cols
-            ))
+            )))
             .bind(status)
             .bind(limit)
             .fetch_all(pool)
             .await
         }
         _ => {
-            sqlx::query_as::<_, LiveTradeListRow>(&format!(
+            sqlx::query_as::<_, LiveTradeListRow>(sqlx::AssertSqlSafe(format!(
                 "{} ORDER BY lt.entry_time DESC LIMIT $1",
                 select_cols
-            ))
+            )))
             .bind(limit)
             .fetch_all(pool)
             .await
@@ -208,19 +199,9 @@ pub(crate) async fn find_live_trade_detail(
                lt.entry_price, lt.exit_price, lt.entry_time, lt.exit_time,
              lt.pnl_percent, lt.entry_reason, lt.exit_reason, lt.status,
              lt.indicators_at_entry, lt.regime_at_entry, lt.stop_loss_state_at_close,
-               ls.strategy_type, ls.parameters, ls.granularity, ls.enabled,
-               ls.max_position_size, ls.backtest_run_id,
-               br.strategy_name AS bt_strategy_name,
-               br.total_return AS bt_total_return,
-               br.win_rate AS bt_win_rate,
-               br.sharpe_ratio AS bt_sharpe_ratio,
-               br.max_drawdown AS bt_max_drawdown,
-               br.num_trades AS bt_num_trades,
-               br.avg_win AS bt_avg_win,
-               br.avg_loss AS bt_avg_loss
+               ls.strategy_type, ls.parameters, ls.granularity, ls.enabled
         FROM live_trades lt
         LEFT JOIN live_strategies ls ON ls.id = lt.live_strategy_id
-        LEFT JOIN backtest_runs br ON br.id = ls.backtest_run_id
         WHERE lt.id = $1
         "#,
     )
@@ -243,4 +224,123 @@ pub(crate) async fn find_open_trade_with_strategy_by_oanda_id(
     .bind(oanda_trade_id)
     .fetch_optional(pool)
     .await
+}
+
+pub(crate) struct NewLiveTrade<'a> {
+    pub live_strategy_id: Uuid,
+    pub oanda_trade_id: &'a str,
+    pub instrument: &'a str,
+    pub direction: Direction,
+    pub units: &'a str,
+    pub entry_price: f64,
+    pub stop_loss_price: f64,
+    pub entry_reason: &'a str,
+    pub indicators_at_entry: &'a Value,
+    pub regime_at_entry: &'a str,
+    pub sizing_metadata: &'a Value,
+    /// Mid close of the decision bar.
+    pub signal_price: f64,
+    /// The fill the backtest would have assumed for that bar, and its spread.
+    pub expected_entry_price: Option<f64>,
+    pub entry_spread: Option<f64>,
+}
+
+pub(crate) async fn insert_open_trade(
+    pool: &PgPool,
+    trade: &NewLiveTrade<'_>,
+) -> Result<(), sqlx::Error> {
+    // The row id and entry time are set here, not left to column defaults:
+    // the Ecto migration that owns this table defines neither.
+    sqlx::query(
+        r#"
+        INSERT INTO live_trades
+            (id, entry_time, live_strategy_id, oanda_trade_id, instrument, direction, units,
+             entry_price, stop_loss_price, entry_reason,
+             indicators_at_entry, regime_at_entry, sizing_metadata,
+             signal_price, expected_entry_price, entry_spread, status)
+        VALUES ($15, $16, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'open')
+        "#,
+    )
+    .bind(trade.live_strategy_id)
+    .bind(trade.oanda_trade_id)
+    .bind(trade.instrument)
+    .bind(trade.direction)
+    .bind(trade.units)
+    .bind(trade.entry_price)
+    .bind(trade.stop_loss_price)
+    .bind(trade.entry_reason)
+    .bind(trade.indicators_at_entry)
+    .bind(trade.regime_at_entry)
+    .bind(trade.sizing_metadata)
+    .bind(trade.signal_price)
+    .bind(trade.expected_entry_price)
+    .bind(trade.entry_spread)
+    .bind(Uuid::new_v4())
+    .bind(Utc::now())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub(crate) struct ClosedLiveTrade<'a> {
+    pub oanda_trade_id: &'a str,
+    /// `None` when OANDA reported neither a fill price nor a closed trade
+    /// price: the row records that the fill is unknown rather than a guess.
+    pub exit_price: Option<f64>,
+    pub pnl_percent: Option<f64>,
+    pub realized_pl: Option<f64>,
+    pub exit_reason: &'a str,
+    pub stop_loss_state_at_close: &'a str,
+    /// The backtest's assumed exit fill for the decision bar, and its spread.
+    pub expected_exit_price: Option<f64>,
+    pub exit_spread: Option<f64>,
+}
+
+pub(crate) async fn mark_closed(
+    pool: &PgPool,
+    trade: &ClosedLiveTrade<'_>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE live_trades
+        SET exit_price = $1, exit_time = NOW(), pnl_percent = $2,
+            pnl = $3, exit_reason = $4, status = 'closed',
+            stop_loss_state_at_close = $5, expected_exit_price = $6, exit_spread = $7,
+            updated_at = NOW()
+        WHERE oanda_trade_id = $8
+        "#,
+    )
+    .bind(trade.exit_price)
+    .bind(trade.pnl_percent)
+    .bind(trade.realized_pl)
+    .bind(trade.exit_reason)
+    .bind(trade.stop_loss_state_at_close)
+    .bind(trade.expected_exit_price)
+    .bind(trade.exit_spread)
+    .bind(trade.oanda_trade_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Ratchet an open trade's adverse/favourable excursions; never lowers them.
+pub(crate) async fn record_excursions(
+    pool: &PgPool,
+    oanda_trade_id: &str,
+    mae_pct: f64,
+    mfe_pct: f64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"UPDATE live_trades
+        SET mae_pct = GREATEST(COALESCE(mae_pct, 0), $1),
+            mfe_pct = GREATEST(COALESCE(mfe_pct, 0), $2),
+            updated_at = NOW()
+        WHERE oanda_trade_id = $3 AND status = 'open'"#,
+    )
+    .bind(mae_pct)
+    .bind(mfe_pct)
+    .bind(oanda_trade_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

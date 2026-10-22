@@ -1,0 +1,113 @@
+/* Tailwind v4 + daisyUI. Themes follow the "calm and readable" accounts-page
+   directions: dark = direction C (allocation-first), light = direction A (ledger). */
+
+@import "tailwindcss" source(none);
+@import "phoenix-colocated/opus/colocated.css";
+@source "../css";
+@source "../js";
+@source "../../lib/opus_web";
+/* Required for Tailwind to automatically pick up changes in colocated CSS files in dev */
+@source "../../_build/dev/phoenix-colocated/opus/*/";
+
+/* A Tailwind plugin that makes "hero-#{ICON}" classes available.
+   The heroicons installation itself is managed by your mix.exs */
+@plugin "../vendor/heroicons";
+
+/* daisyUI Tailwind Plugin. */
+@plugin "daisyui/packages/bundle/daisyui" {
+  themes: false;
+}
+
+@plugin "daisyui/packages/bundle/daisyui-theme" {
+  name: "dark";
+  default: true;
+  prefersdark: true;
+  color-scheme: "dark";
+  --color-base-100: #15181d;
+  --color-base-200: #1b1f25;
+  --color-base-300: #2a2f37;
+  --color-base-content: #e6e9ee;
+  --color-primary: #7fc4ac;
+  --color-primary-content: #15181d;
+  --color-secondary: #5b9edb;
+  --color-secondary-content: #15181d;
+  --color-accent: #d9a857;
+  --color-accent-content: #15181d;
+  --color-neutral: #22262d;
+  --color-neutral-content: #9aa3ae;
+  --color-info: #5b9edb;
+  --color-info-content: #15181d;
+  --color-success: #7fc4ac;
+  --color-success-content: #15181d;
+  --color-warning: #d9a857;
+  --color-warning-content: #15181d;
+  --color-error: #e39a96;
+  --color-error-content: #15181d;
+  --radius-selector: 0.375rem;
+  --radius-field: 0.375rem;
+  --radius-box: 0.625rem;
+  --size-selector: 0.21875rem;
+  --size-field: 0.21875rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+@plugin "daisyui/packages/bundle/daisyui-theme" {
+  name: "light";
+  default: false;
+  prefersdark: false;
+  color-scheme: "light";
+  --color-base-100: #f4f5f7;
+  --color-base-200: #ffffff;
+  --color-base-300: #e1e4e8;
+  --color-base-content: #1c1f24;
+  --color-primary: #2f6f5e;
+  --color-primary-content: #ffffff;
+  --color-secondary: #3b6fa8;
+  --color-secondary-content: #ffffff;
+  --color-accent: #b07a1f;
+  --color-accent-content: #ffffff;
+  --color-neutral: #eceef1;
+  --color-neutral-content: #5f6670;
+  --color-info: #3b6fa8;
+  --color-info-content: #ffffff;
+  --color-success: #2f6f5e;
+  --color-success-content: #ffffff;
+  --color-warning: #b07a1f;
+  --color-warning-content: #ffffff;
+  --color-error: #b0413e;
+  --color-error-content: #ffffff;
+  --radius-selector: 0.375rem;
+  --radius-field: 0.375rem;
+  --radius-box: 0.625rem;
+  --size-selector: 0.21875rem;
+  --size-field: 0.21875rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+@theme {
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Add variants based on LiveView classes */
+@custom-variant phx-click-loading (.phx-click-loading&, .phx-click-loading &);
+@custom-variant phx-submit-loading (.phx-submit-loading&, .phx-submit-loading &);
+@custom-variant phx-change-loading (.phx-change-loading&, .phx-change-loading &);
+
+/* Use the data attribute for dark mode  */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* Make LiveView wrapper divs transparent for layout */
+[data-phx-session], [data-phx-teleported-src] { display: contents }
+
+/* Muted text used throughout the calm layouts (direction A/C "#9AA3AE" / "#5F6670"). */
+@utility text-muted {
+  color: var(--color-neutral-content);
+}
+
+body {
+  font-variant-numeric: tabular-nums;
+}

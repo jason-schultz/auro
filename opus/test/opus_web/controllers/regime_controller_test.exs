@@ -23,7 +23,6 @@ defmodule OpusWeb.RegimeControllerTest do
         granularity: "H1",
         parameters: %{},
         enabled: true,
-        max_position_size: "1000",
         created_at: now,
         updated_at: now
       },
@@ -34,7 +33,6 @@ defmodule OpusWeb.RegimeControllerTest do
         granularity: "H1",
         parameters: %{},
         enabled: false,
-        max_position_size: "1000",
         created_at: now,
         updated_at: now
       }
@@ -64,7 +62,7 @@ defmodule OpusWeb.RegimeControllerTest do
   end
 
   test "returns heatmap rows for enabled instruments only", %{conn: conn} do
-    conn = get(conn, "/regimes/heatmap")
+    conn = get(conn, "/api/regimes/heatmap")
 
     assert %{
              "count" => 1,

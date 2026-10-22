@@ -3,6 +3,7 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::db::repositories::candles as candles_repo;
 use crate::engine::indicators;
 use crate::engine::types::{BollingerBands, Granularity};
 use crate::error::{AppError, AppResult};
@@ -20,6 +21,8 @@ pub struct IndicatorParams {
     pub atr_period: usize,
     #[serde(default = "default_ma_period")]
     pub ma_period: usize,
+    #[serde(default = "default_roc_period")]
+    pub roc_period: usize,
 }
 
 fn default_adx_period() -> usize {
@@ -37,6 +40,9 @@ fn default_atr_period() -> usize {
 fn default_ma_period() -> usize {
     20
 }
+fn default_roc_period() -> usize {
+    5
+}
 
 #[derive(Serialize)]
 pub struct IndicatorResponse {
@@ -45,7 +51,6 @@ pub struct IndicatorResponse {
     pub buffer_size: usize,
     pub last_close: Option<f64>,
     pub last_close_time: Option<DateTime<Utc>>,
-    pub current_mid: f64,
     pub indicators: IndicatorScalars,
 }
 
@@ -55,6 +60,8 @@ pub struct IndicatorScalars {
     pub atr_pct: Option<f64>,
     pub ma_deviation_pct: Option<f64>,
     pub bollinger: Option<BollingerBands>,
+    /// Percent change over `roc_period` bars — Opus's risk-mood input.
+    pub roc_pct: Option<f64>,
 }
 
 pub async fn get_indicators(
@@ -66,19 +73,33 @@ pub async fn get_indicators(
         .parse()
         .map_err(|e| AppError::BadRequest(format!("invalid granularity: {}", e)))?;
 
-    let buffer = {
+    let buffered = {
         let buffers = state.live.buffers.read().await;
-        buffers.get(&(instrument.clone(), granularity)).cloned()
+        buffers
+            .get(&(instrument.clone(), granularity))
+            .map(|b| b.candles.clone())
     };
 
-    let buffer = buffer.ok_or_else(|| {
-        AppError::NotFound(format!(
-            "No buffer for {} {} \u{2014} ensure a strategy is enabled and prefilled",
+    // Instruments outside the strategy universe have no in-memory buffer but
+    // are still kept candle-current by the feed, so read the stored history.
+    let candles = match buffered {
+        Some(candles) => candles,
+        None => candles_repo::load_recent_candles(
+            &state.db,
+            &instrument,
+            granularity,
+            granularity.buffer_capacity() as i64,
+        )
+        .await
+        .map_err(AppError::Database)?,
+    };
+    if candles.is_empty() {
+        return Err(AppError::NotFound(format!(
+            "No candles for {} {}",
             instrument, granularity
-        ))
-    })?;
-
-    let candles = &buffer.candles;
+        )));
+    }
+    let candles = &candles;
     let last_candle = candles.last();
 
     let scalars = IndicatorScalars {
@@ -86,6 +107,7 @@ pub async fn get_indicators(
         atr_pct: indicators::atr_pct(candles, params.atr_period),
         ma_deviation_pct: indicators::ma_deviation_pct(candles, params.ma_period),
         bollinger: indicators::bollinger(candles, params.bollinger_period, params.bollinger_std),
+        roc_pct: indicators::rate_of_change(candles, params.roc_period),
     };
 
     Ok(Json(IndicatorResponse {
@@ -94,7 +116,6 @@ pub async fn get_indicators(
         buffer_size: candles.len(),
         last_close: last_candle.map(|c| c.mid.close),
         last_close_time: last_candle.map(|c| c.time),
-        current_mid: buffer.current_mid,
         indicators: scalars,
     }))
 }

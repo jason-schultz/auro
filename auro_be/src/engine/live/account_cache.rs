@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 
+use crate::db::repositories::account_snapshots;
 use crate::state::AppState;
 
 #[derive(Debug, Clone)]
@@ -79,20 +80,13 @@ pub(crate) async fn refresh_once(state: &AppState) {
     drop(guard);
 
     // TODO(retention): add rollup/retention policy for account_snapshots growth.
-    if let Err(e) = sqlx::query(
-        r#"INSERT INTO account_snapshots
-            (timestamp, nav, balance, unrealized_pl, margin_used, margin_available, currency, open_position_count)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+    if let Err(e) = account_snapshots::insert_account_snapshot(
+        &state.db,
+        &snapshot,
+        balance,
+        unrealized_pl,
+        open_position_count,
     )
-    .bind(snapshot.last_updated)
-    .bind(snapshot.nav)
-    .bind(balance)
-    .bind(unrealized_pl)
-    .bind(snapshot.margin_used)
-    .bind(snapshot.margin_available)
-    .bind(&snapshot.currency)
-    .bind(open_position_count)
-    .execute(&state.db)
     .await
     {
         tracing::warn!("[SIZING] failed to persist account snapshot: {}", e);

@@ -12,6 +12,9 @@ pub struct Config {
     /// Initial Questrade refresh token. Only needed on first run to seed the DB.
     /// After that the DB row rotates automatically and this env var is ignored.
     pub questrade_refresh_token: Option<String>,
+    /// Massive (Polygon) market data. Absent key = US stock bars disabled.
+    pub massive_api_key: Option<String>,
+    pub massive_base_url: String,
 }
 
 impl Config {
@@ -24,6 +27,9 @@ impl Config {
             oanda_stream_url: env::var("OANDA_STREAM_URL")?,
             host: env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
             questrade_refresh_token: env::var("QUESTRADE_REFRESH_TOKEN").ok(),
+            massive_api_key: env::var("MASSIVE_API_KEY").ok().filter(|k| !k.is_empty()),
+            massive_base_url: env::var("MASSIVE_BASE_URL")
+                .unwrap_or_else(|_| "https://api.massive.com".to_string()),
             port: env::var("PORT")
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()

@@ -16,27 +16,16 @@
 //! to composite-layer enhancements per
 //! [[feedback-textbook-baselines-then-composites]].
 //!
-//! Exposes `compute_ports` for the new composite strategy shape — see
+//! Implements `Signaler` for the composite strategy shape — see
 //! [[decision-canonical-strategy-shape]].
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::indicators;
+use crate::engine::indicators::{self, MaType};
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum MaType {
-    Sma,
-    Ema,
-}
-
-fn default_ma_type() -> MaType {
-    MaType::Sma
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TrendFollowingParams {
@@ -45,60 +34,17 @@ pub struct TrendFollowingParams {
     /// Slow moving-average period. Default 200 (Britannica golden cross).
     pub slow_period: usize,
     /// Moving-average type. Defaults to SMA for backward compatibility.
-    #[serde(default = "default_ma_type")]
+    #[serde(default)]
     pub ma_type: MaType,
 }
 
-/// Compute output ports for the TrendFollowing component at the current bar.
-/// Returns:
-///   - `bullish_cross`: true on the bar where fast SMA crosses above slow SMA
-///   - `bearish_cross`: true on the bar where fast SMA crosses below slow SMA
-///
-/// Returns None if fewer than `slow_period + 1` candles are available.
-pub fn compute_ports(
-    candles: &[Candle],
-    params: &TrendFollowingParams,
-) -> Option<HashMap<String, bool>> {
-    if params.fast_period == 0
-        || params.slow_period == 0
-        || params.fast_period >= params.slow_period
-    {
-        return None;
-    }
-    if candles.len() < params.slow_period + 1 {
-        return None;
-    }
-
-    let n = candles.len();
-    let fast = ma_value(candles, n, params.fast_period, params.ma_type);
-    let slow = ma_value(candles, n, params.slow_period, params.ma_type);
-    let prev_fast = ma_value(candles, n - 1, params.fast_period, params.ma_type);
-    let prev_slow = ma_value(candles, n - 1, params.slow_period, params.ma_type);
-
-    // Cross detection convention (freeze): inclusive on the prior bar
-    // (`<=`/`>=`), strict on the current bar (`>`/`<`). Required so a flat
-    // touch on the previous bar followed by separation still counts as a
-    // cross — using strict on both sides would silently miss equal-touch
-    // crossovers.
-    let bullish_cross = prev_fast <= prev_slow && fast > slow;
-    let bearish_cross = prev_fast >= prev_slow && fast < slow;
-
-    let mut ports = HashMap::new();
-    ports.insert("bullish_cross".to_string(), bullish_cross);
-    ports.insert("bearish_cross".to_string(), bearish_cross);
-    Some(ports)
-}
-
-fn sma(candles: &[Candle], end_exclusive: usize, period: usize) -> f64 {
-    let slice = &candles[end_exclusive - period..end_exclusive];
-    slice.iter().map(|c| c.mid.close).sum::<f64>() / period as f64
-}
-
-fn ma_value(candles: &[Candle], end_exclusive: usize, period: usize, ma_type: MaType) -> f64 {
-    match ma_type {
-        MaType::Sma => sma(candles, end_exclusive, period),
-        MaType::Ema => indicators::ema(&candles[..end_exclusive], period)
-            .expect("EMA preconditions satisfied by caller"),
+impl TrendFollowingParams {
+    /// (fast, slow) moving averages over `candles`, ending at its last bar.
+    fn mas(&self, candles: &[Candle]) -> Option<(f64, f64)> {
+        Some((
+            indicators::moving_average(candles, self.fast_period, self.ma_type)?,
+            indicators::moving_average(candles, self.slow_period, self.ma_type)?,
+        ))
     }
 }
 
@@ -107,14 +53,42 @@ impl Signaler for TrendFollowingParams {
         self.slow_period + 1
     }
 
+    /// Ports at the current bar:
+    ///   - `bullish_cross`: true on the bar where the fast MA crosses above the slow MA
+    ///   - `bearish_cross`: true on the bar where the fast MA crosses below the slow MA
+    ///   - `bullish` / `bearish`: posture — fast MA strictly above / below slow MA
+    ///     (lets always-in-market strategies re-enter on the bar after a flip)
+    ///
+    /// Returns None if fewer than `slow_period + 1` candles are available.
     fn compute(&self, candles: &[Candle]) -> Option<HashMap<String, bool>> {
-        compute_ports(candles, self)
+        if self.fast_period == 0 || self.slow_period == 0 || self.fast_period >= self.slow_period {
+            return None;
+        }
+        if candles.len() < self.slow_period + 1 {
+            return None;
+        }
+
+        let (fast, slow) = self.mas(candles)?;
+        let (prev_fast, prev_slow) = self.mas(&candles[..candles.len() - 1])?;
+
+        // Cross detection convention (freeze): inclusive on the prior bar
+        // (`<=`/`>=`), strict on the current bar (`>`/`<`). Required so a flat
+        // touch on the previous bar followed by separation still counts as a
+        // cross — using strict on both sides would silently miss equal-touch
+        // crossovers.
+        let bullish_cross = prev_fast <= prev_slow && fast > slow;
+        let bearish_cross = prev_fast >= prev_slow && fast < slow;
+
+        let mut ports = HashMap::new();
+        ports.insert("bullish_cross".to_string(), bullish_cross);
+        ports.insert("bearish_cross".to_string(), bearish_cross);
+        ports.insert("bullish".to_string(), fast > slow);
+        ports.insert("bearish".to_string(), fast < slow);
+        Some(ports)
     }
 
     fn entry_reason(&self, candles: &[Candle], direction: Direction) -> EntryReason {
-        let n = candles.len();
-        let fast = ma_value(candles, n, self.fast_period, self.ma_type);
-        let slow = ma_value(candles, n, self.slow_period, self.ma_type);
+        let (fast, slow) = self.mas(candles).unwrap_or((0.0, 0.0));
         match direction {
             Direction::Long => EntryReason::CrossAbove {
                 fast_ma: fast,
@@ -127,8 +101,7 @@ impl Signaler for TrendFollowingParams {
         }
     }
 
-    // TF uses fixed-pct stop at the top level; no component-driven stop distance.
-    // (stop_distance falls through to the trait's default `None`.)
+    // TF has no component-driven stop; the strategy's top-level stop applies.
 }
 
 #[cfg(test)]
@@ -171,22 +144,33 @@ mod tests {
     #[test]
     fn returns_none_with_insufficient_candles() {
         let candles: Vec<Candle> = (0..50).map(|i| make_candle(100.0, i)).collect();
-        assert!(compute_ports(&candles, &params(10, 200)).is_none());
+        assert!(params(10, 200).compute(&candles).is_none());
     }
 
     #[test]
     fn returns_none_when_fast_geq_slow() {
         let candles: Vec<Candle> = (0..250).map(|i| make_candle(100.0, i)).collect();
-        assert!(compute_ports(&candles, &params(50, 50)).is_none());
-        assert!(compute_ports(&candles, &params(200, 50)).is_none());
+        assert!(params(50, 50).compute(&candles).is_none());
+        assert!(params(200, 50).compute(&candles).is_none());
     }
 
     #[test]
     fn flat_prices_produce_no_cross() {
         let candles: Vec<Candle> = (0..250).map(|i| make_candle(100.0, i)).collect();
-        let ports = compute_ports(&candles, &params(50, 200)).unwrap();
+        let ports = params(50, 200).compute(&candles).unwrap();
         assert!(!ports["bullish_cross"]);
         assert!(!ports["bearish_cross"]);
+        assert!(!ports["bullish"] && !ports["bearish"]);
+    }
+
+    #[test]
+    fn posture_ports_hold_after_the_cross_bar() {
+        // Steadily rising prices: fast stays above slow on every bar, so the
+        // cross is long past but the bullish posture persists.
+        let candles: Vec<Candle> = (0..60).map(|i| make_candle(100.0 + i as f64, i)).collect();
+        let ports = params(5, 20).compute(&candles).unwrap();
+        assert!(ports["bullish"] && !ports["bearish"]);
+        assert!(!ports["bullish_cross"]);
     }
 
     #[test]
@@ -212,7 +196,7 @@ mod tests {
         let mut found_bullish = false;
         for i in 11..candles.len() {
             let window = &candles[..=i];
-            if let Some(ports) = compute_ports(window, &params(3, 10)) {
+            if let Some(ports) = params(3, 10).compute(window) {
                 if ports["bullish_cross"] {
                     found_bullish = true;
                     break;
@@ -239,7 +223,7 @@ mod tests {
         let mut found_bearish = false;
         for i in 11..candles.len() {
             let window = &candles[..=i];
-            if let Some(ports) = compute_ports(window, &params(3, 10)) {
+            if let Some(ports) = params(3, 10).compute(window) {
                 if ports["bearish_cross"] {
                     found_bearish = true;
                     break;
@@ -266,7 +250,7 @@ mod tests {
             .collect();
         for i in 11..candles.len() {
             let window = &candles[..=i];
-            if let Some(ports) = compute_ports(window, &params(3, 10)) {
+            if let Some(ports) = params(3, 10).compute(window) {
                 assert!(
                     !(ports["bullish_cross"] && ports["bearish_cross"]),
                     "both cross signals fired on the same bar — impossible"
@@ -291,7 +275,7 @@ mod tests {
         let mut found_bullish = false;
         for i in 11..candles.len() {
             let window = &candles[..=i];
-            if let Some(ports) = compute_ports(window, &params_with_type(3, 10, MaType::Ema)) {
+            if let Some(ports) = params_with_type(3, 10, MaType::Ema).compute(window) {
                 if ports["bullish_cross"] {
                     found_bullish = true;
                     break;

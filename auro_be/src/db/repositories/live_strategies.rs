@@ -14,22 +14,8 @@ pub(crate) struct LiveStrategyListRow {
     pub parameters: Value,
     pub enabled: bool,
     pub curator_mode: String,
-    pub max_position_size: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub backtest_run_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct BacktestRunStatsRow {
-    pub id: Uuid,
-    pub total_return: f64,
-    pub win_rate: f64,
-    pub sharpe_ratio: f64,
-    pub max_drawdown: f64,
-    pub num_trades: i32,
-    pub avg_win: f64,
-    pub avg_loss: f64,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -59,7 +45,6 @@ pub(crate) struct LiveStrategyDetailRow {
     pub parameters: Value,
     pub enabled: bool,
     pub curator_mode: String,
-    pub max_position_size: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -70,14 +55,6 @@ pub(crate) struct ToggledStrategyRow {
     pub curator_mode: String,
     pub strategy_type: String,
     pub instrument: String,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct BacktestDeploySourceRow {
-    pub strategy_type: String,
-    pub instrument: String,
-    pub granularity: String,
-    pub parameters: Value,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -92,32 +69,11 @@ pub(crate) async fn list_live_strategies(
     sqlx::query_as(
         r#"
         SELECT id, strategy_type, instrument, granularity, parameters,
-             enabled, curator_mode, max_position_size, created_at, updated_at, backtest_run_id
+             enabled, curator_mode, created_at, updated_at
         FROM live_strategies
         ORDER BY instrument, strategy_type
         "#,
     )
-    .fetch_all(pool)
-    .await
-}
-
-pub(crate) async fn fetch_backtest_run_stats(
-    pool: &PgPool,
-    backtest_ids: &[Uuid],
-) -> Result<Vec<BacktestRunStatsRow>, sqlx::Error> {
-    if backtest_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    sqlx::query_as(
-        r#"
-        SELECT id, total_return, win_rate, sharpe_ratio, max_drawdown,
-               num_trades, avg_win, avg_loss
-        FROM backtest_runs
-        WHERE id = ANY($1)
-        "#,
-    )
-    .bind(backtest_ids)
     .fetch_all(pool)
     .await
 }
@@ -193,12 +149,11 @@ pub(crate) async fn insert_live_strategy(
     instrument: &str,
     granularity: &str,
     parameters: &Value,
-    max_position_size: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size)
-        VALUES ($1, $2, $3, $4, $5, false, $6)
+        INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled)
+        VALUES ($1, $2, $3, $4, $5, false)
         "#,
     )
     .bind(id)
@@ -206,7 +161,6 @@ pub(crate) async fn insert_live_strategy(
     .bind(instrument)
     .bind(granularity)
     .bind(parameters)
-    .bind(max_position_size)
     .execute(pool)
     .await?;
 
@@ -218,7 +172,7 @@ pub(crate) async fn get_live_strategy_by_id(
     id: Uuid,
 ) -> Result<Option<LiveStrategyDetailRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, strategy_type, instrument, granularity, parameters, enabled, curator_mode, max_position_size, created_at, updated_at FROM live_strategies WHERE id = $1",
+        "SELECT id, strategy_type, instrument, granularity, parameters, enabled, curator_mode, created_at, updated_at FROM live_strategies WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -232,21 +186,19 @@ pub(crate) async fn update_live_strategy(
     instrument: &str,
     granularity: &str,
     parameters: &Value,
-    max_position_size: &str,
 ) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         r#"
         UPDATE live_strategies
         SET strategy_type = $1, instrument = $2, granularity = $3, parameters = $4,
-            max_position_size = $5, updated_at = NOW()
-        WHERE id = $6
+            updated_at = NOW()
+        WHERE id = $5
         "#,
     )
     .bind(strategy_type)
     .bind(instrument)
     .bind(granularity)
     .bind(parameters)
-    .bind(max_position_size)
     .bind(id)
     .execute(pool)
     .await?;
@@ -300,48 +252,6 @@ pub(crate) async fn delete_live_strategy_returning_instrument(
     Ok(row.map(|(instrument,)| instrument))
 }
 
-pub(crate) async fn find_backtest_deploy_source(
-    pool: &PgPool,
-    backtest_id: Uuid,
-) -> Result<Option<BacktestDeploySourceRow>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT strategy_type, instrument, granularity, parameters FROM backtest_runs WHERE id = $1",
-    )
-    .bind(backtest_id)
-    .fetch_optional(pool)
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn insert_deployed_live_strategy(
-    pool: &PgPool,
-    id: Uuid,
-    strategy_type: &str,
-    instrument: &str,
-    granularity: &str,
-    parameters: &Value,
-    max_position_size: &str,
-    backtest_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, backtest_run_id)
-        VALUES ($1, $2, $3, $4, $5, false, $6, $7)
-        "#,
-    )
-    .bind(id)
-    .bind(strategy_type)
-    .bind(instrument)
-    .bind(granularity)
-    .bind(parameters)
-    .bind(max_position_size)
-    .bind(backtest_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
 pub(crate) async fn list_trading_config(
     pool: &PgPool,
 ) -> Result<Vec<TradingConfigRow>, sqlx::Error> {
@@ -366,14 +276,16 @@ pub(crate) async fn upsert_trading_config(
     Ok(())
 }
 
-pub(crate) async fn list_enabled_for_instrument_granularity(
+/// Every live strategy on a key, enabled or not. The evaluator needs the
+/// disabled ones too: their open positions must still be managed to exit.
+pub(crate) async fn list_for_instrument_granularity(
     pool: &PgPool,
     instrument: &str,
     granularity: &str,
 ) -> Result<Vec<LiveStrategy>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, risk_pct, max_units \
-         FROM live_strategies WHERE instrument = $1 AND granularity = $2 AND enabled = true",
+        "SELECT id, strategy_type, instrument, granularity, parameters, enabled \
+         FROM live_strategies WHERE instrument = $1 AND granularity = $2",
     )
     .bind(instrument)
     .bind(granularity)

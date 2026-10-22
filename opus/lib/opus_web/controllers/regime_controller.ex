@@ -81,8 +81,7 @@ defmodule OpusWeb.RegimeController do
       Enum.reduce(enabled_targets, {MapSet.new(), MapSet.new(), %{}}, fn {instrument,
                                                                           entry_granularity},
                                                                          {instruments_acc,
-                                                                          frames_acc,
-                                                                          by_inst_acc} ->
+                                                                          frames_acc, by_inst_acc} ->
         required = MapSet.new(Granularity.regime_frames_for_entry(entry_granularity))
 
         {

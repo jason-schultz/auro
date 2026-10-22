@@ -1,5 +1,7 @@
 import { onMounted, onUnmounted, ref } from "vue";
 
+import { api, opusApi } from "../services/api";
+
 interface SparklineCandle {
     timestamp: string;
     open: number;
@@ -35,6 +37,7 @@ interface OpenTradesRiskResponse {
 interface AccountResponse {
     balance: string;
     unrealized_pl: string;
+    currency: string;
 }
 
 interface PricingResponse {
@@ -53,9 +56,11 @@ export interface OpenPositionCardData extends OpenTradeRiskRow {
     notional: number;
     notional_pct_nav: number;
     sparkline: SparklineCandle[];
-    // Mid-market rate for converting USD quote currency to CAD (account currency).
-    // Null if rate fetch failed or USD_CAD isn't available.
-    usd_to_cad_rate: number | null;
+    // Account home currency (from the OANDA account snapshot, e.g. "CAD").
+    home_currency: string;
+    // Mid-market rate for converting USD quote currency to the home currency.
+    // Null if rate fetch failed or the USD_{home} pair isn't available.
+    usd_to_home_rate: number | null;
 }
 
 export function useOpenPositions() {
@@ -67,32 +72,33 @@ export function useOpenPositions() {
 
     async function load() {
         try {
-            const [accountRes, tradesRes, usdCadRes] = await Promise.all([
-                fetch("/api/account"),
-                fetch("/api/open-trades"),
-                fetch("/api/pricing?instruments=USD_CAD"),
+            const [account, tradesBody] = await Promise.all([
+                api.get<AccountResponse>("/account"),
+                api.get<OpenTradesRiskResponse>("/open-trades"),
             ]);
 
-            const account = (await accountRes.json()) as AccountResponse;
-            const tradesBody = (await tradesRes.json()) as OpenTradesRiskResponse;
+            const homeCurrency = account.currency || "CAD";
 
-            // Mid-market USD/CAD rate. Used to convert USD-quoted position risk
-            // to account currency (CAD) in the card display. Null on failure.
-            let usdToCadRate: number | null = null;
-            try {
-                if (usdCadRes.ok) {
-                    const pricingBody = (await usdCadRes.json()) as PricingResponse;
-                    const usdCad = pricingBody.prices?.find((p) => p.instrument === "USD_CAD");
-                    if (usdCad) {
-                        const bid = Number(usdCad.bids?.[0]?.price);
-                        const ask = Number(usdCad.asks?.[0]?.price);
+            // Mid-market USD/{home} rate. Used to convert USD-quoted position risk
+            // to the account's home currency in the card display. Null on failure.
+            let usdToHomeRate: number | null = homeCurrency === "USD" ? 1.0 : null;
+            if (usdToHomeRate == null) {
+                const pair = `USD_${homeCurrency}`;
+                try {
+                    const pricingBody = await api.get<PricingResponse>(
+                        `/pricing?instruments=${pair}`,
+                    );
+                    const quote = pricingBody.prices?.find((p) => p.instrument === pair);
+                    if (quote) {
+                        const bid = Number(quote.bids?.[0]?.price);
+                        const ask = Number(quote.asks?.[0]?.price);
                         if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) {
-                            usdToCadRate = (bid + ask) / 2;
+                            usdToHomeRate = (bid + ask) / 2;
                         }
                     }
+                } catch {
+                    usdToHomeRate = null;
                 }
-            } catch {
-                usdToCadRate = null;
             }
 
             const nav = Number(account.balance || 0) + Number(account.unrealized_pl || 0);
@@ -102,11 +108,10 @@ export function useOpenPositions() {
                 (tradesBody.trades || []).map(async (t) => {
                     let sparkline: SparklineCandle[] = [];
                     try {
-                        const sparklineRes = await fetch(`/opus/positions/${t.id}/sparkline?bars=60`);
-                        if (sparklineRes.ok) {
-                            const sparklineBody = (await sparklineRes.json()) as SparklineResponse;
-                            sparkline = sparklineBody.candles || [];
-                        }
+                        const sparklineBody = await opusApi.get<SparklineResponse>(
+                            `/positions/${t.id}/sparkline?bars=60`,
+                        );
+                        sparkline = sparklineBody.candles || [];
                     } catch {
                         sparkline = [];
                     }
@@ -121,7 +126,8 @@ export function useOpenPositions() {
                         notional,
                         notional_pct_nav: notionalPct,
                         sparkline,
-                        usd_to_cad_rate: usdToCadRate,
+                        home_currency: homeCurrency,
+                        usd_to_home_rate: usdToHomeRate,
                     };
                 }),
             );

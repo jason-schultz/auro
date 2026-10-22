@@ -10,12 +10,14 @@ use crate::db::repositories::{
     live_queries, live_strategies as live_strategies_repo, live_trades as live_trades_repo,
 };
 use crate::engine::live::prefill::{load_instrument_buffers, unload_instrument_buffers};
+use crate::engine::live::sizing::{MAX_NOTIONAL_OVERRIDE_PCT, MAX_RISK_PCT};
+use crate::engine::strategy::{SizingConfig, Strategy};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 /// Aggregate closed-trade stats for the given strategy ids. Returns a map keyed by
 /// strategy id; strategies with no closed trades are absent from the map.
-async fn fetch_live_aggregates(
+async fn live_stats_by_strategy(
     pool: &PgPool,
     strategy_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Value>, sqlx::Error> {
@@ -79,7 +81,42 @@ pub struct CreateLiveStrategy {
     pub instrument: String,
     pub granularity: String,
     pub parameters: Value,
-    pub max_position_size: Option<String>,
+}
+
+/// Reject configs the evaluator could never trade: the parameters must be a
+/// composite strategy for this instrument/granularity, sized within the
+/// risk-per-trade ceiling.
+fn validate_parameters(payload: &CreateLiveStrategy) -> AppResult<()> {
+    let strategy: Strategy = serde_json::from_value(payload.parameters.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid composite parameters: {e}")))?;
+
+    if strategy.instrument != payload.instrument
+        || strategy.granularity.as_str() != payload.granularity
+    {
+        return Err(AppError::BadRequest(format!(
+            "parameters are for {} {}, row is {} {}",
+            strategy.instrument, strategy.granularity, payload.instrument, payload.granularity
+        )));
+    }
+
+    let SizingConfig::RiskPct {
+        pct,
+        max_notional_pct,
+    } = strategy.sizing;
+    if !(pct > 0.0 && pct <= MAX_RISK_PCT) {
+        return Err(AppError::BadRequest(format!(
+            "sizing.RiskPct.pct must be in (0, {MAX_RISK_PCT}], got {pct}"
+        )));
+    }
+    if let Some(cap) = max_notional_pct {
+        if !(cap > 0.0 && cap <= MAX_NOTIONAL_OVERRIDE_PCT) {
+            return Err(AppError::BadRequest(format!(
+                "sizing.RiskPct.max_notional_pct must be in (0, {MAX_NOTIONAL_OVERRIDE_PCT}], got {cap}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -114,7 +151,6 @@ pub async fn debug_buffers(State(state): State<AppState>) -> AppResult<Json<Valu
                 "instrument": instrument,
                 "granularity": granularity,
                 "closes": buffer.closes(),
-                "current_mid": buffer.current_mid,
                 "last_close_time": buffer.candles.last().map(|c| c.time),
             })
         })
@@ -130,50 +166,19 @@ pub async fn list_live_strategies(
         .await
         .map_err(AppError::Database)?;
 
-    // Collect backtest_run_ids that need stats
-    let backtest_ids: Vec<Uuid> = rows.iter().filter_map(|r| r.backtest_run_id).collect();
-
     // Query 2a: batch-fetch live aggregate stats for the strategies we have
     let strategy_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
-    let live_stats_map = fetch_live_aggregates(&state.db, &strategy_ids)
+    let live_stats_map = live_stats_by_strategy(&state.db, &strategy_ids)
         .await
         .map_err(AppError::Database)?;
 
-    // Query 2: batch-fetch grid-search backtest stats for strategies that have a backtest_run_id
-    let mut stats_map: HashMap<Uuid, Value> = HashMap::new();
-    if !backtest_ids.is_empty() {
-        let stat_rows = live_strategies_repo::fetch_backtest_run_stats(&state.db, &backtest_ids)
-            .await
-            .map_err(AppError::Database)?;
-
-        for row in stat_rows {
-            stats_map.insert(
-                row.id,
-                json!({
-                    "total_return": row.total_return,
-                    "win_rate": row.win_rate,
-                    "sharpe_ratio": row.sharpe_ratio,
-                    "max_drawdown": row.max_drawdown,
-                    "num_trades": row.num_trades,
-                    "avg_win": row.avg_win,
-                    "avg_loss": row.avg_loss,
-                }),
-            );
-        }
-    }
-
-    // Query 3: for pipeline strategies (no backtest_run_id), look up stats from
-    // strategy_configs + strategy_evaluations matched by (instrument, strategy_type, parameters).
-    // DISTINCT ON picks the highest-scoring config when multiple pipeline runs share the same params.
-    let pipeline_ids: Vec<Uuid> = rows
-        .iter()
-        .filter(|r| r.backtest_run_id.is_none())
-        .map(|r| r.id)
-        .collect();
+    // Pipeline stats from strategy_configs + strategy_evaluations matched by
+    // (instrument, strategy_type, parameters). DISTINCT ON picks the
+    // highest-scoring config when multiple pipeline runs share the same params.
     let mut pipeline_stats_map: HashMap<Uuid, Value> = HashMap::new();
-    if !pipeline_ids.is_empty() {
+    if !strategy_ids.is_empty() {
         let pipeline_rows =
-            live_strategies_repo::fetch_pipeline_strategy_stats(&state.db, &pipeline_ids)
+            live_strategies_repo::fetch_pipeline_strategy_stats(&state.db, &strategy_ids)
                 .await
                 .map_err(AppError::Database)?;
 
@@ -236,14 +241,6 @@ pub async fn list_live_strategies(
     let mut strategies: Vec<Value> = rows
         .iter()
         .map(|row| {
-            // Strategies with a backtest_run_id came from the grid-search / Backtests page.
-            // Everything else came through the pipeline (Ollama, evo, manual promote).
-            let source = if row.backtest_run_id.is_some() {
-                "grid_search"
-            } else {
-                "pipeline"
-            };
-
             let mut obj = json!({
                 "id": row.id,
                 "strategy_type": row.strategy_type,
@@ -252,18 +249,12 @@ pub async fn list_live_strategies(
                 "parameters": row.parameters,
                 "enabled": row.enabled,
                 "curator_mode": row.curator_mode,
-                "max_position_size": row.max_position_size,
                 "created_at": row.created_at,
                 "updated_at": row.updated_at,
-                "backtest_run_id": row.backtest_run_id,
-                "source": source,
+                "source": "pipeline",
             });
 
-            if let Some(bt_id) = row.backtest_run_id {
-                if let Some(stats) = stats_map.get(&bt_id) {
-                    obj["backtest_stats"] = stats.clone();
-                }
-            } else if let Some(pipeline) = pipeline_stats_map.get(&row.id) {
+            if let Some(pipeline) = pipeline_stats_map.get(&row.id) {
                 // Refine source from the strategy_config if available (e.g. "evolution")
                 obj["source"] = pipeline["source"].clone();
                 obj["pipeline_score"] = pipeline["pipeline_score"].clone();
@@ -301,10 +292,8 @@ pub async fn create_live_strategy(
     State(state): State<AppState>,
     Json(payload): Json<CreateLiveStrategy>,
 ) -> AppResult<Json<Value>> {
+    validate_parameters(&payload)?;
     let id = Uuid::new_v4();
-    let max_size = payload
-        .max_position_size
-        .unwrap_or_else(|| "1000".to_string());
 
     let result = live_strategies_repo::insert_live_strategy(
         &state.db,
@@ -313,21 +302,13 @@ pub async fn create_live_strategy(
         &payload.instrument,
         &payload.granularity,
         &payload.parameters,
-        &max_size,
     )
     .await;
 
     match result {
         Ok(_) => {
             if !instrument_buffers_needed(&state.db, &payload.instrument, Some(id)).await? {
-                load_instrument_buffers(&state, &payload.instrument)
-                    .await
-                    .map_err(|e| {
-                        AppError::Internal(format!(
-                            "Failed to load buffers for {} after creating strategy {}: {}",
-                            payload.instrument, id, e
-                        ))
-                    })?;
+                load_instrument_buffers(&state, &payload.instrument).await?;
             }
 
             tracing::info!(
@@ -345,7 +326,6 @@ pub async fn create_live_strategy(
                 "parameters": payload.parameters,
                 "enabled": false,
                 "curator_mode": "auto",
-                "max_position_size": max_size,
             })))
         }
         Err(e) => {
@@ -404,7 +384,6 @@ pub async fn get_live_strategy(
                 "parameters": row.parameters,
                 "enabled": row.enabled,
                 "curator_mode": row.curator_mode,
-                "max_position_size": row.max_position_size,
                 "created_at": row.created_at,
                 "updated_at": row.updated_at,
                 "trades": trade_list,
@@ -419,9 +398,7 @@ pub async fn update_live_strategy(
     Path(id): Path<Uuid>,
     Json(payload): Json<CreateLiveStrategy>,
 ) -> AppResult<Json<Value>> {
-    let max_size = payload
-        .max_position_size
-        .unwrap_or_else(|| "1000".to_string());
+    validate_parameters(&payload)?;
 
     let rows_affected = live_strategies_repo::update_live_strategy(
         &state.db,
@@ -430,7 +407,6 @@ pub async fn update_live_strategy(
         &payload.instrument,
         &payload.granularity,
         &payload.parameters,
-        &max_size,
     )
     .await
     .map_err(AppError::Database)?;
@@ -447,7 +423,6 @@ pub async fn update_live_strategy(
         "instrument": payload.instrument,
         "granularity": payload.granularity,
         "parameters": payload.parameters,
-        "max_position_size": max_size,
     })))
 }
 
@@ -533,89 +508,6 @@ pub async fn delete_live_strategy(
     tracing::info!("Deleted live strategy {}", id);
 
     Ok(Json(json!({ "deleted": true })))
-}
-
-// Deploy a backtest result as a live strategy
-pub async fn deploy_from_backtest(
-    State(state): State<AppState>,
-    Path(backtest_id): Path<Uuid>,
-    Json(payload): Json<DeployParams>,
-) -> AppResult<Json<Value>> {
-    // Fetch the backtest run
-    let row = live_strategies_repo::find_backtest_deploy_source(&state.db, backtest_id)
-        .await
-        .map_err(AppError::Database)?;
-
-    match row {
-        Some(row) => {
-            let id = Uuid::new_v4();
-            let max_size = payload
-                .max_position_size
-                .unwrap_or_else(|| "1000".to_string());
-
-            let result = live_strategies_repo::insert_deployed_live_strategy(
-                &state.db,
-                id,
-                &row.strategy_type,
-                &row.instrument,
-                &row.granularity,
-                &row.parameters,
-                &max_size,
-                backtest_id,
-            )
-            .await;
-
-            match result {
-                Ok(_) => {
-                    if !instrument_buffers_needed(&state.db, &row.instrument, Some(id)).await? {
-                        load_instrument_buffers(&state, &row.instrument)
-                            .await
-                            .map_err(|e| {
-                                AppError::Internal(format!(
-                                    "Failed to load buffers for {} after deploying strategy {}: {}",
-                                    row.instrument, id, e
-                                ))
-                            })?;
-                    }
-
-                    tracing::info!(
-                        "Deployed backtest {} as live strategy {}: {} on {} (disabled)",
-                        backtest_id,
-                        id,
-                        row.strategy_type,
-                        row.instrument
-                    );
-
-                    Ok(Json(json!({
-                        "id": id,
-                        "strategy_type": row.strategy_type,
-                        "instrument": row.instrument,
-                        "granularity": row.granularity,
-                        "parameters": row.parameters,
-                        "enabled": false,
-                        "curator_mode": "auto",
-                        "max_position_size": max_size,
-                        "deployed_from": backtest_id,
-                    })))
-                }
-                Err(e) => {
-                    if is_unique_violation(&e) {
-                        Err(AppError::Conflict(
-                            "This strategy is already deployed for this instrument with these parameters.".into()
-                        ))
-                    } else {
-                        Err(AppError::Database(e))
-                    }
-                }
-            }
-        }
-        None => Err(AppError::NotFound("Backtest run not found".into())),
-    }
-}
-
-#[derive(Deserialize)]
-pub struct DeployParams {
-    pub max_position_size: Option<String>,
 }
 
 /// Check if a sqlx error is a unique constraint violation (Postgres error code 23505)
@@ -752,28 +644,12 @@ pub async fn get_live_trade_detail(
             "parameters": row.parameters,
             "granularity": row.granularity,
             "enabled": row.enabled,
-            "max_position_size": row.max_position_size,
-            "backtest_run_id": row.backtest_run_id,
-        })
-    });
-
-    let backtest = row.backtest_run_id.map(|bid| {
-        json!({
-            "id": bid,
-            "strategy_name": row.bt_strategy_name,
-            "total_return": row.bt_total_return,
-            "win_rate": row.bt_win_rate,
-            "sharpe_ratio": row.bt_sharpe_ratio,
-            "max_drawdown": row.bt_max_drawdown,
-            "num_trades": row.bt_num_trades,
-            "avg_win": row.bt_avg_win,
-            "avg_loss": row.bt_avg_loss,
         })
     });
 
     let live_aggregate = match row.live_strategy_id {
         Some(sid) => {
-            let mut map = fetch_live_aggregates(&state.db, &[sid])
+            let mut map = live_stats_by_strategy(&state.db, &[sid])
                 .await
                 .map_err(AppError::Database)?;
             map.remove(&sid)
@@ -784,7 +660,6 @@ pub async fn get_live_trade_detail(
     Ok(Json(json!({
         "trade": trade,
         "strategy": strategy,
-        "backtest": backtest,
         "live_aggregate": live_aggregate,
     })))
 }

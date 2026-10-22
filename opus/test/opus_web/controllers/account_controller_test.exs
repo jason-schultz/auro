@@ -32,7 +32,7 @@ defmodule OpusWeb.AccountControllerTest do
   end
 
   test "returns equity curve points", %{conn: conn} do
-    conn = get(conn, "/account/equity-curve", %{resolution: "15m"})
+    conn = get(conn, "/api/account/equity-curve", %{resolution: "15m"})
 
     assert %{"points" => points, "resolution" => "15m"} = json_response(conn, 200)
     assert length(points) >= 1

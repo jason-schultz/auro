@@ -74,7 +74,16 @@ defmodule Opus.Trading.RulesEngine do
   alias Opus.Auro.Client, as: Auro
   alias Opus.Repo
   alias Opus.Support.Polling
-  alias Opus.Trading.{LiveStrategy, RegimeClassifier, RegimeDetector, Rule, Suspension}
+
+  alias Opus.Trading.{
+    LiveStrategy,
+    RegimeClassifier,
+    RegimeDetector,
+    RegimeGate,
+    RiskMood,
+    Rule,
+    Suspension
+  }
 
   import Ecto.Query
 
@@ -100,7 +109,8 @@ defmodule Opus.Trading.RulesEngine do
     strategies = list_live_strategies()
     regimes = RegimeDetector.get_all_regimes()
     open_suspensions = open_suspensions_by_strategy(strategies)
-    decisions = Enum.map(strategies, &decide(&1, regimes, open_suspensions))
+    market = market_state(strategies)
+    decisions = Enum.map(strategies, &decide(&1, regimes, open_suspensions, market))
 
     case persist_and_push(decisions) do
       :ok -> {:ok, decisions}
@@ -173,15 +183,27 @@ defmodule Opus.Trading.RulesEngine do
         id: s.id,
         strategy_type: s.strategy_type,
         instrument: s.instrument,
-        granularity: s.granularity
+        granularity: s.granularity,
+        parameters: s.parameters
       }
     )
     |> Repo.all()
   end
 
+  # Market-wide regime inputs for opt-in gates, fetched once per cycle and only
+  # when some strategy declares a gate (no HTTP call otherwise).
+  defp market_state(strategies) do
+    if Enum.any?(strategies, &regime_gate/1),
+      do: %{risk_mood: RiskMood.current()},
+      else: %{risk_mood: :unknown}
+  end
+
+  defp regime_gate(%{parameters: %{"regime_gate" => gate}}) when map_size(gate) > 0, do: gate
+  defp regime_gate(_strategy), do: nil
+
   # Derive a single decision from a strategy and the current regime map.
   # Returns a map: `%{live_strategy_id, enabled, reason, computed_at}`.
-  defp decide(strategy, regimes, open_suspensions) do
+  defp decide(strategy, regimes, open_suspensions, market) do
     inputs = regime_inputs_for_strategy(strategy, regimes)
     composite = RegimeClassifier.classify_for_inputs(inputs)
     regime_inputs = to_structured_regime_inputs(composite, inputs)
@@ -197,13 +219,15 @@ defmodule Opus.Trading.RulesEngine do
         }
 
       nil ->
-        decide_from_regime(strategy, inputs, composite, regime_inputs)
+        decide_from_regime(strategy, inputs, composite, regime_inputs, market)
     end
   end
 
-  defp decide_from_regime(strategy, inputs, composite, regime_inputs) do
+  defp decide_from_regime(strategy, inputs, composite, regime_inputs, market) do
     {enabled, reason} =
-      RegimeClassifier.policy_for_inputs(strategy.strategy_type, composite, inputs)
+      strategy.strategy_type
+      |> RegimeClassifier.policy_for_inputs(composite, inputs)
+      |> apply_regime_gate(strategy, market)
 
     %{
       live_strategy_id: strategy.id,
@@ -213,6 +237,21 @@ defmodule Opus.Trading.RulesEngine do
       computed_at: DateTime.utc_now()
     }
   end
+
+  # Composites may opt into a market-regime gate; it can only narrow the
+  # policy decision, never re-enable what the policy disabled.
+  defp apply_regime_gate({enabled, reason}, %{strategy_type: "composite"} = strategy, market) do
+    case regime_gate(strategy) do
+      nil ->
+        {enabled, reason}
+
+      gate ->
+        {open, gate_reason} = RegimeGate.evaluate(gate, market)
+        {enabled and open, reason <> "; " <> gate_reason}
+    end
+  end
+
+  defp apply_regime_gate(decision, _strategy, _market), do: decision
 
   defp regime_inputs_for_strategy(strategy, regimes) do
     strategy.granularity

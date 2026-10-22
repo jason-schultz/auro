@@ -1,14 +1,80 @@
 defmodule OpusWeb.PipelineController do
   use OpusWeb, :controller
 
+  alias Opus.Auro.Client, as: Auro
   alias Opus.Pipeline.Coordinator
+  alias Opus.Pipeline.StrategyConfig
+  alias Opus.Repo
 
-  @stage_order %{"monte_carlo" => 3, "walk_forward" => 2, "backtest" => 1}
+  @stage_order %{"holdout" => 4, "monte_carlo" => 3, "walk_forward" => 2, "backtest" => 1}
 
-  def promote(conn, %{"config_id" => config_id} = params) do
-    max_position_size = Map.get(params, "max_position_size", "1000")
+  @doc """
+  Create a manually-authored strategy config (Strategy Editor). Enters the
+  same `strategy_configs` table the pipeline uses, with `source: "manual"`,
+  so validation stages and promotion reuse the existing machinery.
+  """
+  def create_config(conn, params) do
+    attrs = %{
+      source: "manual",
+      instrument: params["instrument"],
+      granularity: params["granularity"],
+      strategy_type: Map.get(params, "strategy_type", "composite"),
+      parameters: params["parameters"]
+    }
 
-    case Coordinator.promote_to_live(config_id, max_position_size) do
+    case %StrategyConfig{} |> StrategyConfig.changeset(attrs) |> Repo.insert() do
+      {:ok, config} ->
+        json(conn, %{config_id: config.id})
+
+      {:error, changeset} ->
+        errors =
+          Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->
+            Regex.replace(~r"%{(\w+)}", msg, fn _, key ->
+              opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
+            end)
+          end)
+
+        conn
+        |> put_status(422)
+        |> json(%{error: "invalid config", details: errors})
+    end
+  end
+
+  @doc """
+  Run one validation stage for a config against the Rust engine. Stages are
+  the pipeline's own: backtest, walk_forward, monte_carlo, holdout. The Rust side
+  persists the strategy_evaluations row; the stage result is returned as-is.
+  """
+  def run_stage(conn, %{"config_id" => config_id, "stage" => stage}) do
+    result =
+      case stage do
+        "backtest" -> Auro.run_pipeline_backtest(config_id)
+        "walk_forward" -> Auro.run_pipeline_walk_forward(config_id)
+        "monte_carlo" -> Auro.run_pipeline_monte_carlo(config_id)
+        "holdout" -> Auro.run_pipeline_holdout(config_id)
+        _ -> {:error, :invalid_stage}
+      end
+
+    case result do
+      {:ok, body} ->
+        json(conn, body)
+
+      {:error, :invalid_stage} ->
+        conn
+        |> put_status(400)
+        |> json(%{
+          error: "invalid stage: #{stage} (expected backtest|walk_forward|monte_carlo|holdout)"
+        })
+
+      {:error, reason} ->
+        conn
+        |> put_status(502)
+        |> json(%{error: "stage run failed: #{inspect(reason)}"})
+    end
+  end
+
+  def promote(conn, %{"config_id" => config_id}) do
+    case Coordinator.promote_to_live(config_id) do
       {:ok, :promoted} ->
         json(conn, %{promoted: true, config_id: config_id})
 
@@ -21,6 +87,11 @@ defmodule OpusWeb.PipelineController do
         conn
         |> put_status(404)
         |> json(%{error: "Pipeline config not found."})
+
+      {:error, reason} ->
+        conn
+        |> put_status(502)
+        |> json(%{error: "promotion failed: #{inspect(reason)}"})
     end
   end
 
@@ -52,11 +123,6 @@ defmodule OpusWeb.PipelineController do
           strategy_type: first.strategy_type,
           parameters: first.parameters,
           source: first.source,
-          depth: first.depth,
-          parent_config_id: first.parent_config_id,
-          evo_generation: first.evo_generation,
-          lineage_id: first.lineage_id,
-          score: first.score,
           inserted_at: first.inserted_at,
           stage: latest && latest.stage,
           status: latest && latest.status,
@@ -65,7 +131,7 @@ defmodule OpusWeb.PipelineController do
           evaluations: evaluations
         }
       end)
-      |> Enum.sort_by(&{&1.instrument, &1.strategy_type, &1.depth})
+      |> Enum.sort_by(&{&1.instrument, &1.strategy_type, &1.granularity})
 
     summary = build_summary(configs)
 
@@ -82,7 +148,8 @@ defmodule OpusWeb.PipelineController do
       end)
 
     furthest_stage =
-      Enum.reduce(configs, %{backtest: 0, walk_forward: 0, monte_carlo: 0}, fn c, acc ->
+      Enum.reduce(configs, %{backtest: 0, walk_forward: 0, monte_carlo: 0, holdout: 0}, fn c,
+                                                                                           acc ->
         case c.stage do
           nil -> acc
           stage -> Map.update(acc, String.to_existing_atom(stage), 1, &(&1 + 1))

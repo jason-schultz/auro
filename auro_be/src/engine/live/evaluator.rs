@@ -1,25 +1,26 @@
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::brokers::oanda::client::OandaClient;
+use crate::db::repositories::live_trades::{
+    self as live_trades_repo, ClosedLiveTrade, NewLiveTrade,
+};
 use crate::db::repositories::{live_queries, live_strategies as live_strategies_repo};
 use crate::engine::indicators;
 use crate::engine::rules::{entry_gate_report, Rules};
-use crate::engine::strategy::{self as strategy_mod, EntrySignal, ExitSignal, Strategy};
+use crate::engine::strategy::{
+    self as strategy_mod, EntrySignal, ExitSignal, SizingConfig, Strategy,
+};
 use crate::engine::types::{
     Direction, Granularity, LiveStrategy, OpenPosition, SignalAction, SignalReport, StopLossState,
 };
+use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 use super::account_cache;
 use super::format_price;
-use super::risk_params;
-use super::sizing::{
-    check_concurrent_exposure, clamp_static_units, compute_units, quote_currency,
-    quote_to_home_rate, SizingDecision, SizingInput,
-};
-use super::CandleBuffer;
+use super::sizing::{size_entry, SizedEntry};
+use crate::engine::types::CandleBuffer;
 
 fn parse_trade_realized_pl(transaction: &serde_json::Value, trade_id: &str) -> Option<f64> {
     let closed = transaction.get("tradesClosed")?.as_array()?;
@@ -90,10 +91,25 @@ pub(crate) fn position_key_deltas(
     (removed, added)
 }
 
-pub(crate) async fn is_trading_enabled(pool: &PgPool) -> bool {
-    live_queries::is_trading_enabled(pool)
-        .await
-        .unwrap_or(false)
+/// Which decisions an evaluation may take.
+///
+/// A bar that reaches the feed late (more than one bar after it closed) is
+/// stale for entries: the setup it shows may be long gone. Its exit rules
+/// still matter, because the backtest would have exited on that bar and an
+/// open position must not outlive its signal just because OANDA was slow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvalScope {
+    /// Entries and exits: the bar just closed.
+    Full,
+    /// Exits only: a catch-up bar, evaluated for open positions.
+    ExitsOnly,
+}
+
+/// What an evaluation is allowed to do: the rules Opus pushed and the scope.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EvalContext<'a> {
+    pub rules: &'a Rules,
+    pub scope: EvalScope,
 }
 
 pub(crate) async fn evaluate_and_apply(
@@ -102,7 +118,8 @@ pub(crate) async fn evaluate_and_apply(
     granularity: Granularity,
     buffer: &CandleBuffer,
     current_price: f64,
-) -> Result<Vec<SignalReport>, Box<dyn std::error::Error + Send + Sync>> {
+    scope: EvalScope,
+) -> AppResult<Vec<SignalReport>> {
     let key = (instrument.to_string(), granularity);
 
     let eval_lock = {
@@ -132,7 +149,10 @@ pub(crate) async fn evaluate_and_apply(
         buffer,
         current_price,
         &mut working_positions,
-        &rules_snapshot,
+        EvalContext {
+            rules: &rules_snapshot,
+            scope,
+        },
     )
     .await?;
 
@@ -150,7 +170,6 @@ pub(crate) async fn evaluate_and_apply(
     Ok(reports)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn evaluate_strategies(
     state: &AppState,
     instrument: &str,
@@ -158,38 +177,77 @@ pub(crate) async fn evaluate_strategies(
     buffer: &CandleBuffer,
     current_price: f64,
     open_positions: &mut HashMap<String, OpenPosition>,
-    rules: &Rules,
-) -> Result<Vec<SignalReport>, Box<dyn std::error::Error + Send + Sync>> {
-    if !is_trading_enabled(&state.db).await {
-        return Ok(vec![]);
-    }
+    ctx: EvalContext<'_>,
+) -> AppResult<Vec<SignalReport>> {
+    // Entries need the kill switch open; exits never wait on it. A kill
+    // switch that also blocked exits would leave open positions to their
+    // OANDA stops alone, the opposite of what pulling it means. The same
+    // holds when the flag cannot be read: no entries this bar, exits as usual.
+    let entries_allowed = match ctx.scope {
+        EvalScope::ExitsOnly => false,
+        EvalScope::Full => match live_queries::is_trading_enabled(&state.db).await {
+            Ok(enabled) => enabled,
+            Err(e) => {
+                tracing::error!(
+                    "trading_enabled unreadable; no entries this bar for {instrument} {granularity}: {e}"
+                );
+                false
+            }
+        },
+    };
 
-    let strategies: Vec<LiveStrategy> =
-        live_strategies_repo::list_enabled_for_instrument_granularity(
-            &state.db,
-            instrument,
-            granularity.as_str(),
-        )
-        .await?;
+    // Disabled strategies are listed too: a strategy switched off with a
+    // position open still has to take its exit.
+    let strategies: Vec<LiveStrategy> = live_strategies_repo::list_for_instrument_granularity(
+        &state.db,
+        instrument,
+        granularity.as_str(),
+    )
+    .await?;
 
     let mut reports: Vec<SignalReport> = Vec::new();
 
     for strategy in &strategies {
+        // All live strategies use the composite shape. `strategy_type` is a
+        // lineage label (mean_reversion/trend_following/etc.), not a parse key.
+        let composite: Strategy = match serde_json::from_value(strategy.parameters.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "[SKIP] composite parse failure for {} {}: {}",
+                    strategy.instrument,
+                    strategy.granularity,
+                    e
+                );
+                continue;
+            }
+        };
+
         let has_position = open_positions
             .values()
             .any(|p| p.strategy_id == strategy.id);
 
         if has_position {
-            let exit_reports =
-                evaluate_exit(state, strategy, current_price, buffer, open_positions).await?;
+            let exit_reports = evaluate_exit(
+                state,
+                strategy,
+                &composite,
+                current_price,
+                buffer,
+                open_positions,
+            )
+            .await?;
             reports.extend(exit_reports);
+        } else if !entries_allowed || !strategy.enabled {
+            continue;
         } else if let Some(entry_report) = evaluate_entry(
             state,
             strategy,
+            &composite,
             current_price,
             buffer,
             open_positions,
-            rules,
+            ctx.rules,
         )
         .await?
         {
@@ -205,44 +263,27 @@ pub(crate) async fn evaluate_strategies(
 async fn evaluate_entry(
     state: &AppState,
     strategy: &LiveStrategy,
+    composite: &Strategy,
     current_price: f64,
     buffer: &CandleBuffer,
     open_positions: &mut HashMap<String, OpenPosition>,
     rules: &Rules,
-) -> Result<Option<SignalReport>, Box<dyn std::error::Error + Send + Sync>> {
-    let params = &strategy.parameters;
-
-    // All live strategies use the composite shape. `strategy_type` is a
-    // lineage label (mean_reversion/trend_following/etc.), not a parse key.
-    let composite: Strategy = match serde_json::from_value(params.clone()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                "[SKIP ENTRY] composite parse failure for {} {}: {}",
-                strategy.instrument,
-                strategy.granularity,
-                e
-            );
-            return Ok(None);
-        }
-    };
-
-    let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
+) -> AppResult<Option<SignalReport>> {
+    let candles = &buffer.candles;
     let warmup = composite.warmup();
-    if candles_ref.len() < warmup {
+    if candles.len() < warmup {
         tracing::info!(
             "[STATUS] composite {} {} | buffer {}/{} — waiting for data",
             strategy.instrument,
             strategy.granularity,
-            candles_ref.len(),
+            candles.len(),
             warmup,
         );
         return Ok(None);
     }
 
-    let ports = match composite.compute_ports(candles_ref) {
-        Some(p) => p,
-        None => return Ok(None),
+    let Some(ports) = composite.compute_ports(candles) else {
+        return Ok(None);
     };
 
     tracing::info!(
@@ -250,11 +291,10 @@ async fn evaluate_entry(
         strategy.instrument,
         strategy.granularity,
         ports,
-        candles_ref.len(),
+        candles.len(),
     );
 
-    let entry_signal = composite.evaluate_entry(&ports);
-    let direction = match entry_signal {
+    let direction = match composite.evaluate_entry(&ports) {
         EntrySignal::Long => Direction::Long,
         EntrySignal::Short => Direction::Short,
         EntrySignal::None => return Ok(None),
@@ -272,616 +312,490 @@ async fn evaluate_entry(
         return Ok(Some(gated));
     }
 
-    let sl_price = match strategy_mod::compute_stop_price(
-        &composite,
-        current_price,
-        direction,
-        candles_ref,
-    ) {
-        Some(p) => p,
-        None => {
-            tracing::warn!(
-                "[SKIP ENTRY] composite {} {} — stop config could not compute SL (component-derived stop returned None)",
-                strategy.instrument,
-                strategy.granularity,
-            );
-            return Ok(None);
-        }
-    };
-    let units_to_use = match direction {
-        Direction::Long => strategy.max_position_size.clone(),
-        Direction::Short => format!("-{}", strategy.max_position_size),
+    let Some(sl_price) =
+        strategy_mod::compute_stop_price(composite, current_price, direction, candles)
+    else {
+        tracing::warn!(
+            "[SKIP ENTRY] composite {} {} — stop config could not compute SL (component-derived stop returned None)",
+            strategy.instrument,
+            strategy.granularity,
+        );
+        return Ok(None);
     };
 
-    let adx = indicators::adx(candles_ref, 14);
-    let indicators_json = serde_json::json!({
+    let SizingConfig::RiskPct {
+        pct: risk_pct,
+        max_notional_pct,
+    } = composite.sizing;
+    let sized = match size_entry(
+        state,
+        &strategy.instrument,
+        direction,
+        risk_pct,
+        max_notional_pct,
+        current_price,
+        sl_price,
+    )
+    .await
+    {
+        Ok(sized) => sized,
+        Err(reason) => {
+            return Ok(Some(entry_rejected(
+                strategy,
+                current_price,
+                format!("sizing_skip:{}", reason.as_str()),
+            )))
+        }
+    };
+
+    let indicators_at_entry = serde_json::json!({
         "strategy_version": composite.version,
         "components": composite.components.keys().collect::<Vec<_>>(),
         "ports": ports,
-        "adx": adx,
+        "adx": indicators::adx(candles, 14),
     });
     let (_, regime_reason) = rules.decision(&strategy.id);
-    let regime = regime_reason.unwrap_or("unknown").to_string();
-    let entry_time = candles_ref
-        .last()
-        .map(|c| c.time)
-        .unwrap_or_else(chrono::Utc::now);
-
-    execute_entry(
-        state,
-        strategy,
-        &direction,
-        &units_to_use,
-        strategy.risk_pct,
-        strategy.max_units,
+    let signal_bar = candles.last();
+    let entry = PendingEntry {
+        direction,
+        sized,
         current_price,
+        expected_entry_price: signal_bar.map(|c| c.entry_fill_price(direction)),
+        entry_spread: signal_bar.and_then(|c| c.spread()),
         sl_price,
-        None, // no static TP — exit handled by composite strategy's exit selector
-        &format!("Composite {:?} entry", direction),
-        indicators_json,
-        regime,
-        entry_time,
-        open_positions,
-    )
-    .await
+        entry_reason: format!("Composite {:?} entry", direction),
+        indicators_at_entry,
+        regime_at_entry: regime_reason.unwrap_or("unknown").to_string(),
+        entry_time: candles
+            .last()
+            .map(|c| c.time)
+            .unwrap_or_else(chrono::Utc::now),
+    };
+
+    execute_entry(state, strategy, entry, open_positions).await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn execute_entry(
-    state: &AppState,
-    strategy: &LiveStrategy,
-    direction: &Direction,
-    static_units: &str,
-    risk_pct: f64,
-    strategy_max_units: Option<i64>,
+/// A fully decided entry, waiting only on the OANDA fill.
+struct PendingEntry {
+    direction: Direction,
+    sized: SizedEntry,
     current_price: f64,
+    /// The backtest's assumed fill for the decision bar, and its spread, so
+    /// live slippage can be measured against it.
+    expected_entry_price: Option<f64>,
+    entry_spread: Option<f64>,
     sl_price: f64,
-    tp_price: Option<f64>,
-    entry_reason: &str,
+    entry_reason: String,
     indicators_at_entry: serde_json::Value,
     regime_at_entry: String,
     entry_time: chrono::DateTime<chrono::Utc>,
+}
+
+async fn execute_entry(
+    state: &AppState,
+    strategy: &LiveStrategy,
+    entry: PendingEntry,
     open_positions: &mut HashMap<String, OpenPosition>,
-) -> Result<Option<SignalReport>, Box<dyn std::error::Error + Send + Sync>> {
-    let units_to_use: String;
-    let mut sizing_metadata_json: Option<serde_json::Value> = None;
+) -> AppResult<Option<SignalReport>> {
+    let sl_str = format_price(state, &strategy.instrument, entry.sl_price).await;
 
-    let Some(instrument_meta) = ({
-        let cache = state.live.instrument_metadata.read().await;
-        cache.get(&strategy.instrument).cloned()
-    }) else {
-        tracing::warn!(
-            "[SIZING] {} {} skip reason=missing_instrument_metadata",
-            strategy.id,
-            strategy.instrument
-        );
-        return Ok(Some(entry_rejected(
-            strategy,
-            current_price,
-            "sizing_skip:missing_instrument_metadata".to_string(),
-        )));
-    };
-
-    if risk_pct == 0.0 {
-        let parsed: i64 = match static_units.parse() {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    "[SIZING] {} {} invalid max_position_size='{}': {}",
-                    strategy.id,
-                    strategy.instrument,
-                    static_units,
-                    e
-                );
-                return Ok(Some(entry_rejected(
-                    strategy,
-                    current_price,
-                    "sizing_skip:invalid_max_position_size".to_string(),
-                )));
-            }
-        };
-
-        let policy_cap = instrument_meta.policy_max_units;
-        let oanda_min = instrument_meta.min_trade_size;
-
-        let effective = match clamp_static_units(parsed, policy_cap, oanda_min) {
-            Ok(v) => v,
-            Err(reason) => {
-                tracing::warn!(
-                    "[SIZING] {} {} skip reason={} policy_cap={:?} oanda_min={} requested={}",
-                    strategy.id,
-                    strategy.instrument,
-                    reason.as_str(),
-                    policy_cap,
-                    oanda_min,
-                    parsed
-                );
-                return Ok(Some(entry_rejected(
-                    strategy,
-                    current_price,
-                    format!("sizing_skip:{}", reason.as_str()),
-                )));
-            }
-        };
-
-        if effective.abs() < parsed.abs() {
-            tracing::info!(
-                "[SIZING] {} {} policy_clamp parsed={} -> effective={} policy_cap={:?}",
-                strategy.id,
-                strategy.instrument,
-                parsed,
-                effective,
-                policy_cap
-            );
-        } else {
-            tracing::info!(
-                "[SIZING] {} {} static fallback units={}",
-                strategy.id,
-                strategy.instrument,
-                static_units
-            );
-        }
-
-        units_to_use = effective.to_string();
-    } else {
-        let account_snapshot = { state.live.account.read().await.clone() };
-
-        let Some(snapshot) = account_snapshot else {
-            tracing::warn!(
-                "[SIZING] {} {} skip reason=nav_unavailable",
-                strategy.id,
-                strategy.instrument,
-            );
-            return Ok(Some(entry_rejected(
-                strategy,
-                current_price,
-                "sizing_skip:nav_unavailable".to_string(),
-            )));
-        };
-
-        let quotes_snapshot = state.live.last_quotes.read().await.clone();
-        let Some(quote_ccy) = quote_currency(&strategy.instrument) else {
-            tracing::warn!(
-                "[SIZING] {} {} skip reason=fx_rate_unavailable (malformed instrument)",
-                strategy.id,
-                strategy.instrument,
-            );
-            return Ok(Some(entry_rejected(
-                strategy,
-                current_price,
-                "sizing_skip:fx_rate_unavailable".to_string(),
-            )));
-        };
-        let Some(fx_rate) = quote_to_home_rate(&quotes_snapshot, quote_ccy, &snapshot.currency)
-        else {
-            tracing::warn!(
-                "[SIZING] {} {} skip reason=fx_rate_unavailable quote={} home={}",
-                strategy.id,
-                strategy.instrument,
-                quote_ccy,
-                snapshot.currency,
-            );
-            return Ok(Some(entry_rejected(
-                strategy,
-                current_price,
-                "sizing_skip:fx_rate_unavailable".to_string(),
-            )));
-        };
-
-        let decision = compute_units(SizingInput {
-            equity: snapshot.nav,
-            risk_pct,
-            entry_price: current_price,
-            sl_price,
-            quote_to_home_rate: fx_rate,
-            instrument: &strategy.instrument,
-            instrument_min_units: instrument_meta.min_trade_size,
-            instrument_max_units: instrument_meta.max_trade_size,
-            instrument_policy_max_units: instrument_meta.policy_max_units,
-            strategy_max_units,
-        });
-
-        match decision {
-            SizingDecision::Skip { reason, metadata } => {
-                tracing::warn!(
-                    "[SIZING] {} {} skip reason={} equity={} risk_pct={} raw_units={} fx_rate={}",
-                    strategy.id,
-                    strategy.instrument,
-                    reason.as_str(),
-                    snapshot.nav,
-                    risk_pct,
-                    metadata.raw_units,
-                    metadata.quote_to_home_rate
-                );
-                return Ok(Some(entry_rejected(
-                    strategy,
-                    current_price,
-                    format!("sizing_skip:{}", reason.as_str()),
-                )));
-            }
-            SizingDecision::Place { units, metadata } => {
-                let new_notional = (units as f64).abs() * current_price.abs() * fx_rate;
-                if let Err(reason) =
-                    check_concurrent_exposure(state, new_notional, snapshot.nav, &snapshot.currency)
-                        .await
-                {
-                    tracing::warn!(
-                        "[SIZING] {} {} skip reason={} equity={} risk_pct={} raw_units={}",
-                        strategy.id,
-                        strategy.instrument,
-                        reason.as_str(),
-                        snapshot.nav,
-                        risk_pct,
-                        metadata.raw_units
-                    );
-                    return Ok(Some(entry_rejected(
-                        strategy,
-                        current_price,
-                        format!("sizing_skip:{}", reason.as_str()),
-                    )));
-                }
-
-                tracing::info!(
-                    "[SIZING] {} {} place units={} equity={} risk_pct={} sl_dist={} fx_rate={} notional_pct={} clamps={:?}",
-                    strategy.id,
-                    strategy.instrument,
-                    units,
-                    snapshot.nav,
-                    risk_pct,
-                    metadata.sl_distance,
-                    metadata.quote_to_home_rate,
-                    metadata.notional_pct_of_nav,
-                    metadata.clamps_applied
-                );
-
-                let signed_units = match direction {
-                    Direction::Long => units,
-                    Direction::Short => -units,
-                };
-                units_to_use = signed_units.to_string();
-                sizing_metadata_json = Some(serde_json::to_value(&metadata)?);
-            }
-        }
-    }
-
-    let tp_str = match tp_price {
-        Some(p) => Some(format_price(state, &strategy.instrument, p).await),
-        None => None,
-    };
-
-    let trailing_k_override = strategy
-        .parameters
-        .get("trailing_k")
-        .and_then(|v| v.as_f64());
-
-    // nil-TP trend-following: open with a trailing stop instead of a fixed SL.
-    // Trailing distance is ATR-adaptive: K * ATR.
-    let trailing_dist_str;
-    let sl_str;
-    let (use_sl, use_trailing) = if tp_price.is_none()
-        && strategy.strategy_type == "trend_following"
-    {
-        let distance =
-                risk_params::trailing_distance_price(
-                    state,
-                    &strategy.instrument,
-                    &strategy.strategy_type,
-                    strategy.granularity,
-                    current_price,
-                    trailing_k_override,
-                )
-                .await
-                .unwrap_or_else(|| {
-                    tracing::warn!(
-                        "[RISK PARAMS] Falling back to SL-derived trailing distance on nil-TP entry for {} {}",
-                        strategy.instrument,
-                        strategy.id
-                    );
-                    (current_price - sl_price).abs()
-                });
-        trailing_dist_str = format_price(state, &strategy.instrument, distance).await;
-        sl_str = String::new();
-        (false, true)
-    } else {
-        sl_str = format_price(state, &strategy.instrument, sl_price).await;
-        trailing_dist_str = String::new();
-        (true, false)
-    };
-
-    let initial_sl_state = if use_trailing {
-        StopLossState::Trailing
-    } else {
-        StopLossState::NotApplicable
-    };
-
-    match state
+    let resp = match state
         .oanda
-        .create_market_order(
-            &strategy.instrument,
-            &units_to_use,
-            if use_sl { Some(&sl_str) } else { None },
-            tp_str.as_deref(),
-            if use_trailing {
-                Some(&trailing_dist_str)
-            } else {
-                None
-            },
-        )
+        .create_market_order(&strategy.instrument, &entry.sized.units, &sl_str)
         .await
     {
-        Ok(resp) => {
-            let trade_id = resp["orderFillTransaction"]["tradeOpened"]["tradeID"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string();
-
-            if trade_id == "unknown" {
-                tracing::error!(
-                    "[ORDER FAILED] {} {} ({}) missing tradeID in OANDA response; skipping in-memory/DB insert",
-                    direction,
-                    strategy.instrument,
-                    strategy.granularity,
-                );
-                return Ok(None);
-            }
-
-            let fill_price = resp["orderFillTransaction"]["price"]
-                .as_str()
-                .and_then(|p| p.parse::<f64>().ok())
-                .unwrap_or(current_price);
-
-            tracing::info!(
-                "[TRADE] Opened {} {} ({}) @ {:.5}, SL={}, TP={}, trade_id={}",
-                direction,
-                strategy.instrument,
-                strategy.granularity,
-                fill_price,
-                sl_str,
-                tp_str.as_deref().unwrap_or("none"),
-                trade_id
-            );
-
-            open_positions.insert(
-                trade_id.to_string(),
-                OpenPosition {
-                    strategy_id: strategy.id,
-                    trade_id: trade_id.clone(),
-                    instrument: strategy.instrument.clone(),
-                    granularity: strategy.granularity,
-                    direction: *direction,
-                    entry_price: fill_price,
-                    entry_time,
-                    units: units_to_use.clone(),
-                    stop_loss_state: initial_sl_state,
-                    worst_price: fill_price,
-                    best_price: fill_price,
-                    strategy_type: strategy.strategy_type.clone(),
-                },
-            );
-
-            if let Err(e) = sqlx::query(
-                r#"INSERT INTO live_trades
-                    (live_strategy_id, oanda_trade_id, instrument, direction, units,
-                     entry_price, stop_loss_price, take_profit_price, entry_reason,
-                                         indicators_at_entry, regime_at_entry, sizing_metadata, status)
-                                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'open')"#,
-            )
-            .bind(strategy.id)
-            .bind(&trade_id)
-            .bind(&strategy.instrument)
-            .bind(direction)
-                        .bind(&units_to_use)
-            .bind(fill_price)
-            .bind(sl_price)
-            .bind(tp_price)
-            .bind(entry_reason)
-            .bind(&indicators_at_entry)
-            .bind(&regime_at_entry)
-                        .bind(&sizing_metadata_json)
-                        .execute(&state.db)
-            .await {
-                tracing::error!(
-                    "[TRADE] failed to persist live_trades row after open trade_id={}: {}",
-                    trade_id,
-                    e
-                );
-            }
-
-            let state_for_refresh = state.clone();
-            tokio::spawn(async move {
-                account_cache::refresh_once(&state_for_refresh).await;
-            });
-
-            let action = match direction {
-                Direction::Long => SignalAction::OpenedLong,
-                Direction::Short => SignalAction::OpenedShort,
-            };
-
-            let report = SignalReport {
-                strategy_id: strategy.id,
-                strategy_type: strategy.strategy_type.clone(),
-                instrument: strategy.instrument.clone(),
-                granularity: strategy.granularity,
-                action,
-                price: current_price,
-                reason: entry_reason.to_string(),
-                oanda_trade_id: Some(trade_id.clone()),
-            };
-
-            Ok(Some(report))
-        }
+        Ok(resp) => resp,
         Err(e) => {
             tracing::error!(
                 "[ORDER FAILED] {} {} ({}): {}",
-                direction,
+                entry.direction,
                 strategy.instrument,
                 strategy.granularity,
                 e
             );
-            Ok(None)
+            return Ok(None);
+        }
+    };
+
+    let Some(trade_id) = resp["orderFillTransaction"]["tradeOpened"]["tradeID"]
+        .as_str()
+        .map(str::to_string)
+    else {
+        tracing::error!(
+            "[ORDER FAILED] {} {} ({}) missing tradeID in OANDA response; skipping in-memory/DB insert",
+            entry.direction,
+            strategy.instrument,
+            strategy.granularity,
+        );
+        return Ok(None);
+    };
+
+    let Some(fill_price) = entry_fill_price(&state.oanda, &resp, &trade_id).await else {
+        return abandon_untracked_trade(
+            state,
+            strategy,
+            &trade_id,
+            &entry,
+            entry.current_price,
+            "fill_price_unknown",
+            open_positions,
+        )
+        .await;
+    };
+
+    tracing::info!(
+        "[TRADE] Opened {} {} ({}) units={} @ {:.5}, SL={}, trade_id={}",
+        entry.direction,
+        strategy.instrument,
+        strategy.granularity,
+        entry.sized.units,
+        fill_price,
+        sl_str,
+        trade_id
+    );
+
+    let new_trade = NewLiveTrade {
+        live_strategy_id: strategy.id,
+        oanda_trade_id: &trade_id,
+        instrument: &strategy.instrument,
+        direction: entry.direction,
+        units: &entry.sized.units,
+        entry_price: fill_price,
+        stop_loss_price: entry.sl_price,
+        entry_reason: &entry.entry_reason,
+        indicators_at_entry: &entry.indicators_at_entry,
+        regime_at_entry: &entry.regime_at_entry,
+        sizing_metadata: &serde_json::to_value(&entry.sized.metadata)
+            .map_err(|e| AppError::Internal(format!("sizing metadata serialization: {e}")))?,
+        signal_price: entry.current_price,
+        expected_entry_price: entry.expected_entry_price,
+        entry_spread: entry.entry_spread,
+    };
+    // The row is the audit trail and what a restart rebuilds positions from,
+    // so the trade is tracked in memory only once the row exists.
+    if let Err(e) = persist_open_trade(&state.db, &new_trade).await {
+        tracing::error!(
+            "[TRADE] failed to persist live_trades row for trade_id={} after {} attempts: {}",
+            trade_id,
+            PERSIST_ATTEMPTS,
+            e
+        );
+        return abandon_untracked_trade(
+            state,
+            strategy,
+            &trade_id,
+            &entry,
+            fill_price,
+            "persist_failed",
+            open_positions,
+        )
+        .await;
+    }
+
+    open_positions.insert(
+        trade_id.clone(),
+        OpenPosition {
+            strategy_id: strategy.id,
+            trade_id: trade_id.clone(),
+            instrument: strategy.instrument.clone(),
+            granularity: strategy.granularity,
+            direction: entry.direction,
+            entry_price: fill_price,
+            entry_time: entry.entry_time,
+            units: entry.sized.units.clone(),
+            stop_loss_state: StopLossState::NotApplicable,
+            worst_price: fill_price,
+            best_price: fill_price,
+            strategy_type: strategy.strategy_type.clone(),
+        },
+    );
+
+    spawn_account_refresh(state);
+
+    let action = match entry.direction {
+        Direction::Long => SignalAction::OpenedLong,
+        Direction::Short => SignalAction::OpenedShort,
+    };
+
+    Ok(Some(SignalReport {
+        strategy_id: strategy.id,
+        strategy_type: strategy.strategy_type.clone(),
+        instrument: strategy.instrument.clone(),
+        granularity: strategy.granularity,
+        action,
+        price: entry.current_price,
+        reason: entry.entry_reason,
+        oanda_trade_id: Some(trade_id),
+    }))
+}
+
+/// Insert attempts before an opened trade is treated as untrackable.
+const PERSIST_ATTEMPTS: u32 = 3;
+const PERSIST_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+async fn persist_open_trade(
+    pool: &sqlx::PgPool,
+    trade: &NewLiveTrade<'_>,
+) -> Result<(), sqlx::Error> {
+    let mut attempt = 1;
+    loop {
+        match live_trades_repo::insert_open_trade(pool, trade).await {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < PERSIST_ATTEMPTS => {
+                tracing::warn!(
+                    "[TRADE] live_trades insert attempt {attempt} failed for trade_id={}: {e}",
+                    trade.oanda_trade_id
+                );
+                attempt += 1;
+                tokio::time::sleep(PERSIST_RETRY_DELAY).await;
+            }
+            Err(e) => return Err(e),
         }
     }
+}
+
+/// The price OANDA filled the opening order at: from the fill transaction,
+/// or from the trade itself when the fill omits it. `None` means OANDA could
+/// not say, and the caller must not invent one.
+async fn entry_fill_price(
+    oanda: &OandaClient,
+    order_response: &serde_json::Value,
+    trade_id: &str,
+) -> Option<f64> {
+    if let Some(price) = parse_price(&order_response["orderFillTransaction"]["price"]) {
+        return Some(price);
+    }
+    tracing::warn!(
+        "[TRADE] fill transaction for trade_id={trade_id} has no price; looking the trade up"
+    );
+    match oanda.get_trade(trade_id).await {
+        Ok(trade) => parse_price(&trade["trade"]["price"]),
+        Err(e) => {
+            tracing::error!("[TRADE] trade lookup failed for trade_id={trade_id}: {e}");
+            None
+        }
+    }
+}
+
+/// The price OANDA closed a trade at, from the close fill or the closed
+/// trade's average close price. `None` is recorded as an unknown fill.
+async fn exit_fill_price(
+    oanda: &OandaClient,
+    close_response: &serde_json::Value,
+    trade_id: &str,
+) -> Option<f64> {
+    if let Some(price) = parse_price(&close_response["orderFillTransaction"]["price"]) {
+        return Some(price);
+    }
+    tracing::warn!(
+        "[TRADE CLOSED] close fill for trade_id={trade_id} has no price; looking the trade up"
+    );
+    match oanda.get_trade(trade_id).await {
+        Ok(trade) => parse_price(&trade["trade"]["averageClosePrice"]),
+        Err(e) => {
+            tracing::error!("[TRADE CLOSED] trade lookup failed for trade_id={trade_id}: {e}");
+            None
+        }
+    }
+}
+
+fn parse_price(value: &serde_json::Value) -> Option<f64> {
+    value.as_str().and_then(|p| p.parse::<f64>().ok())
+}
+
+/// A trade is open at OANDA but cannot be tracked (no fill price, or no
+/// `live_trades` row). An untracked position is the one thing the engine
+/// must never hold, so close it. If even the close fails, keep it in memory
+/// so this process manages it, and say loudly that a restart would lose it.
+async fn abandon_untracked_trade(
+    state: &AppState,
+    strategy: &LiveStrategy,
+    trade_id: &str,
+    entry: &PendingEntry,
+    price: f64,
+    why: &str,
+    open_positions: &mut HashMap<String, OpenPosition>,
+) -> AppResult<Option<SignalReport>> {
+    match state.oanda.close_trade(trade_id, None).await {
+        Ok(_) => {
+            tracing::error!(
+                "[UNTRACKED] closed trade_id={} on {} right after opening: {}",
+                trade_id,
+                strategy.instrument,
+                why
+            );
+            spawn_account_refresh(state);
+            Ok(Some(entry_rejected(
+                strategy,
+                price,
+                format!("{why}:closed_untracked_trade"),
+            )))
+        }
+        Err(e) => {
+            tracing::error!(
+                "[UNTRACKED] trade_id={} on {} is OPEN at OANDA with no live_trades row and could not be closed ({}): {}. Managed in memory only; a restart loses it. Close it by hand.",
+                trade_id,
+                strategy.instrument,
+                why,
+                e
+            );
+            open_positions.insert(
+                trade_id.to_string(),
+                OpenPosition {
+                    strategy_id: strategy.id,
+                    trade_id: trade_id.to_string(),
+                    instrument: strategy.instrument.clone(),
+                    granularity: strategy.granularity,
+                    direction: entry.direction,
+                    entry_price: price,
+                    entry_time: entry.entry_time,
+                    units: entry.sized.units.clone(),
+                    stop_loss_state: StopLossState::NotApplicable,
+                    worst_price: price,
+                    best_price: price,
+                    strategy_type: strategy.strategy_type.clone(),
+                },
+            );
+            Ok(Some(entry_rejected(
+                strategy,
+                price,
+                format!("{why}:untracked_trade_left_open"),
+            )))
+        }
+    }
+}
+
+fn spawn_account_refresh(state: &AppState) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        account_cache::refresh_once(&state).await;
+    });
 }
 
 async fn evaluate_exit(
     state: &AppState,
     strategy: &LiveStrategy,
+    composite: &Strategy,
     current_price: f64,
     buffer: &CandleBuffer,
     open_positions: &mut HashMap<String, OpenPosition>,
-) -> Result<Vec<SignalReport>, Box<dyn std::error::Error + Send + Sync>> {
+) -> AppResult<Vec<SignalReport>> {
     let positions_for_strategy: Vec<OpenPosition> = open_positions
         .values()
         .filter(|p| p.strategy_id == strategy.id)
         .cloned()
         .collect();
 
-    if positions_for_strategy.is_empty() {
+    let Some(first) = positions_for_strategy.first() else {
         return Ok(vec![]);
-    }
-
-    let params = &strategy.parameters;
-    let mut should_exit = false;
-    let mut exit_reason = String::new();
-
-    // All live strategies use the composite shape. `strategy_type` is a
-    // lineage label (mean_reversion/trend_following/etc.), not a parse key.
-    let composite: Strategy = match serde_json::from_value(params.clone()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                "[EXIT CHECK] composite parse failure for {} {}: {}",
-                strategy.instrument,
-                strategy.granularity,
-                e
-            );
-            return Ok(vec![]);
-        }
     };
-    let candles_ref: &[crate::engine::types::Candle] = &buffer.candles;
-    let ports = match composite.compute_ports(candles_ref) {
-        Some(p) => p,
-        None => return Ok(vec![]),
+
+    let Some(ports) = composite.compute_ports(&buffer.candles) else {
+        return Ok(vec![]);
     };
-    let is_long = positions_for_strategy[0].direction == Direction::Long;
-    if matches!(composite.evaluate_exit(&ports, is_long), ExitSignal::Exit) {
-        should_exit = true;
-        exit_reason = format!("CompositeExit (ports={:?})", ports);
-    }
-    let max_hold_bars = composite.max_hold_bars;
+    let signal_exit = matches!(
+        composite.evaluate_exit(&ports, first.direction == Direction::Long),
+        ExitSignal::Exit
+    );
 
     let mut reports = Vec::<SignalReport>::new();
 
-    if should_exit || max_hold_bars.is_some() {
-        for pos in &positions_for_strategy {
-            let bars_held = buffer
-                .candles
-                .iter()
-                .filter(|c| c.time > pos.entry_time)
-                .count();
-            let time_stop_reason = max_hold_bars.and_then(|limit| {
-                if bars_held >= limit {
-                    Some(format!(
-                        "TimeStop (bars_held={} max_hold_bars={})",
-                        bars_held, limit
-                    ))
-                } else {
-                    None
-                }
-            });
+    for pos in &positions_for_strategy {
+        let bars_held = buffer
+            .candles
+            .iter()
+            .filter(|c| c.time > pos.entry_time)
+            .count();
+        let time_stop_reason = composite
+            .max_hold_bars
+            .filter(|limit| bars_held >= *limit)
+            .map(|limit| format!("TimeStop (bars_held={} max_hold_bars={})", bars_held, limit));
 
-            if !should_exit && time_stop_reason.is_none() {
+        let close_reason = match time_stop_reason {
+            Some(reason) => reason,
+            None if signal_exit => format!("CompositeExit (ports={:?})", ports),
+            None => continue,
+        };
+
+        tracing::info!(
+            "[EXIT SIGNAL] {} on {} ({}): {}",
+            pos.direction,
+            pos.instrument,
+            strategy.granularity,
+            close_reason
+        );
+
+        let resp = match state.oanda.close_trade(&pos.trade_id, None).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::error!("[CLOSE FAILED] {} {}: {}", pos.direction, pos.instrument, e);
                 continue;
             }
+        };
 
-            let trade_id = pos.trade_id.clone();
-            let direction = pos.direction;
-            let entry_price = pos.entry_price;
-            let instrument = pos.instrument.clone();
-            let close_reason = time_stop_reason.unwrap_or_else(|| exit_reason.clone());
+        let fill_price = exit_fill_price(&state.oanda, &resp, &pos.trade_id).await;
+        let realized_pl = extract_realized_pl(&state.oanda, &resp, &pos.trade_id).await;
+        let pnl = fill_price.map(|fill| match pos.direction {
+            Direction::Long => (fill - pos.entry_price) / pos.entry_price,
+            Direction::Short => (pos.entry_price - fill) / pos.entry_price,
+        });
 
-            tracing::info!(
-                "[EXIT SIGNAL] {} on {} ({}): {}",
-                direction,
-                instrument,
+        match (fill_price, pnl) {
+            (Some(fill), Some(pnl)) => tracing::info!(
+                "[TRADE CLOSED] {} {} ({}) @ {:.5}, PnL={:.4}%, reason={}",
+                pos.direction,
+                pos.instrument,
                 strategy.granularity,
+                fill,
+                pnl * 100.0,
                 close_reason
-            );
-
-            match state.oanda.close_trade(&trade_id, None).await {
-                Ok(resp) => {
-                    let fill_price = resp["orderFillTransaction"]["price"]
-                        .as_str()
-                        .and_then(|p| p.parse::<f64>().ok())
-                        .unwrap_or(current_price);
-                    let realized_pl = extract_realized_pl(&state.oanda, &resp, &trade_id).await;
-
-                    let pnl = match direction {
-                        Direction::Long => (fill_price - entry_price) / entry_price,
-                        Direction::Short => (entry_price - fill_price) / entry_price,
-                    };
-
-                    tracing::info!(
-                        "[TRADE CLOSED] {} {} ({}) @ {:.5}, PnL={:.4}%, reason={}",
-                        direction,
-                        instrument,
-                        strategy.granularity,
-                        fill_price,
-                        pnl * 100.0,
-                        close_reason
-                    );
-
-                    if let Err(e) = sqlx::query(
-                        r#"UPDATE live_trades
-                        SET exit_price = $1, exit_time = NOW(), pnl_percent = $2,
-                            pnl = $3, exit_reason = $4, status = 'closed',
-                            stop_loss_state_at_close = $5, updated_at = NOW()
-                        WHERE oanda_trade_id = $6"#,
-                    )
-                    .bind(fill_price)
-                    .bind(pnl)
-                    .bind(realized_pl)
-                    .bind(&close_reason)
-                    .bind(pos.stop_loss_state.as_str())
-                    .bind(&trade_id)
-                    .execute(&state.db)
-                    .await
-                    {
-                        tracing::error!(
-                            "[TRADE CLOSED] failed to persist close for trade_id={}: {}",
-                            trade_id,
-                            e
-                        );
-                    }
-
-                    let state_for_refresh = state.clone();
-                    tokio::spawn(async move {
-                        account_cache::refresh_once(&state_for_refresh).await;
-                    });
-
-                    open_positions.remove(&trade_id);
-
-                    let action = match direction {
-                        Direction::Long => SignalAction::ClosedLong,
-                        Direction::Short => SignalAction::ClosedShort,
-                    };
-
-                    reports.push(SignalReport {
-                        strategy_id: strategy.id,
-                        strategy_type: strategy.strategy_type.clone(),
-                        instrument: instrument.clone(),
-                        granularity: strategy.granularity,
-                        action,
-                        price: fill_price,
-                        reason: close_reason,
-                        oanda_trade_id: Some(trade_id.clone()),
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("[CLOSE FAILED] {} {}: {}", direction, instrument, e);
-                }
-            }
+            ),
+            _ => tracing::error!(
+                "[TRADE CLOSED] {} {} ({}) trade_id={} closed but OANDA gave no fill price; recorded as unknown, reason={}",
+                pos.direction,
+                pos.instrument,
+                strategy.granularity,
+                pos.trade_id,
+                close_reason
+            ),
         }
+
+        let decision_bar = buffer.candles.last();
+        let closed = ClosedLiveTrade {
+            oanda_trade_id: &pos.trade_id,
+            exit_price: fill_price,
+            pnl_percent: pnl,
+            realized_pl,
+            exit_reason: &close_reason,
+            stop_loss_state_at_close: pos.stop_loss_state.as_str(),
+            expected_exit_price: decision_bar.map(|c| c.exit_fill_price(pos.direction)),
+            exit_spread: decision_bar.and_then(|c| c.spread()),
+        };
+        if let Err(e) = live_trades_repo::mark_closed(&state.db, &closed).await {
+            tracing::error!(
+                "[TRADE CLOSED] failed to persist close for trade_id={}: {}",
+                pos.trade_id,
+                e
+            );
+        }
+
+        spawn_account_refresh(state);
+        open_positions.remove(&pos.trade_id);
+
+        let action = match pos.direction {
+            Direction::Long => SignalAction::ClosedLong,
+            Direction::Short => SignalAction::ClosedShort,
+        };
+        reports.push(SignalReport {
+            strategy_id: strategy.id,
+            strategy_type: strategy.strategy_type.clone(),
+            instrument: pos.instrument.clone(),
+            granularity: strategy.granularity,
+            action,
+            price: current_price,
+            reason: close_reason,
+            oanda_trade_id: Some(pos.trade_id.clone()),
+        });
     }
 
     Ok(reports)
@@ -890,21 +804,595 @@ async fn evaluate_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::num::NonZeroUsize;
-    use std::sync::{Arc, Mutex};
 
-    use axum::routing::{post, put};
+    use axum::extract::State;
+    use axum::routing::{get, post, put};
     use axum::{Json, Router};
     use chrono::{Duration, Utc};
-    use lru::LruCache;
-    use tokio::sync::broadcast;
     use uuid::Uuid;
 
-    use crate::brokers::oanda::client::OandaClient;
-    use crate::brokers::wealthsimple::client::WealthsimpleClient;
-    use crate::config::Config;
+    use crate::engine::live::account_cache::AccountSnapshot;
+    use crate::engine::live::instrument_cache::InstrumentMeta;
     use crate::engine::types::{Candle, OHLC};
-    use crate::state::{AppState, LiveState};
+    use crate::state::LastQuote;
+
+    /// Synthetic instrument: quote currency USD matches the test account's
+    /// home currency, so no FX conversion is involved.
+    const INSTRUMENT: &str = "TEST_USD";
+
+    fn tf_parameters(name: &str, stop_pct: f64) -> serde_json::Value {
+        serde_json::json!({
+            "strategy_id": null,
+            "strategy_name": name,
+            "version": "v1_composite",
+            "instrument": INSTRUMENT,
+            "granularity": "H1",
+            "components": {
+                "tf": {"type": "TrendFollowing", "params": {"fast_period": 2, "slow_period": 3, "ma_type": "sma"}}
+            },
+            "entry": {"long": "tf.bullish_cross", "short": "tf.bearish_cross"},
+            "exit": {"long": "tf.bearish_cross", "short": "tf.bullish_cross"},
+            "stop": {"type": "FixedPct", "params": {"pct": stop_pct}},
+            "sizing": {"type": "RiskPct", "params": {"pct": 0.01}}
+        })
+    }
+
+    fn buffer_from_closes(closes: &[f64]) -> CandleBuffer {
+        let mut buffer = CandleBuffer::new(16);
+        let base = Utc::now();
+        for (idx, close) in closes.iter().enumerate() {
+            buffer.push(Candle {
+                time: base + Duration::minutes(idx as i64),
+                mid: OHLC {
+                    open: *close,
+                    high: *close,
+                    low: *close,
+                    close: *close,
+                },
+                volume: 1,
+                bid: None,
+                ask: None,
+            });
+        }
+        buffer
+    }
+
+    /// What the mock OANDA answers: fill prices on the order and close fills
+    /// (`None` leaves the price out, as a degraded response would), and the
+    /// body served for a trade lookup.
+    #[derive(Clone)]
+    struct MockOanda {
+        order_fill_price: Option<&'static str>,
+        close_fill_price: Option<&'static str>,
+        trade: serde_json::Value,
+    }
+
+    impl MockOanda {
+        fn healthy() -> Self {
+            Self {
+                order_fill_price: Some("4.00000"),
+                close_fill_price: Some("0.50000"),
+                trade: serde_json::json!({}),
+            }
+        }
+    }
+
+    /// Mock OANDA order/close/trade endpoints; returns the base URL and the
+    /// server task.
+    async fn mock_oanda_with(cfg: MockOanda) -> (String, tokio::task::JoinHandle<()>) {
+        async fn order(State(cfg): State<MockOanda>) -> Json<serde_json::Value> {
+            let mut fill = serde_json::json!({
+                "tradeOpened": {"tradeID": format!("t-{}", Uuid::new_v4())}
+            });
+            if let Some(price) = cfg.order_fill_price {
+                fill["price"] = serde_json::json!(price);
+            }
+            Json(serde_json::json!({ "orderFillTransaction": fill }))
+        }
+        async fn close(State(cfg): State<MockOanda>) -> Json<serde_json::Value> {
+            let mut fill = serde_json::json!({
+                "tradesClosed": [{"tradeID": "close-test-trade", "realizedPL": "1.00"}]
+            });
+            if let Some(price) = cfg.close_fill_price {
+                fill["price"] = serde_json::json!(price);
+            }
+            Json(serde_json::json!({ "orderFillTransaction": fill }))
+        }
+        async fn trade(State(cfg): State<MockOanda>) -> Json<serde_json::Value> {
+            Json(serde_json::json!({ "trade": cfg.trade }))
+        }
+
+        let app = Router::new()
+            .route("/v3/accounts/{account_id}/orders", post(order))
+            .route(
+                "/v3/accounts/{account_id}/trades/{trade_id}/close",
+                put(close),
+            )
+            .route("/v3/accounts/{account_id}/trades/{trade_id}", get(trade))
+            .with_state(cfg);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{}", addr), server)
+    }
+
+    async fn mock_oanda() -> (String, tokio::task::JoinHandle<()>) {
+        mock_oanda_with(MockOanda::healthy()).await
+    }
+
+    /// An open long on `close-test-trade` for `strategy_id`, in the DB and in
+    /// memory, as the evaluator would hold it.
+    async fn seed_open_long(state: &AppState, strategy_id: Uuid) {
+        live_trades_repo::insert_open_trade(
+            &state.db,
+            &NewLiveTrade {
+                live_strategy_id: strategy_id,
+                oanda_trade_id: "close-test-trade",
+                instrument: INSTRUMENT,
+                direction: Direction::Long,
+                units: "1000",
+                entry_price: 1.0,
+                stop_loss_price: 0.8,
+                entry_reason: "seeded",
+                indicators_at_entry: &serde_json::json!({}),
+                regime_at_entry: "unknown",
+                sizing_metadata: &serde_json::json!({}),
+                signal_price: 100.0,
+                expected_entry_price: None,
+                entry_spread: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut position = make_position("close-test-trade", 1.0);
+        position.strategy_id = strategy_id;
+        position.instrument = INSTRUMENT.to_string();
+        state
+            .live
+            .open_positions
+            .write()
+            .await
+            .insert(position.trade_id.clone(), position);
+    }
+
+    async fn set_trading_enabled(state: &AppState, enabled: bool) {
+        live_strategies_repo::upsert_trading_config(
+            &state.db,
+            "trading_enabled",
+            &serde_json::json!(enabled.to_string()),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn closed_exit_price(state: &AppState) -> (Option<String>, Option<f64>) {
+        sqlx::query_as(
+            "SELECT status, exit_price FROM live_trades WHERE oanda_trade_id = 'close-test-trade'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    }
+
+    /// Test-DB state wired to the mock OANDA, with the NAV, quote and
+    /// instrument metadata sizing needs.
+    async fn trading_state(oanda_url: &str) -> AppState {
+        let mut state = AppState::for_tests_with_test_db().await;
+        state.oanda = OandaClient::new(oanda_url, "http://127.0.0.1:1", "test-key", "test-account");
+
+        *state.live.account.write().await = Some(AccountSnapshot {
+            nav: 100_000.0,
+            currency: "USD".to_string(),
+            margin_available: 100_000.0,
+            margin_used: 0.0,
+            last_updated: Utc::now(),
+        });
+        state.live.last_quotes.write().await.insert(
+            INSTRUMENT.to_string(),
+            LastQuote {
+                mid: 4.0,
+                bid: 4.0,
+                ask: 4.0,
+                at: Utc::now(),
+            },
+        );
+        state.live.instrument_metadata.write().await.insert(
+            INSTRUMENT.to_string(),
+            InstrumentMeta {
+                min_trade_size: 1.0,
+                max_trade_size: None,
+                trade_units_precision: 0,
+                policy_max_units: None,
+                display_precision: 5,
+            },
+        );
+
+        live_strategies_repo::upsert_trading_config(
+            &state.db,
+            "trading_enabled",
+            &serde_json::json!("true"),
+        )
+        .await
+        .unwrap();
+
+        state
+    }
+
+    async fn seed_strategy(state: &AppState, parameters: serde_json::Value) -> Uuid {
+        let id = Uuid::new_v4();
+        live_strategies_repo::insert_live_strategy(
+            &state.db,
+            id,
+            "mean_reversion",
+            INSTRUMENT,
+            "H1",
+            &parameters,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE live_strategies SET enabled = true WHERE id = $1")
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        id
+    }
+
+    async fn cleanup(state: &AppState, ids: &[Uuid]) {
+        sqlx::query("DELETE FROM live_trades WHERE live_strategy_id = ANY($1)")
+            .bind(ids)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM live_strategies WHERE id = ANY($1)")
+            .bind(ids)
+            .execute(&state.db)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn evaluate_and_apply_serializes_same_key_without_torn_state() {
+        let (oanda_url, server) = mock_oanda().await;
+        let state = trading_state(&oanda_url).await;
+        // 20% stop -> 1250 units at 1% risk = 5% of NAV each, inside every cap.
+        let a = seed_strategy(&state, tf_parameters("serialize_a", -0.2)).await;
+        let b = seed_strategy(&state, tf_parameters("serialize_b", -0.2)).await;
+
+        let buffer = buffer_from_closes(&[3.0, 2.0, 1.0, 4.0]);
+        let (state_a, state_b) = (state.clone(), state.clone());
+        let (buffer_a, buffer_b) = (buffer.clone(), buffer.clone());
+        let task_a = tokio::spawn(async move {
+            evaluate_and_apply(
+                &state_a,
+                INSTRUMENT,
+                Granularity::H1,
+                &buffer_a,
+                4.0,
+                EvalScope::Full,
+            )
+            .await
+            .unwrap()
+        });
+        let task_b = tokio::spawn(async move {
+            evaluate_and_apply(
+                &state_b,
+                INSTRUMENT,
+                Granularity::H1,
+                &buffer_b,
+                4.0,
+                EvalScope::Full,
+            )
+            .await
+            .unwrap()
+        });
+        let reports: Vec<SignalReport> = task_a
+            .await
+            .unwrap()
+            .into_iter()
+            .chain(task_b.await.unwrap())
+            .collect();
+
+        let opened = reports
+            .iter()
+            .filter(|r| matches!(r.action, SignalAction::OpenedLong))
+            .count();
+        assert_eq!(opened, 2, "expected both strategies to open exactly once");
+        assert_eq!(state.live.open_positions.read().await.len(), 2);
+        assert!(state
+            .live
+            .open_positions
+            .read()
+            .await
+            .values()
+            .all(|p| p.units == "1250"));
+
+        let open_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM live_trades WHERE live_strategy_id = ANY($1) AND status = 'open'",
+        )
+        .bind(&[a, b][..])
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(open_rows, 2, "expected two open live_trades rows");
+
+        cleanup(&state, &[a, b]).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn exits_only_scope_never_opens_a_position() {
+        let (oanda_url, server) = mock_oanda().await;
+        let state = trading_state(&oanda_url).await;
+        let id = seed_strategy(&state, tf_parameters("exits_only", -0.2)).await;
+
+        // The same bullish cross that opens a trade under EvalScope::Full.
+        let buffer = buffer_from_closes(&[3.0, 2.0, 1.0, 4.0]);
+        let reports = evaluate_and_apply(
+            &state,
+            INSTRUMENT,
+            Granularity::H1,
+            &buffer,
+            4.0,
+            EvalScope::ExitsOnly,
+        )
+        .await
+        .unwrap();
+
+        assert!(reports.is_empty(), "catch-up bars must not produce entries");
+        assert!(state.live.open_positions.read().await.is_empty());
+
+        cleanup(&state, &[id]).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn evaluate_and_apply_closes_on_composite_exit_for_non_composite_label() {
+        let (oanda_url, server) = mock_oanda().await;
+        let state = trading_state(&oanda_url).await;
+        let id = seed_strategy(&state, tf_parameters("composite_exit", -0.2)).await;
+        seed_open_long(&state, id).await;
+
+        let buffer = buffer_from_closes(&[1.0, 2.0, 3.0, 0.0]);
+        let reports = evaluate_and_apply(
+            &state,
+            INSTRUMENT,
+            Granularity::H1,
+            &buffer,
+            0.5,
+            EvalScope::Full,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            reports
+                .iter()
+                .any(|r| matches!(r.action, SignalAction::ClosedLong)),
+            "expected composite exit to close long trade for non-composite strategy_type label"
+        );
+        assert!(state.live.open_positions.read().await.is_empty());
+
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM live_trades WHERE oanda_trade_id = 'close-test-trade'",
+        )
+        .fetch_optional(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(status.as_deref(), Some("closed"));
+
+        cleanup(&state, &[id]).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn kill_switch_blocks_entries_but_not_exits() {
+        let (oanda_url, server) = mock_oanda().await;
+        let state = trading_state(&oanda_url).await;
+        set_trading_enabled(&state, false).await;
+        let id = seed_strategy(&state, tf_parameters("kill_switch", -0.2)).await;
+
+        // A bullish cross that opens a trade when trading is enabled.
+        let entry_bars = buffer_from_closes(&[3.0, 2.0, 1.0, 4.0]);
+        let reports = evaluate_and_apply(
+            &state,
+            INSTRUMENT,
+            Granularity::H1,
+            &entry_bars,
+            4.0,
+            EvalScope::Full,
+        )
+        .await
+        .unwrap();
+        assert!(reports.is_empty(), "kill switch must block entries");
+        assert!(state.live.open_positions.read().await.is_empty());
+
+        // The same switch must not stop an open position from taking its exit.
+        seed_open_long(&state, id).await;
+        let exit_bars = buffer_from_closes(&[1.0, 2.0, 3.0, 0.0]);
+        let reports = evaluate_and_apply(
+            &state,
+            INSTRUMENT,
+            Granularity::H1,
+            &exit_bars,
+            0.5,
+            EvalScope::Full,
+        )
+        .await
+        .unwrap();
+        assert!(reports
+            .iter()
+            .any(|r| matches!(r.action, SignalAction::ClosedLong)));
+        assert!(state.live.open_positions.read().await.is_empty());
+        assert_eq!(
+            closed_exit_price(&state).await,
+            (Some("closed".into()), Some(0.5))
+        );
+
+        cleanup(&state, &[id]).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn disabled_strategy_still_exits_its_open_position() {
+        let (oanda_url, server) = mock_oanda().await;
+        let state = trading_state(&oanda_url).await;
+        let id = seed_strategy(&state, tf_parameters("disabled_exit", -0.2)).await;
+        seed_open_long(&state, id).await;
+        sqlx::query("UPDATE live_strategies SET enabled = false WHERE id = $1")
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let exit_bars = buffer_from_closes(&[1.0, 2.0, 3.0, 0.0]);
+        let reports = evaluate_and_apply(
+            &state,
+            INSTRUMENT,
+            Granularity::H1,
+            &exit_bars,
+            0.5,
+            EvalScope::Full,
+        )
+        .await
+        .unwrap();
+        assert!(reports
+            .iter()
+            .any(|r| matches!(r.action, SignalAction::ClosedLong)));
+        assert!(state.live.open_positions.read().await.is_empty());
+
+        cleanup(&state, &[id]).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn entry_fill_price_is_looked_up_when_the_fill_omits_it() {
+        let (oanda_url, server) = mock_oanda_with(MockOanda {
+            order_fill_price: None,
+            close_fill_price: Some("0.50000"),
+            trade: serde_json::json!({"price": "4.12500"}),
+        })
+        .await;
+        let state = trading_state(&oanda_url).await;
+        let id = seed_strategy(&state, tf_parameters("fill_lookup", -0.2)).await;
+
+        let entry_bars = buffer_from_closes(&[3.0, 2.0, 1.0, 4.0]);
+        let reports = evaluate_and_apply(
+            &state,
+            INSTRUMENT,
+            Granularity::H1,
+            &entry_bars,
+            4.0,
+            EvalScope::Full,
+        )
+        .await
+        .unwrap();
+        assert!(reports
+            .iter()
+            .any(|r| matches!(r.action, SignalAction::OpenedLong)));
+        {
+            let positions = state.live.open_positions.read().await;
+            assert_eq!(positions.len(), 1);
+            assert_eq!(positions.values().next().unwrap().entry_price, 4.125);
+        }
+
+        let entry_price: Option<f64> =
+            sqlx::query_scalar("SELECT entry_price FROM live_trades WHERE live_strategy_id = $1")
+                .bind(id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(entry_price, Some(4.125));
+
+        cleanup(&state, &[id]).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn entry_with_no_knowable_fill_price_is_closed_not_tracked() {
+        let (oanda_url, server) = mock_oanda_with(MockOanda {
+            order_fill_price: None,
+            close_fill_price: Some("0.50000"),
+            trade: serde_json::json!({}),
+        })
+        .await;
+        let state = trading_state(&oanda_url).await;
+        let id = seed_strategy(&state, tf_parameters("fill_unknown", -0.2)).await;
+
+        let entry_bars = buffer_from_closes(&[3.0, 2.0, 1.0, 4.0]);
+        let reports = evaluate_and_apply(
+            &state,
+            INSTRUMENT,
+            Granularity::H1,
+            &entry_bars,
+            4.0,
+            EvalScope::Full,
+        )
+        .await
+        .unwrap();
+        assert!(reports.iter().any(|r| {
+            matches!(r.action, SignalAction::EntryRejected)
+                && r.reason == "fill_price_unknown:closed_untracked_trade"
+        }));
+        assert!(state.live.open_positions.read().await.is_empty());
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM live_trades WHERE live_strategy_id = $1")
+                .bind(id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(rows, 0, "an untracked trade must leave no row");
+
+        cleanup(&state, &[id]).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn exit_with_unknown_fill_price_is_recorded_as_unknown() {
+        let (oanda_url, server) = mock_oanda_with(MockOanda {
+            order_fill_price: Some("4.00000"),
+            close_fill_price: None,
+            trade: serde_json::json!({}),
+        })
+        .await;
+        let state = trading_state(&oanda_url).await;
+        let id = seed_strategy(&state, tf_parameters("exit_unknown", -0.2)).await;
+        seed_open_long(&state, id).await;
+
+        let exit_bars = buffer_from_closes(&[1.0, 2.0, 3.0, 0.0]);
+        let reports = evaluate_and_apply(
+            &state,
+            INSTRUMENT,
+            Granularity::H1,
+            &exit_bars,
+            0.5,
+            EvalScope::Full,
+        )
+        .await
+        .unwrap();
+        assert!(reports
+            .iter()
+            .any(|r| matches!(r.action, SignalAction::ClosedLong)));
+        assert!(state.live.open_positions.read().await.is_empty());
+        assert_eq!(
+            closed_exit_price(&state).await,
+            (Some("closed".into()), None)
+        );
+
+        cleanup(&state, &[id]).await;
+        server.abort();
+    }
 
     fn make_position(trade_id: &str, entry_price: f64) -> OpenPosition {
         OpenPosition {
@@ -921,737 +1409,6 @@ mod tests {
             best_price: entry_price,
             strategy_type: "mean_reversion".to_string(),
         }
-    }
-
-    async fn mock_order_handler() -> Json<serde_json::Value> {
-        Json(serde_json::json!({
-            "orderFillTransaction": {
-                "tradeOpened": { "tradeID": "lock-test-trade-1" },
-                "price": "4.00000"
-            }
-        }))
-    }
-
-    async fn mock_close_handler() -> Json<serde_json::Value> {
-        Json(serde_json::json!({
-            "orderFillTransaction": {
-                "price": "0.00000",
-                "tradesClosed": [
-                    { "tradeID": "lock-test-trade-1", "realizedPL": "1.00" }
-                ]
-            }
-        }))
-    }
-
-    #[tokio::test]
-    async fn evaluate_and_apply_serializes_same_key_without_torn_state() {
-        let db_url = match std::env::var("AURO_TEST_DATABASE_URL") {
-            Ok(url) => url,
-            Err(_) => return,
-        };
-
-        let db = match sqlx::PgPool::connect(&db_url).await {
-            Ok(pool) => pool,
-            Err(_) => return,
-        };
-
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS trading_config (
-                key VARCHAR(50) PRIMARY KEY,
-                value JSONB NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )"#,
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS live_strategies (
-                id UUID PRIMARY KEY,
-                strategy_type VARCHAR(50) NOT NULL,
-                instrument VARCHAR(20) NOT NULL,
-                granularity VARCHAR(5) NOT NULL,
-                parameters JSONB NOT NULL,
-                enabled BOOLEAN NOT NULL DEFAULT false,
-                max_position_size VARCHAR(20) NOT NULL DEFAULT '1000',
-                risk_pct DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-                max_units BIGINT NULL
-            )"#,
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS live_trades (
-                id BIGSERIAL PRIMARY KEY,
-                live_strategy_id UUID,
-                oanda_trade_id VARCHAR(50),
-                instrument VARCHAR(20) NOT NULL,
-                direction VARCHAR(10) NOT NULL,
-                units VARCHAR(20) NOT NULL,
-                entry_price DOUBLE PRECISION,
-                exit_price DOUBLE PRECISION,
-                entry_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                exit_time TIMESTAMPTZ,
-                stop_loss_price DOUBLE PRECISION,
-                take_profit_price DOUBLE PRECISION,
-                pnl DOUBLE PRECISION,
-                pnl_percent DOUBLE PRECISION,
-                entry_reason TEXT,
-                exit_reason TEXT,
-                status VARCHAR(20) NOT NULL DEFAULT 'open',
-                indicators_at_entry JSONB,
-                regime_at_entry VARCHAR(120),
-                sizing_metadata JSONB,
-                stop_loss_state_at_close VARCHAR(20),
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )"#,
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "INSERT INTO trading_config (key, value) VALUES ('trading_enabled', $1::jsonb)
-               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
-        )
-        .bind("\"true\"")
-        .execute(&db)
-        .await
-        .unwrap();
-
-        let strategy_a = Uuid::new_v4();
-        let strategy_b = Uuid::new_v4();
-        let instrument = "LT_EVAL_H1".to_string();
-
-        sqlx::query("DELETE FROM live_trades WHERE live_strategy_id = $1 OR live_strategy_id = $2")
-            .bind(strategy_a)
-            .bind(strategy_b)
-            .execute(&db)
-            .await
-            .unwrap();
-
-        sqlx::query("DELETE FROM live_strategies WHERE id = $1 OR id = $2")
-            .bind(strategy_a)
-            .bind(strategy_b)
-            .execute(&db)
-            .await
-            .unwrap();
-
-        sqlx::query(
-              "INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, risk_pct, max_units)
-               VALUES ($1, 'mean_reversion', $2, 'H1', $3, true, '1000', 0.0, NULL)",
-        )
-        .bind(strategy_a)
-        .bind(&instrument)
-        .bind(serde_json::json!({
-            "strategy_id": null,
-            "strategy_name": "gate_regression_a",
-            "version": "v1_composite",
-            "instrument": instrument.clone(),
-            "granularity": "H1",
-            "components": {
-                "tf": {
-                    "type": "TrendFollowing",
-                    "params": {
-                        "fast_period": 2,
-                        "slow_period": 3,
-                        "ma_type": "sma"
-                    }
-                }
-            },
-            "entry": {"long": "tf.bullish_cross", "short": "tf.bearish_cross"},
-            "exit": {"long": "tf.bearish_cross", "short": "tf.bullish_cross"},
-            "stop": {"type": "FixedPct", "params": {"pct": -0.02}},
-            "sizing": {"type": "RiskPct", "params": {"pct": 0.01}}
-        }))
-        .execute(&db)
-        .await
-        .unwrap();
-
-        sqlx::query(
-              "INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, risk_pct, max_units)
-               VALUES ($1, 'mean_reversion', $2, 'H1', $3, true, '1000', 0.0, NULL)",
-        )
-        .bind(strategy_b)
-        .bind(&instrument)
-        .bind(serde_json::json!({
-            "strategy_id": null,
-            "strategy_name": "gate_regression_b",
-            "version": "v1_composite",
-            "instrument": instrument.clone(),
-            "granularity": "H1",
-            "components": {
-                "tf": {
-                    "type": "TrendFollowing",
-                    "params": {
-                        "fast_period": 2,
-                        "slow_period": 3,
-                        "ma_type": "sma"
-                    }
-                }
-            },
-            "entry": {"long": "tf.bullish_cross", "short": "tf.bearish_cross"},
-            "exit": {"long": "tf.bearish_cross", "short": "tf.bullish_cross"},
-            "stop": {"type": "FixedPct", "params": {"pct": -0.02}},
-            "sizing": {"type": "RiskPct", "params": {"pct": 0.01}},
-            "variant": "b"
-        }))
-        .execute(&db)
-        .await
-        .unwrap();
-
-        let app = Router::new()
-            .route("/v3/accounts/:account_id/orders", post(mock_order_handler))
-            .route(
-                "/v3/accounts/:account_id/trades/:trade_id/close",
-                put(mock_close_handler),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let config = Config {
-            database_url: db_url,
-            oanda_api_key: "test-key".to_string(),
-            oanda_account_id: "test-account".to_string(),
-            oanda_base_url: format!("http://{}", addr),
-            oanda_stream_url: "http://127.0.0.1:1".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            questrade_refresh_token: None,
-        };
-
-        let oanda = OandaClient::new(
-            &config.oanda_base_url,
-            &config.oanda_stream_url,
-            &config.oanda_api_key,
-            &config.oanda_account_id,
-        );
-
-        let (price_tx, _) = broadcast::channel(8);
-        let wealthsimple = WealthsimpleClient::new(&db);
-        let state = AppState {
-            db: db.clone(),
-            config,
-            oanda,
-            start_time: Utc::now(),
-            live: Arc::new(LiveState::new()),
-            price_tx,
-            eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap()))),
-            questrade: None,
-            wealthsimple,
-        };
-
-        let mut buffer = CandleBuffer::new(16);
-        let base = Utc::now();
-        for (idx, close) in [3.0, 2.0, 1.0, 4.0].iter().enumerate() {
-            buffer.push(Candle {
-                time: base + Duration::minutes(idx as i64),
-                mid: OHLC {
-                    open: *close,
-                    high: *close,
-                    low: *close,
-                    close: *close,
-                },
-                volume: 1,
-                bid: None,
-                ask: None,
-            });
-        }
-
-        let state_a = state.clone();
-        let state_b = state.clone();
-        let buffer_a = buffer.clone();
-        let buffer_b = buffer.clone();
-        let instrument_a = instrument.clone();
-        let instrument_b = instrument.clone();
-
-        let task_a = tokio::spawn(async move {
-            evaluate_and_apply(&state_a, &instrument_a, Granularity::H1, &buffer_a, 4.0)
-                .await
-                .unwrap()
-        });
-
-        let task_b = tokio::spawn(async move {
-            evaluate_and_apply(&state_b, &instrument_b, Granularity::H1, &buffer_b, 4.0)
-                .await
-                .unwrap()
-        });
-
-        let reports_a = task_a.await.unwrap();
-        let reports_b = task_b.await.unwrap();
-
-        let mut opened = 0usize;
-        for report in reports_a.iter().chain(reports_b.iter()) {
-            if matches!(
-                report.action,
-                SignalAction::OpenedLong | SignalAction::OpenedShort
-            ) {
-                opened += 1;
-            }
-        }
-
-        assert_eq!(opened, 2, "expected both strategies to open");
-
-        let positions = state.live.open_positions.read().await;
-        assert_eq!(positions.len(), 2, "expected two open positions");
-        drop(positions);
-
-        let open_rows: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM live_trades WHERE (live_strategy_id = $1 OR live_strategy_id = $2) AND status = 'open'",
-        )
-        .bind(strategy_a)
-        .bind(strategy_b)
-        .fetch_one(&db)
-        .await
-        .unwrap_or(0);
-        assert_eq!(open_rows, 2, "expected two open live_trades rows");
-
-        sqlx::query("DELETE FROM live_trades WHERE live_strategy_id = $1 OR live_strategy_id = $2")
-            .bind(strategy_a)
-            .bind(strategy_b)
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM live_strategies WHERE id = $1 OR id = $2")
-            .bind(strategy_a)
-            .bind(strategy_b)
-            .execute(&db)
-            .await
-            .unwrap();
-
-        server.abort();
-    }
-
-    #[tokio::test]
-    #[ignore = "requires AURO_TEST_DATABASE_URL and destructive table mutation"]
-    async fn execute_entry_keeps_in_memory_position_when_live_trades_insert_fails() {
-        let db_url =
-            std::env::var("AURO_TEST_DATABASE_URL").expect("requires AURO_TEST_DATABASE_URL");
-        let db = sqlx::PgPool::connect(&db_url)
-            .await
-            .expect("failed connecting to test db");
-
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS trading_config (
-                key VARCHAR(50) PRIMARY KEY,
-                value JSONB NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )"#,
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS live_strategies (
-                id UUID PRIMARY KEY,
-                strategy_type VARCHAR(50) NOT NULL,
-                instrument VARCHAR(20) NOT NULL,
-                granularity VARCHAR(5) NOT NULL,
-                parameters JSONB NOT NULL,
-                enabled BOOLEAN NOT NULL DEFAULT false,
-                max_position_size VARCHAR(20) NOT NULL DEFAULT '1000',
-                risk_pct DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-                max_units BIGINT NULL
-            )"#,
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "INSERT INTO trading_config (key, value) VALUES ('trading_enabled', $1::jsonb)
-               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
-        )
-        .bind("\"true\"")
-        .execute(&db)
-        .await
-        .unwrap();
-
-        let strategy_id = Uuid::new_v4();
-        let instrument = "LT_DBFAIL_H1".to_string();
-
-        sqlx::query("DELETE FROM live_strategies WHERE id = $1")
-            .bind(strategy_id)
-            .execute(&db)
-            .await
-            .unwrap();
-
-        sqlx::query(
-            "INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, risk_pct, max_units)
-             VALUES ($1, 'mean_reversion', $2, 'H1', $3, true, '1000', 0.0, NULL)",
-        )
-        .bind(strategy_id)
-        .bind(&instrument)
-        .bind(serde_json::json!({
-            "strategy_id": null,
-            "strategy_name": "db_insert_failure_regression",
-            "version": "v1_composite",
-            "instrument": instrument.clone(),
-            "granularity": "H1",
-            "components": {
-                "tf": {
-                    "type": "TrendFollowing",
-                    "params": { "fast_period": 2, "slow_period": 3, "ma_type": "sma" }
-                }
-            },
-            "entry": {"long": "tf.bullish_cross", "short": "tf.bearish_cross"},
-            "exit": {"long": "tf.bearish_cross", "short": "tf.bullish_cross"},
-            "stop": {"type": "FixedPct", "params": {"pct": -0.02}},
-            "sizing": {"type": "RiskPct", "params": {"pct": 0.01}}
-        }))
-        .execute(&db)
-        .await
-        .unwrap();
-
-        let app = Router::new().route("/v3/accounts/:account_id/orders", post(mock_order_handler));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let config = Config {
-            database_url: db_url,
-            oanda_api_key: "test-key".to_string(),
-            oanda_account_id: "test-account".to_string(),
-            oanda_base_url: format!("http://{}", addr),
-            oanda_stream_url: "http://127.0.0.1:1".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            questrade_refresh_token: None,
-        };
-
-        let oanda = OandaClient::new(
-            &config.oanda_base_url,
-            &config.oanda_stream_url,
-            &config.oanda_api_key,
-            &config.oanda_account_id,
-        );
-
-        let (price_tx, _) = broadcast::channel(8);
-        let wealthsimple = WealthsimpleClient::new(&db);
-        let state = AppState {
-            db: db.clone(),
-            config,
-            oanda,
-            start_time: Utc::now(),
-            live: Arc::new(LiveState::new()),
-            price_tx,
-            eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap()))),
-            questrade: None,
-            wealthsimple,
-        };
-
-        sqlx::query("DROP TABLE IF EXISTS live_trades")
-            .execute(&db)
-            .await
-            .unwrap();
-
-        let mut buffer = CandleBuffer::new(16);
-        let base = Utc::now();
-        for (idx, close) in [3.0, 2.0, 1.0, 4.0].iter().enumerate() {
-            buffer.push(Candle {
-                time: base + Duration::minutes(idx as i64),
-                mid: OHLC {
-                    open: *close,
-                    high: *close,
-                    low: *close,
-                    close: *close,
-                },
-                volume: 1,
-                bid: None,
-                ask: None,
-            });
-        }
-
-        let reports = evaluate_and_apply(&state, &instrument, Granularity::H1, &buffer, 4.0)
-            .await
-            .unwrap();
-
-        assert!(
-            reports
-                .iter()
-                .any(|r| matches!(r.action, SignalAction::OpenedLong)),
-            "expected opened report when DB insert fails"
-        );
-
-        let positions = state.live.open_positions.read().await;
-        assert_eq!(
-            positions.len(),
-            1,
-            "expected in-memory open position to persist"
-        );
-        drop(positions);
-
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn evaluate_and_apply_closes_on_composite_exit_for_non_composite_label() {
-        let db_url = match std::env::var("AURO_TEST_DATABASE_URL") {
-            Ok(url) => url,
-            Err(_) => return,
-        };
-
-        let db = match sqlx::PgPool::connect(&db_url).await {
-            Ok(pool) => pool,
-            Err(_) => return,
-        };
-
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS trading_config (
-                key VARCHAR(50) PRIMARY KEY,
-                value JSONB NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )"#,
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS live_strategies (
-                id UUID PRIMARY KEY,
-                strategy_type VARCHAR(50) NOT NULL,
-                instrument VARCHAR(20) NOT NULL,
-                granularity VARCHAR(5) NOT NULL,
-                parameters JSONB NOT NULL,
-                enabled BOOLEAN NOT NULL DEFAULT false,
-                max_position_size VARCHAR(20) NOT NULL DEFAULT '1000',
-                risk_pct DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-                max_units BIGINT NULL
-            )"#,
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS live_trades (
-                id BIGSERIAL PRIMARY KEY,
-                live_strategy_id UUID,
-                oanda_trade_id VARCHAR(50),
-                instrument VARCHAR(20) NOT NULL,
-                direction VARCHAR(10) NOT NULL,
-                units VARCHAR(20) NOT NULL,
-                entry_price DOUBLE PRECISION,
-                exit_price DOUBLE PRECISION,
-                entry_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                exit_time TIMESTAMPTZ,
-                stop_loss_price DOUBLE PRECISION,
-                take_profit_price DOUBLE PRECISION,
-                pnl DOUBLE PRECISION,
-                pnl_percent DOUBLE PRECISION,
-                entry_reason TEXT,
-                exit_reason TEXT,
-                status VARCHAR(20) NOT NULL DEFAULT 'open',
-                indicators_at_entry JSONB,
-                regime_at_entry VARCHAR(120),
-                sizing_metadata JSONB,
-                stop_loss_state_at_close VARCHAR(20),
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )"#,
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "INSERT INTO trading_config (key, value) VALUES ('trading_enabled', $1::jsonb)
-               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
-        )
-        .bind("\"true\"")
-        .execute(&db)
-        .await
-        .unwrap();
-
-        let strategy_id = Uuid::new_v4();
-        let instrument = "LT_EXIT_H1".to_string();
-
-        sqlx::query("DELETE FROM live_trades WHERE live_strategy_id = $1")
-            .bind(strategy_id)
-            .execute(&db)
-            .await
-            .unwrap();
-
-        sqlx::query("DELETE FROM live_strategies WHERE id = $1")
-            .bind(strategy_id)
-            .execute(&db)
-            .await
-            .unwrap();
-
-        sqlx::query(
-            "INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled, max_position_size, risk_pct, max_units)
-             VALUES ($1, 'mean_reversion', $2, 'H1', $3, true, '1000', 0.0, NULL)",
-        )
-        .bind(strategy_id)
-        .bind(&instrument)
-        .bind(serde_json::json!({
-            "strategy_id": null,
-            "strategy_name": "gate_exit_regression",
-            "version": "v1_composite",
-            "instrument": instrument.clone(),
-            "granularity": "H1",
-            "components": {
-                "tf": {
-                    "type": "TrendFollowing",
-                    "params": {
-                        "fast_period": 2,
-                        "slow_period": 3,
-                        "ma_type": "sma"
-                    }
-                }
-            },
-            "entry": {"long": "tf.bullish_cross", "short": "tf.bearish_cross"},
-            "exit": {"long": "tf.bearish_cross", "short": "tf.bullish_cross"},
-            "stop": {"type": "FixedPct", "params": {"pct": -0.02}},
-            "sizing": {"type": "RiskPct", "params": {"pct": 0.01}}
-        }))
-        .execute(&db)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"INSERT INTO live_trades
-                (live_strategy_id, oanda_trade_id, instrument, direction, units,
-                 entry_price, stop_loss_price, take_profit_price, status)
-                VALUES ($1, 'lock-test-trade-1', $2, 'Long', '1000', 1.0000, 0.9800, 1.0500, 'open')"#,
-        )
-        .bind(strategy_id)
-        .bind(&instrument)
-        .execute(&db)
-        .await
-        .unwrap();
-
-        let app = Router::new()
-            .route("/v3/accounts/:account_id/orders", post(mock_order_handler))
-            .route(
-                "/v3/accounts/:account_id/trades/:trade_id/close",
-                put(mock_close_handler),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let config = Config {
-            database_url: db_url,
-            oanda_api_key: "test-key".to_string(),
-            oanda_account_id: "test-account".to_string(),
-            oanda_base_url: format!("http://{}", addr),
-            oanda_stream_url: "http://127.0.0.1:1".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            questrade_refresh_token: None,
-        };
-
-        let oanda = OandaClient::new(
-            &config.oanda_base_url,
-            &config.oanda_stream_url,
-            &config.oanda_api_key,
-            &config.oanda_account_id,
-        );
-
-        let (price_tx, _) = broadcast::channel(8);
-        let wealthsimple = WealthsimpleClient::new(&db);
-        let state = AppState {
-            db: db.clone(),
-            config,
-            oanda,
-            start_time: Utc::now(),
-            live: Arc::new(LiveState::new()),
-            price_tx,
-            eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap()))),
-            questrade: None,
-            wealthsimple,
-        };
-
-        {
-            let mut positions = state.live.open_positions.write().await;
-            positions.insert(
-                "lock-test-trade-1".to_string(),
-                OpenPosition {
-                    strategy_id,
-                    trade_id: "lock-test-trade-1".to_string(),
-                    instrument: instrument.clone(),
-                    granularity: Granularity::H1,
-                    direction: Direction::Long,
-                    entry_price: 1.0,
-                    entry_time: Utc::now() - Duration::hours(4),
-                    units: "1000".to_string(),
-                    stop_loss_state: StopLossState::NotApplicable,
-                    worst_price: 1.0,
-                    best_price: 1.0,
-                    strategy_type: "mean_reversion".to_string(),
-                },
-            );
-        }
-
-        let mut buffer = CandleBuffer::new(16);
-        let base = Utc::now();
-        for (idx, close) in [1.0, 2.0, 3.0, 0.0].iter().enumerate() {
-            buffer.push(Candle {
-                time: base + Duration::minutes(idx as i64),
-                mid: OHLC {
-                    open: *close,
-                    high: *close,
-                    low: *close,
-                    close: *close,
-                },
-                volume: 1,
-                bid: None,
-                ask: None,
-            });
-        }
-
-        let reports = evaluate_and_apply(&state, &instrument, Granularity::H1, &buffer, 0.0)
-            .await
-            .unwrap();
-
-        assert!(
-            reports
-                .iter()
-                .any(|r| matches!(r.action, SignalAction::ClosedLong)),
-            "expected composite exit to close long trade for non-composite strategy_type label"
-        );
-
-        let positions = state.live.open_positions.read().await;
-        assert!(
-            positions.is_empty(),
-            "expected in-memory position to be removed"
-        );
-        drop(positions);
-
-        let status: Option<String> = sqlx::query_scalar(
-            "SELECT status FROM live_trades WHERE oanda_trade_id = 'lock-test-trade-1'",
-        )
-        .fetch_optional(&db)
-        .await
-        .unwrap();
-        assert_eq!(status.as_deref(), Some("closed"));
-
-        sqlx::query("DELETE FROM live_trades WHERE live_strategy_id = $1")
-            .bind(strategy_id)
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM live_strategies WHERE id = $1")
-            .bind(strategy_id)
-            .execute(&db)
-            .await
-            .unwrap();
-
-        server.abort();
     }
 
     #[test]

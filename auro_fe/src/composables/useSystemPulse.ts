@@ -1,5 +1,7 @@
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
+import { getApiErrorMessage, opusApi } from "../services/api";
+
 interface RustHealth {
     last_tick_seconds_ago: number | null;
     last_evaluator_run_seconds_ago: number | null;
@@ -58,15 +60,10 @@ export function useSystemPulse() {
         loading.value = true;
         error.value = null;
         try {
-            const response = await fetch("/opus/health/system");
-            const body = (await response.json()) as SystemHealth | { error: string };
-            if (!response.ok || !("rust" in body)) {
-                throw new Error("error" in body ? body.error : "Failed to load system pulse");
-            }
-            data.value = body;
+            data.value = await opusApi.get<SystemHealth>("/health/system");
             fetchedAt.value = new Date();
         } catch (e) {
-            error.value = e instanceof Error ? e.message : "Failed to load system pulse";
+            error.value = getApiErrorMessage(e, "Failed to load system pulse");
             data.value = null;
         } finally {
             loading.value = false;

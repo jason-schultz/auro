@@ -1,6 +1,7 @@
 defmodule Opus.Trading.Suspension do
   use Ecto.Schema
   import Ecto.Changeset
+  import Ecto.Query, only: [from: 2]
 
   schema "strategy_suspensions" do
     field :live_strategy_id, Ecto.UUID
@@ -24,5 +25,11 @@ defmodule Opus.Trading.Suspension do
       :cleared_by
     ])
     |> validate_required([:live_strategy_id, :triggered_at, :trigger_kind, :trigger_detail])
+  end
+
+  @doc "Suspensions nobody has reset yet, most recent trigger first."
+  @spec open_query() :: Ecto.Query.t()
+  def open_query do
+    from(s in __MODULE__, where: is_nil(s.cleared_at), order_by: [desc: s.triggered_at])
   end
 end

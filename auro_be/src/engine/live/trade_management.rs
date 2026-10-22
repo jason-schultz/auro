@@ -1,3 +1,4 @@
+use crate::db::repositories::live_trades as live_trades_repo;
 use crate::engine::types::{Direction, OpenPosition};
 use crate::state::AppState;
 
@@ -41,18 +42,8 @@ pub(crate) async fn update_mae_mfe(state: &AppState, position: &OpenPosition, cu
         Direction::Short => (position.entry_price - new_best) / position.entry_price,
     };
 
-    if let Err(e) = sqlx::query(
-        r#"UPDATE live_trades
-        SET mae_pct = GREATEST(COALESCE(mae_pct, 0), $1),
-            mfe_pct = GREATEST(COALESCE(mfe_pct, 0), $2),
-            updated_at = NOW()
-        WHERE oanda_trade_id = $3 AND status = 'open'"#,
-    )
-    .bind(mae_pct)
-    .bind(mfe_pct)
-    .bind(&position.trade_id)
-    .execute(&state.db)
-    .await
+    if let Err(e) =
+        live_trades_repo::record_excursions(&state.db, &position.trade_id, mae_pct, mfe_pct).await
     {
         tracing::warn!(
             "[MGMT] Failed to update MAE/MFE for {}: {}",

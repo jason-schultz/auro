@@ -18,16 +18,14 @@ pub(crate) async fn all_strategy_instruments(pool: &PgPool) -> Result<Vec<String
         .await
 }
 
-pub(crate) async fn enabled_strategy_instruments_for_granularity(
+/// Every (instrument, granularity) with at least one enabled live strategy:
+/// the pairs whose bars must reach the evaluator with the least delay.
+pub(crate) async fn enabled_strategy_keys(
     pool: &PgPool,
-    granularity: &str,
-) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar!(
-        "SELECT DISTINCT instrument FROM live_strategies WHERE granularity = $1 AND enabled = true",
-        granularity,
-    )
-    .fetch_all(pool)
-    .await
+) -> Result<Vec<(String, String)>, sqlx::Error> {
+    sqlx::query_as("SELECT DISTINCT instrument, granularity FROM live_strategies WHERE enabled")
+        .fetch_all(pool)
+        .await
 }
 
 pub(crate) async fn strategy_count_for_instrument_excluding(
@@ -74,4 +72,10 @@ pub(crate) async fn open_trade_count_for_strategy(
     .await?;
 
     Ok(open_count.unwrap_or(0))
+}
+
+pub(crate) async fn instrument_unit_caps(pool: &PgPool) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    sqlx::query_as("SELECT instrument, max_units FROM instrument_unit_caps")
+        .fetch_all(pool)
+        .await
 }

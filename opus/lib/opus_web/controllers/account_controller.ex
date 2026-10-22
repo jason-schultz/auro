@@ -7,6 +7,123 @@ defmodule OpusWeb.AccountController do
 
   @default_resolution "15m"
 
+  @doc """
+  Cross-broker portfolio summary: OANDA (latest account snapshot) plus
+  Wealthsimple accounts (positions valued at last refreshed price).
+
+  All accounts are CAD today; `total_cad` sums account values directly.
+  If a non-CAD account ever appears, it is still listed but excluded from
+  the total (per-account `currency` tells the FE what it's looking at).
+  """
+  def portfolio_summary(conn, _params) do
+    oanda = latest_oanda_snapshot()
+    wealthsimple = wealthsimple_accounts()
+
+    accounts = List.wrap(oanda) ++ wealthsimple
+
+    total_cad =
+      accounts
+      |> Enum.filter(&(&1.currency == "CAD"))
+      |> Enum.map(& &1.value)
+      |> Enum.sum()
+
+    json(conn, %{
+      total_cad: total_cad,
+      as_of: DateTime.utc_now(),
+      accounts: accounts
+    })
+  end
+
+  defp latest_oanda_snapshot do
+    from(s in "account_snapshots",
+      order_by: [desc: s.timestamp],
+      limit: 1,
+      select: %{
+        nav: s.nav,
+        balance: s.balance,
+        unrealized_pl: s.unrealized_pl,
+        currency: s.currency,
+        open_position_count: s.open_position_count,
+        timestamp: s.timestamp
+      }
+    )
+    |> Repo.one()
+    |> case do
+      nil ->
+        nil
+
+      row ->
+        %{
+          broker: "oanda",
+          label: "OANDA Practice",
+          currency: row.currency,
+          value: row.nav,
+          balance: row.balance,
+          unrealized_pl: row.unrealized_pl,
+          open_positions: row.open_position_count,
+          as_of: row.timestamp
+        }
+    end
+  end
+
+  defp wealthsimple_accounts do
+    position_values =
+      from(p in "wealthsimple_positions",
+        group_by: p.account_id,
+        select:
+          {p.account_id,
+           %{
+             market_value:
+               fragment(
+                 "SUM(? * COALESCE(?, ?, 0))::float8",
+                 p.shares,
+                 p.current_price,
+                 p.avg_cost
+               ),
+             positions: count(p.id),
+             priced_at: max(p.updated_at)
+           }}
+      )
+      |> Repo.all()
+      |> Map.new()
+
+    from(a in "wealthsimple_accounts",
+      order_by: [asc: a.id],
+      select: %{
+        id: a.id,
+        account_type: a.account_type,
+        currency: a.currency,
+        cash: a.cash,
+        market_value: a.market_value,
+        total_equity: a.total_equity,
+        updated_at: a.updated_at
+      }
+    )
+    |> Repo.all()
+    |> Enum.map(fn account ->
+      positions = Map.get(position_values, account.id)
+
+      market_value =
+        case positions do
+          %{market_value: mv} when is_float(mv) and mv > 0 -> mv
+          _ -> account.market_value || 0.0
+        end
+
+      value = account.total_equity || (account.cash || 0.0) + market_value
+
+      %{
+        broker: "wealthsimple",
+        label: account.account_type,
+        currency: account.currency,
+        value: value,
+        cash: account.cash,
+        market_value: market_value,
+        open_positions: (positions && positions.positions) || 0,
+        as_of: (positions && positions.priced_at) || account.updated_at
+      }
+    end)
+  end
+
   def equity_curve(conn, params) do
     now = DateTime.utc_now()
 

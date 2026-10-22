@@ -1,0 +1,25 @@
+Saved. The overlay idea is exactly the right v2 — and it's cheaper than it sounds: the MA lines and Donchian channels can be computed client-side from the same candles the chart already has, and lightweight-charts supports line overlays and per-bar markers natively. The one part worth doing carefully is the "where did ports fire" markers — those should come from Rust so the chart shows exactly the math the backtest uses, not a JS reimplementation that drifts.
+
+Now the vocabulary. The mental model first, because every term hangs off it:
+
+A component is a sensor. Each bar (candle close), every component looks at recent history and answers some yes/no questions. Those answers are its ports. The entry/exit trees are just boolean wiring over those sensors, the stop is "what if I'm wrong," and sizing is "how much do I bet." That's the entire system.
+
+The six sensors:
+
+MA Cross (TrendFollowing). A moving average is just the mean of the last N closes — a smoothed version of price. A fast MA (50 bars) tracks price closely; a slow one (200) barely moves. When fast crosses above slow, recent prices are outrunning the long-run average → an uptrend may be starting. That's bullish_cross (the famous "golden cross"); the reverse is bearish_cross. The thesis: trends, once started, persist. In your own data this works on metals/energy daily, and is dead on FX intraday.
+
+MA Filter. One MA, one question: is price above it (above) or below it (below)? It's not an entry signal — it's a regime gate you AND with something else. "Only buy dips when the bigger trend is up" is AND[rsi.long, trend.above].
+
+RSI Reversion. RSI is a 0–100 gauge of how one-sided recent movement has been: near 0 means almost all recent bars were down ("oversold"), near 100 all up ("overbought"). The period sets the lookback — RSI(14) is the textbook default; RSI(2) is deliberately twitchy, firing on two-bar dips. long fires when oversold, short when overbought, the exit_* ports when RSI crosses back through the middle. Thesis: sharp short-term moves snap back — if the bigger trend supports it, hence the MA filter.
+
+Z-Score MR (MeanReversion). The z-score is how many standard deviations price sits from its own N-bar average — a normalized "how stretched is this." |z| > 1.5 means a roughly-once-in-a-while extension. Thesis: stretched prices revert to the mean. The exit_* ports fire on return-to-mean (z back to 0) or when z blows out past the stop threshold (the trade thesis failed — get out). This is your bread-and-butter FX edge.
+
+MACD. Take two exponential MAs (like SMAs but weighting recent bars more), subtract them — that difference is momentum. Smooth that with a third EMA (the "signal line"). bullish_cross/bearish_cross fire when momentum turns; bullish/bearish tell you which side it's currently on — the posture ports make good AND-filters, the cross ports are triggers.
+
+Donchian. The highest high and lowest low of the last N bars form a channel. breakout_long fires when price exceeds the N-bar high. Thesis: new highs beget new highs (the Turtle traders' system). Worth knowing: you tested this on H4/H1 across your universe and found nothing — daily is the only untested home.
+
+The risk plumbing:
+
+Fixed % stop is simple but ignores that XAU and EUR_USD wiggle very differently. ATR multiple fixes that: ATR (Average True Range) is the average bar-to-bar movement over the last 14 bars — "how much does this thing normally move per bar." A 3×ATR stop says "give it three normal bars of room before declaring the trade wrong," and auto-adapts to instrument and timeframe. From component delegates placement to the component's own logic (MR anchors its stop off the z-extension, not entry price).
+Max hold bars is a time stop. Mean-reversion theses decay: if the snap-back hasn't happened within ~10 bars, you're not early, you're wrong. The validated RSI(2) config uses this as its real exit backstop.
+Risk % sizing works backwards from the stop: "size the position so that if the stop hits, I lose exactly 1% of the account." Wider stop → smaller position, automatically.

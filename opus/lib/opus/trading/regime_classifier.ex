@@ -136,6 +136,12 @@ defmodule Opus.Trading.RegimeClassifier do
   def policy_for_inputs("mean_reversion", :uncertain, inputs),
     do: {false, "uncertain MR disabled (fail-closed) — #{adx_line_for_inputs(inputs)}"}
 
+  # Composite strategies carry their own regime gate (e.g. a MaFilter component)
+  # and were validated without ADX gating, so the regime does not gate them.
+  # Circuit-breaker suspensions still disable them upstream in RulesEngine.decide/3.
+  def policy_for_inputs("composite", _regime, inputs),
+    do: {true, "composite self-gated — #{adx_line_for_inputs(inputs)}"}
+
   def policy_for_inputs(_strategy_type, regime, _inputs),
     do: {false, "no regime data (#{inspect(regime)}) — defaulting to disabled"}
 

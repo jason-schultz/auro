@@ -28,49 +28,6 @@ pub struct MacdParams {
     pub signal_period: usize,
 }
 
-pub fn compute_ports(candles: &[Candle], params: &MacdParams) -> Option<HashMap<String, bool>> {
-    if params.fast_period == 0
-        || params.slow_period == 0
-        || params.signal_period == 0
-        || params.fast_period >= params.slow_period
-    {
-        return None;
-    }
-
-    // We need MACD at n and n-1 to detect cross events.
-    let min_len = params.slow_period + params.signal_period + 1;
-    if candles.len() < min_len {
-        return None;
-    }
-
-    let n = candles.len();
-    let curr = indicators::macd(
-        candles,
-        params.fast_period,
-        params.slow_period,
-        params.signal_period,
-    )?;
-    let prev = indicators::macd(
-        &candles[..n - 1],
-        params.fast_period,
-        params.slow_period,
-        params.signal_period,
-    )?;
-
-    // Cross detection convention (freeze): inclusive prior bar, strict current bar.
-    let bullish_cross = prev.macd_line <= prev.signal_line && curr.macd_line > curr.signal_line;
-    let bearish_cross = prev.macd_line >= prev.signal_line && curr.macd_line < curr.signal_line;
-    let bullish = curr.histogram > 0.0;
-    let bearish = curr.histogram < 0.0;
-
-    let mut ports = HashMap::new();
-    ports.insert("bullish_cross".to_string(), bullish_cross);
-    ports.insert("bearish_cross".to_string(), bearish_cross);
-    ports.insert("bullish".to_string(), bullish);
-    ports.insert("bearish".to_string(), bearish);
-    Some(ports)
-}
-
 impl Signaler for MacdParams {
     fn warmup(&self) -> usize {
         // EMA window seeding needs enough bars to build slow EMA and then
@@ -79,7 +36,46 @@ impl Signaler for MacdParams {
     }
 
     fn compute(&self, candles: &[Candle]) -> Option<HashMap<String, bool>> {
-        compute_ports(candles, self)
+        if self.fast_period == 0
+            || self.slow_period == 0
+            || self.signal_period == 0
+            || self.fast_period >= self.slow_period
+        {
+            return None;
+        }
+
+        // We need MACD at n and n-1 to detect cross events.
+        let min_len = self.slow_period + self.signal_period + 1;
+        if candles.len() < min_len {
+            return None;
+        }
+
+        let n = candles.len();
+        let curr = indicators::macd(
+            candles,
+            self.fast_period,
+            self.slow_period,
+            self.signal_period,
+        )?;
+        let prev = indicators::macd(
+            &candles[..n - 1],
+            self.fast_period,
+            self.slow_period,
+            self.signal_period,
+        )?;
+
+        // Cross detection convention (freeze): inclusive prior bar, strict current bar.
+        let bullish_cross = prev.macd_line <= prev.signal_line && curr.macd_line > curr.signal_line;
+        let bearish_cross = prev.macd_line >= prev.signal_line && curr.macd_line < curr.signal_line;
+        let bullish = curr.histogram > 0.0;
+        let bearish = curr.histogram < 0.0;
+
+        let mut ports = HashMap::new();
+        ports.insert("bullish_cross".to_string(), bullish_cross);
+        ports.insert("bearish_cross".to_string(), bearish_cross);
+        ports.insert("bullish".to_string(), bullish);
+        ports.insert("bearish".to_string(), bearish);
+        Some(ports)
     }
 
     fn entry_reason(&self, candles: &[Candle], _direction: Direction) -> EntryReason {
@@ -147,7 +143,7 @@ mod tests {
         let mut found = false;
         for i in (p.warmup() + 1)..candles.len() {
             let window = &candles[..=i];
-            if let Some(ports) = compute_ports(window, &p) {
+            if let Some(ports) = p.compute(window) {
                 if ports["bullish_cross"] {
                     assert!(ports["bullish"]);
                     assert!(!ports["bearish_cross"]);
@@ -177,7 +173,7 @@ mod tests {
         let mut found = false;
         for i in (p.warmup() + 1)..candles.len() {
             let window = &candles[..=i];
-            if let Some(ports) = compute_ports(window, &p) {
+            if let Some(ports) = p.compute(window) {
                 if ports["bearish_cross"] {
                     assert!(ports["bearish"]);
                     assert!(!ports["bullish_cross"]);
@@ -209,7 +205,7 @@ mod tests {
 
         for i in (p.warmup() + 1)..candles.len() {
             let window = &candles[..=i];
-            if let Some(ports) = compute_ports(window, &p) {
+            if let Some(ports) = p.compute(window) {
                 if ports["bullish_cross"] {
                     seen_cross = true;
                     continue;

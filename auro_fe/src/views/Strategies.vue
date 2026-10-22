@@ -5,6 +5,12 @@
                 <span class="text-xs text-muted-foreground font-mono">
                     {{ enabledCount }}/{{ strategies.length }} active
                 </span>
+                <router-link
+                    to="/strategies/new"
+                    class="ml-3 rounded bg-primary/10 px-2.5 py-1 text-xs text-primary hover:bg-primary/20 transition-colors"
+                >
+                    + New Strategy
+                </router-link>
             </template>
         </ViewHeader>
 

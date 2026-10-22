@@ -19,9 +19,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::engine::donchian::DonchianParams;
+use crate::engine::event_window::EventWindowParams;
 use crate::engine::ma_filter::MaFilterParams;
 use crate::engine::macd::MacdParams;
 use crate::engine::mean_reversion::MeanReversionParams;
+use crate::engine::momentum::MomentumParams;
+use crate::engine::noise_area::NoiseAreaParams;
 use crate::engine::rsi_reversion::RsiReversionParams;
 use crate::engine::trend_following::TrendFollowingParams;
 use crate::engine::types::{Candle, Direction, EntryReason, ExitReason, Granularity, Trade};
@@ -100,14 +103,27 @@ pub enum Component {
     MaFilter(MaFilterParams),
     #[serde(rename = "RsiReversion")]
     RsiReversion(RsiReversionParams),
+    #[serde(rename = "NoiseArea")]
+    NoiseArea(NoiseAreaParams),
+    #[serde(rename = "Momentum")]
+    Momentum(MomentumParams),
+    #[serde(rename = "EventWindow")]
+    EventWindow(EventWindowParams),
     // Future variants: LiquiditySweep, etc.
 }
 
 /// Long and short port selectors for entry or exit decisions.
+///
+/// Each side is optional: a one-directional strategy simply omits the other
+/// side (it never fires). Older configs that encode "never" as a
+/// contradiction (`{"and": ["p", {"not": "p"}]}`) still parse and behave
+/// identically — the explicit omission is just the cleaner spelling.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EntryExitSelector {
-    pub long: PortRef,
-    pub short: PortRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long: Option<PortRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short: Option<PortRef>,
 }
 
 /// Reference to a signal port. Can be:
@@ -196,8 +212,16 @@ fn default_atr_period() -> usize {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", content = "params")]
 pub enum SizingConfig {
+    /// Risk `pct` of NAV per trade against the stop distance. Notional is
+    /// capped at `max_notional_pct` of NAV when set (fraction, e.g. 1.5 =
+    /// 150%), else the engine default. Intraday index strategies with stops
+    /// under ~2% need the override; every other strategy keeps the default.
     #[serde(rename = "RiskPct")]
-    RiskPct { pct: f64 },
+    RiskPct {
+        pct: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_notional_pct: Option<f64>,
+    },
     // Future: FixedUnits { units: i64 }, KellyFraction, etc.
 }
 
@@ -243,8 +267,8 @@ impl Strategy {
 
     /// Evaluate the entry selector against computed port values.
     pub fn evaluate_entry(&self, ports: &PortValues) -> EntrySignal {
-        let long = resolve_port_ref(&self.entry.long, ports).unwrap_or(false);
-        let short = resolve_port_ref(&self.entry.short, ports).unwrap_or(false);
+        let long = resolve_side(&self.entry.long, ports);
+        let short = resolve_side(&self.entry.short, ports);
         match (long, short) {
             (true, true) => EntrySignal::None, // ambiguous → no signal
             (true, false) => EntrySignal::Long,
@@ -253,14 +277,15 @@ impl Strategy {
         }
     }
 
-    /// Evaluate the exit selector for a given direction.
+    /// Evaluate the exit selector for a given direction. An omitted side
+    /// never signals exit — the position relies on its stop/time-stop.
     pub fn evaluate_exit(&self, ports: &PortValues, is_long: bool) -> ExitSignal {
         let selector = if is_long {
             &self.exit.long
         } else {
             &self.exit.short
         };
-        if resolve_port_ref(selector, ports).unwrap_or(false) {
+        if resolve_side(selector, ports) {
             ExitSignal::Exit
         } else {
             ExitSignal::Hold
@@ -280,6 +305,9 @@ impl Component {
             Component::Donchian(p) => p.warmup(),
             Component::MaFilter(p) => p.warmup(),
             Component::RsiReversion(p) => p.warmup(),
+            Component::NoiseArea(p) => p.warmup(),
+            Component::Momentum(p) => p.warmup(),
+            Component::EventWindow(p) => p.warmup(),
         }
     }
 
@@ -291,6 +319,9 @@ impl Component {
             Component::Donchian(p) => p.compute(candles),
             Component::MaFilter(p) => p.compute(candles),
             Component::RsiReversion(p) => p.compute(candles),
+            Component::NoiseArea(p) => p.compute(candles),
+            Component::Momentum(p) => p.compute(candles),
+            Component::EventWindow(p) => p.compute(candles),
         }
     }
 
@@ -302,6 +333,9 @@ impl Component {
             Component::Donchian(p) => p.entry_reason(candles, direction),
             Component::MaFilter(p) => p.entry_reason(candles, direction),
             Component::RsiReversion(p) => p.entry_reason(candles, direction),
+            Component::NoiseArea(p) => p.entry_reason(candles, direction),
+            Component::Momentum(p) => p.entry_reason(candles, direction),
+            Component::EventWindow(p) => p.entry_reason(candles, direction),
         }
     }
 
@@ -313,6 +347,9 @@ impl Component {
             Component::Donchian(p) => p.stop_price(candles, direction),
             Component::MaFilter(p) => p.stop_price(candles, direction),
             Component::RsiReversion(p) => p.stop_price(candles, direction),
+            Component::NoiseArea(p) => p.stop_price(candles, direction),
+            Component::Momentum(p) => p.stop_price(candles, direction),
+            Component::EventWindow(p) => p.stop_price(candles, direction),
         }
     }
 }
@@ -331,19 +368,34 @@ fn primary_component_name(port_ref: &PortRef) -> Option<&str> {
     }
 }
 
+/// Evaluation window ending at `end_inclusive`, capped at `cap` bars.
+/// The cap mirrors the live evaluator's `CandleBuffer` capacity so recursive
+/// indicators (EMA/RSI/ATR seeding) compute over the same window length in
+/// backtest and live. It also bounds per-bar work, keeping the backtest
+/// O(n × cap) instead of O(n²) over long histories.
+pub(crate) fn bounded_window(candles: &[Candle], end_inclusive: usize, cap: usize) -> &[Candle] {
+    let start = (end_inclusive + 1).saturating_sub(cap);
+    &candles[start..=end_inclusive]
+}
+
 /// Run a strategy as a backtest over a slice of candles. Bidirectional —
 /// produces both long and short trades as signals fire. Trades still open at
 /// the end of the candle series are recorded with `ExitReason::EndOfData`.
+///
+/// Evaluation windows are capped at the granularity's live buffer capacity
+/// (see `bounded_window`). A strategy whose warmup exceeds that capacity can
+/// never trade live, so it produces no backtest trades either.
 pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
     let mut trades: Vec<Trade> = Vec::new();
     let warmup = strategy.warmup();
-    if candles.len() < warmup + 1 {
+    let cap = strategy.granularity.buffer_capacity();
+    if candles.len() < warmup + 1 || warmup + 1 > cap {
         return trades;
     }
 
     let mut i = warmup;
     while i < candles.len() {
-        let window = &candles[..=i];
+        let window = bounded_window(candles, i, cap);
         let ports = match strategy.compute_ports(window) {
             Some(p) => p,
             None => {
@@ -364,11 +416,13 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
 
         let entry_time = candles[i].time;
         let entry_price = candles[i].entry_fill_price(direction);
-        let entry_reason = primary_component_name(if direction == Direction::Long {
+        let entry_reason = (if direction == Direction::Long {
             &strategy.entry.long
         } else {
             &strategy.entry.short
         })
+        .as_ref()
+        .and_then(primary_component_name)
         .and_then(|name| strategy.components.get(name))
         .map(|c| c.entry_reason(window, direction))
         .unwrap_or(EntryReason::CrossAbove {
@@ -390,7 +444,7 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
         let mut exited = false;
         let mut j = i + 1;
         while j < candles.len() {
-            let exit_window = &candles[..=j];
+            let exit_window = bounded_window(candles, j, cap);
 
             let sl_trigger = candles[j].sl_check_price(direction);
             let sl_hit = match direction {
@@ -542,6 +596,13 @@ pub fn compute_stop_price(
 /// Resolve a PortRef to a bool value given the computed port values.
 /// Returns Some(value) if all referenced ports were computed; None if any
 /// referenced port is missing (treat as "no signal").
+/// Resolve an optional selector side: omitted side → never fires.
+fn resolve_side(side: &Option<PortRef>, ports: &PortValues) -> bool {
+    side.as_ref()
+        .and_then(|port_ref| resolve_port_ref(port_ref, ports))
+        .unwrap_or(false)
+}
+
 fn resolve_port_ref(port_ref: &PortRef, ports: &PortValues) -> Option<bool> {
     match port_ref {
         PortRef::Direct(name) => {
@@ -713,6 +774,98 @@ mod tests {
         }
     }
 
+    /// Perf guard for the editor's M15 use case: a 3-component OR-wired
+    /// strategy (Donchian + TF 50/200 + MACD) over a year of M15 bars must
+    /// complete in seconds, not minutes. Run explicitly:
+    /// `cargo test --release perf_year_of_m15 -- --ignored --nocapture`
+    #[test]
+    #[ignore = "perf guard — run explicitly with --release"]
+    fn perf_year_of_m15_three_component_or_strategy() {
+        let candles: Vec<Candle> = (0..25_000)
+            .map(|i| {
+                let wobble = ((i as f64 * 0.7).sin() * 0.4) + ((i as f64 * 0.013).cos() * 1.1);
+                make_candle(100.0 + (i as f64 * 0.0001) + wobble, i)
+            })
+            .collect();
+
+        let mut components: HashMap<String, Component> = HashMap::new();
+        components.insert(
+            "d".to_string(),
+            Component::Donchian(DonchianParams {
+                entry_period: 20,
+                exit_period: 10,
+            }),
+        );
+        components.insert(
+            "tf".to_string(),
+            Component::TrendFollowing(TrendFollowingParams {
+                fast_period: 50,
+                slow_period: 200,
+                ma_type: crate::engine::indicators::MaType::Sma,
+            }),
+        );
+        components.insert(
+            "m".to_string(),
+            Component::Macd(MacdParams {
+                fast_period: 12,
+                slow_period: 26,
+                signal_period: 9,
+            }),
+        );
+
+        let or_entry = PortRef::Or {
+            or: vec![
+                PortRef::Direct("d.breakout_long".to_string()),
+                PortRef::Direct("tf.bullish_cross".to_string()),
+                PortRef::Direct("m.bullish_cross".to_string()),
+            ],
+        };
+        let or_exit = PortRef::Or {
+            or: vec![
+                PortRef::Direct("d.breakout_short".to_string()),
+                PortRef::Direct("tf.bearish_cross".to_string()),
+                PortRef::Direct("m.bearish_cross".to_string()),
+            ],
+        };
+
+        let strategy = Strategy {
+            strategy_id: None,
+            strategy_name: Some("perf_guard".to_string()),
+            version: "v1_composite".to_string(),
+            instrument: "TEST".to_string(),
+            granularity: Granularity::M15,
+            components,
+            entry: EntryExitSelector {
+                long: Some(or_entry),
+                short: None,
+            },
+            exit: EntryExitSelector {
+                long: Some(or_exit),
+                short: None,
+            },
+            stop: StopConfig::AtrMultiple { k: 3.0, period: 12 },
+            sizing: SizingConfig::RiskPct {
+                pct: 0.01,
+                max_notional_pct: None,
+            },
+            max_hold_bars: None,
+        };
+
+        let start = std::time::Instant::now();
+        let trades = run_backtest(&candles, &strategy);
+        let elapsed = start.elapsed();
+        println!(
+            "25k M15 bars, 3-component OR strategy: {} trades in {:?}",
+            trades.len(),
+            elapsed
+        );
+        assert!(
+            elapsed.as_secs() < 30,
+            "backtest took {:?} — perf regression",
+            elapsed
+        );
+    }
+
     fn tf_strategy(fast: usize, slow: usize, stop_pct: f64) -> Strategy {
         let mut components: HashMap<String, Component> = HashMap::new();
         components.insert(
@@ -720,7 +873,7 @@ mod tests {
             Component::TrendFollowing(TrendFollowingParams {
                 fast_period: fast,
                 slow_period: slow,
-                ma_type: crate::engine::trend_following::MaType::Sma,
+                ma_type: crate::engine::indicators::MaType::Sma,
             }),
         );
         Strategy {
@@ -731,15 +884,18 @@ mod tests {
             granularity: Granularity::H1,
             components,
             entry: EntryExitSelector {
-                long: PortRef::Direct("tf.bullish_cross".to_string()),
-                short: PortRef::Direct("tf.bearish_cross".to_string()),
+                long: Some(PortRef::Direct("tf.bullish_cross".to_string())),
+                short: Some(PortRef::Direct("tf.bearish_cross".to_string())),
             },
             exit: EntryExitSelector {
-                long: PortRef::Direct("tf.bearish_cross".to_string()),
-                short: PortRef::Direct("tf.bullish_cross".to_string()),
+                long: Some(PortRef::Direct("tf.bearish_cross".to_string())),
+                short: Some(PortRef::Direct("tf.bullish_cross".to_string())),
             },
             stop: StopConfig::FixedPct { pct: stop_pct },
-            sizing: SizingConfig::RiskPct { pct: 0.01 },
+            sizing: SizingConfig::RiskPct {
+                pct: 0.01,
+                max_notional_pct: None,
+            },
             max_hold_bars: None,
         }
     }
@@ -837,17 +993,20 @@ mod tests {
             granularity: Granularity::M15,
             components,
             entry: EntryExitSelector {
-                long: PortRef::Direct("mr.long".to_string()),
-                short: PortRef::Direct("mr.short".to_string()),
+                long: Some(PortRef::Direct("mr.long".to_string())),
+                short: Some(PortRef::Direct("mr.short".to_string())),
             },
             exit: EntryExitSelector {
-                long: PortRef::Direct("mr.exit_long".to_string()),
-                short: PortRef::Direct("mr.exit_short".to_string()),
+                long: Some(PortRef::Direct("mr.exit_long".to_string())),
+                short: Some(PortRef::Direct("mr.exit_short".to_string())),
             },
             stop: StopConfig::FromComponent {
                 component: "mr".to_string(),
             },
-            sizing: SizingConfig::RiskPct { pct: 0.01 },
+            sizing: SizingConfig::RiskPct {
+                pct: 0.01,
+                max_notional_pct: None,
+            },
             max_hold_bars: None,
         }
     }

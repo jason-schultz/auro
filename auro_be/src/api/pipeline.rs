@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::engine::pipeline::{
-    load_strategy_config, run_backtest, run_monte_carlo, run_walk_forward,
+    load_strategy_config, run_backtest, run_holdout, run_monte_carlo, run_walk_forward,
 };
 use crate::error::AppResult;
 use crate::state::AppState;
@@ -61,6 +61,23 @@ pub async fn run_pipeline_monte_carlo(
     let result = run_monte_carlo(&state.db, &config).await?;
     Ok(Json(evaluation_response(
         "monte_carlo",
+        req.strategy_config_id,
+        &result,
+    )))
+}
+
+pub async fn run_pipeline_holdout(
+    State(state): State<AppState>,
+    Json(req): Json<PipelineRequest>,
+) -> AppResult<Json<Value>> {
+    tracing::info!(
+        "[Pipeline] Received holdout request for strategy_config_id {}",
+        req.strategy_config_id
+    );
+    let config = load_strategy_config(&state.db, req.strategy_config_id).await?;
+    let result = run_holdout(&state.db, &config).await?;
+    Ok(Json(evaluation_response(
+        "holdout",
         req.strategy_config_id,
         &result,
     )))

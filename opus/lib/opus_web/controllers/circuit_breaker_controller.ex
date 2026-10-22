@@ -27,16 +27,13 @@ defmodule OpusWeb.CircuitBreakerController do
 
   def open(conn, _params) do
     rows =
-      from(s in Suspension,
-        where: is_nil(s.cleared_at),
-        order_by: [desc: s.triggered_at],
-        select: %{
-          live_strategy_id: s.live_strategy_id,
-          trigger_kind: s.trigger_kind,
-          trigger_detail: s.trigger_detail,
-          triggered_at: s.triggered_at
-        }
-      )
+      Suspension.open_query()
+      |> select([s], %{
+        live_strategy_id: s.live_strategy_id,
+        trigger_kind: s.trigger_kind,
+        trigger_detail: s.trigger_detail,
+        triggered_at: s.triggered_at
+      })
       |> Repo.all()
 
     suspensions =

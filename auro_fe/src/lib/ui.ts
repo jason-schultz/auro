@@ -222,3 +222,7 @@ export function stateMessageClasses(params: {
     const spacingClass = params.compact ? "py-4" : "py-8";
     return [layoutClass, spacingClass, "text-sm text-muted-foreground"].join(" ");
 }
+
+/** Shared form-control styling for selects/inputs (matches Accounts.vue). */
+export const INPUT_CLASS =
+    "rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/50";

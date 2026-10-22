@@ -1,0 +1,443 @@
+//! Noise-area intraday momentum — Zarattini, Aziz & Barbon (2024), "Beat the
+//! Market: An Effective Intraday Momentum Strategy for S&P500 ETF (SPY)",
+//! SFI Research Paper 24-97.
+//!
+//! The noise area at each time of day is the average absolute move from the
+//! session open, at that same time, over the prior `lookback_sessions` regular
+//! sessions (scaled by `band_mult`). Bands are gap-adjusted:
+//! upper = max(open, prev close) × (1 + σ), lower = min(open, prev close) × (1 − σ).
+//! Price outside the bands at a decision time signals momentum; the trailing
+//! exit is the band or the session VWAP, whichever is tighter.
+//!
+//! Session is NYSE regular hours (09:30–16:00 America/New_York, 13:00 on
+//! early-close days), the session the paper is cited on. Decisions happen
+//! only at bar closes on the half-hour (10:00, 10:30, … up to the last one
+//! before the close). `session_close` fires on any bar closing at or after the
+//! close or before the open, so a position never carries overnight — CFDs keep
+//! trading past the cash close, but a missed close bar still exits on the
+//! next one.
+//!
+//! Deviations from the paper: VWAP weights by OANDA tick volume (CFDs have no
+//! traded volume), and sizing is Auro's RiskPct against the opposite-band stop
+//! instead of the paper's volatility target.
+
+use std::collections::HashMap;
+
+use chrono::{Datelike, Duration, NaiveDate, Timelike, Weekday};
+use chrono_tz::America::New_York;
+use serde::{Deserialize, Serialize};
+
+use crate::engine::indicators;
+use crate::engine::strategy::Signaler;
+use crate::engine::types::{Candle, Direction, EntryReason};
+
+/// Minutes after midnight New York time.
+const SESSION_OPEN_MIN: i64 = 9 * 60 + 30;
+const SESSION_CLOSE_MIN: i64 = 16 * 60;
+const EARLY_CLOSE_MIN: i64 = 13 * 60;
+const FIRST_DECISION_MIN: i64 = 10 * 60;
+const DECISION_INTERVAL_MIN: i64 = 30;
+
+fn default_lookback_sessions() -> usize {
+    14
+}
+
+fn default_band_mult() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NoiseAreaParams {
+    #[serde(default = "default_lookback_sessions")]
+    pub lookback_sessions: usize,
+    #[serde(default = "default_band_mult")]
+    pub band_mult: f64,
+}
+
+/// Band state at a decision bar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Bands {
+    upper: f64,
+    lower: f64,
+    vwap: f64,
+    price: f64,
+}
+
+/// Where the newest bar sits in the New York session.
+struct BarClock {
+    bar_minutes: i64,
+    /// New York minute-of-day at which the newest bar closes.
+    close_min: i64,
+    /// That day's session close, in the same minutes.
+    session_close_min: i64,
+}
+
+impl BarClock {
+    fn of(candles: &[Candle]) -> Option<Self> {
+        let bar_minutes = indicators::bar_minutes(candles)?;
+        let close =
+            (candles.last()?.time + Duration::minutes(bar_minutes)).with_timezone(&New_York);
+        Some(Self {
+            bar_minutes,
+            close_min: i64::from(close.hour()) * 60 + i64::from(close.minute()),
+            session_close_min: session_close_min(close.date_naive()),
+        })
+    }
+
+    fn is_decision(&self) -> bool {
+        DECISION_INTERVAL_MIN % self.bar_minutes == 0
+            && (FIRST_DECISION_MIN..self.session_close_min).contains(&self.close_min)
+            && (self.close_min - FIRST_DECISION_MIN) % DECISION_INTERVAL_MIN == 0
+    }
+
+    fn is_session_close(&self) -> bool {
+        self.close_min >= self.session_close_min || self.close_min <= SESSION_OPEN_MIN
+    }
+}
+
+/// NYSE closes at 13:00 on the day after Thanksgiving, and on July 3 and
+/// December 24 when they fall Monday–Thursday (a Friday July 3 / December 24
+/// is itself the observed holiday). Early-close sessions never count as
+/// complete, so they are left out of the noise-area lookback.
+fn session_close_min(date: NaiveDate) -> i64 {
+    let weekday = date.weekday();
+    let mon_to_thu = weekday.number_from_monday() <= 4;
+    let early = match (date.month(), date.day()) {
+        (7, 3) | (12, 24) => mon_to_thu,
+        // Fourth Thursday of November is day 22–28, so the Friday is 23–29.
+        (11, day) => weekday == Weekday::Fri && (23..=29).contains(&day),
+        _ => false,
+    };
+    if early {
+        EARLY_CLOSE_MIN
+    } else {
+        SESSION_CLOSE_MIN
+    }
+}
+
+/// Regular-session bars of one New York date, indexed by slot from the open.
+struct Session {
+    date: NaiveDate,
+    bars: Vec<Option<Candle>>,
+}
+
+impl Session {
+    fn is_complete(&self) -> bool {
+        self.bars.iter().all(Option::is_some)
+    }
+
+    fn open(&self) -> Option<f64> {
+        self.bars.first()?.as_ref().map(|c| c.mid.open)
+    }
+
+    fn close_at(&self, slot: usize) -> Option<f64> {
+        self.bars.get(slot)?.as_ref().map(|c| c.mid.close)
+    }
+}
+
+impl NoiseAreaParams {
+    /// Bands at the newest bar. Requires today's session open plus
+    /// `lookback_sessions` complete prior sessions in the window; the newest
+    /// complete prior session also supplies the previous close.
+    fn bands(&self, candles: &[Candle], clock: &BarClock) -> Option<Bands> {
+        let slots = ((SESSION_CLOSE_MIN - SESSION_OPEN_MIN) / clock.bar_minutes) as usize;
+        let now_slot = ((clock.close_min - SESSION_OPEN_MIN) / clock.bar_minutes - 1) as usize;
+        let sessions = self.recent_sessions(candles, clock.bar_minutes, slots)?;
+        let (today, prior) = sessions.split_first()?;
+
+        let complete: Vec<&Session> = prior
+            .iter()
+            .filter(|s| s.is_complete())
+            .take(self.lookback_sessions)
+            .collect();
+        if complete.len() < self.lookback_sessions || self.lookback_sessions == 0 {
+            return None;
+        }
+
+        let sigma = complete
+            .iter()
+            .map(|s| Some((s.close_at(now_slot)? / s.open()? - 1.0).abs()))
+            .sum::<Option<f64>>()?
+            / complete.len() as f64
+            * self.band_mult;
+
+        let open = today.open()?;
+        let prev_close = complete[0].close_at(slots - 1)?;
+
+        let (pv, v) = today.bars[..=now_slot]
+            .iter()
+            .flatten()
+            .fold((0.0, 0.0), |(pv, v), c| {
+                let vol = f64::from(c.volume.max(1));
+                let typical = (c.mid.high + c.mid.low + c.mid.close) / 3.0;
+                (pv + typical * vol, v + vol)
+            });
+
+        Some(Bands {
+            upper: open.max(prev_close) * (1.0 + sigma),
+            lower: open.min(prev_close) * (1.0 - sigma),
+            vwap: pv / v,
+            price: candles.last()?.mid.close,
+        })
+    }
+
+    /// Group regular-session bars by New York date, newest session first,
+    /// walking back only as far as `lookback_sessions` complete prior
+    /// sessions. The newest session must be today's (the newest bar's date).
+    fn recent_sessions(
+        &self,
+        candles: &[Candle],
+        bar_minutes: i64,
+        slots: usize,
+    ) -> Option<Vec<Session>> {
+        let mut sessions: Vec<Session> = Vec::new();
+        for candle in candles.iter().rev() {
+            let ny = candle.time.with_timezone(&New_York);
+            let start_min = i64::from(ny.hour()) * 60 + i64::from(ny.minute());
+            if !(SESSION_OPEN_MIN..SESSION_CLOSE_MIN).contains(&start_min) {
+                continue;
+            }
+            let date = ny.date_naive();
+            if sessions.last().is_none_or(|s| s.date != date) {
+                let complete_prior = sessions.iter().skip(1).filter(|s| s.is_complete()).count();
+                if complete_prior >= self.lookback_sessions {
+                    break;
+                }
+                sessions.push(Session {
+                    date,
+                    bars: vec![None; slots],
+                });
+            }
+            let slot = ((start_min - SESSION_OPEN_MIN) / bar_minutes) as usize;
+            if let Some(session) = sessions.last_mut() {
+                session.bars[slot] = Some(candle.clone());
+            }
+        }
+
+        let today = candles.last()?.time.with_timezone(&New_York).date_naive();
+        (sessions.first()?.date == today).then_some(sessions)
+    }
+
+    fn bands_at_decision(&self, candles: &[Candle]) -> Option<Bands> {
+        let clock = BarClock::of(candles)?;
+        if !clock.is_decision() {
+            return None;
+        }
+        self.bands(candles, &clock)
+    }
+}
+
+impl Signaler for NoiseAreaParams {
+    /// Lower bound in M5 regular-session bars. The real requirement — enough
+    /// complete prior sessions — is checked at each decision bar, since CFD
+    /// candles also cover the overnight session.
+    fn warmup(&self) -> usize {
+        (self.lookback_sessions + 1) * ((SESSION_CLOSE_MIN - SESSION_OPEN_MIN) / 5) as usize
+    }
+
+    /// Non-decision bars always compute (all signal ports false) so the
+    /// session-close exit fires even when history is short, e.g. right after
+    /// a restart. Decision bars need full band history or return None.
+    fn compute(&self, candles: &[Candle]) -> Option<HashMap<String, bool>> {
+        let clock = BarClock::of(candles)?;
+        let mut ports = HashMap::from([
+            ("long".to_string(), false),
+            ("short".to_string(), false),
+            ("exit_long".to_string(), false),
+            ("exit_short".to_string(), false),
+            ("session_close".to_string(), clock.is_session_close()),
+        ]);
+        if !clock.is_decision() {
+            return Some(ports);
+        }
+
+        let b = self.bands(candles, &clock)?;
+        // Strict entries, inclusive-of-band exits: price must clear the band
+        // to enter, and anything back inside the tighter trail exits.
+        ports.insert("long".to_string(), b.price > b.upper);
+        ports.insert("short".to_string(), b.price < b.lower);
+        ports.insert("exit_long".to_string(), b.price < b.upper.max(b.vwap));
+        ports.insert("exit_short".to_string(), b.price > b.lower.min(b.vwap));
+        Some(ports)
+    }
+
+    fn entry_reason(&self, candles: &[Candle], _direction: Direction) -> EntryReason {
+        let b = self.bands_at_decision(candles).unwrap_or(Bands {
+            upper: 0.0,
+            lower: 0.0,
+            vwap: 0.0,
+            price: 0.0,
+        });
+        EntryReason::NoiseAreaBreakout {
+            upper_band: b.upper,
+            lower_band: b.lower,
+            vwap: b.vwap,
+        }
+    }
+
+    /// Protective stop at the opposite band: a long is wrong once price
+    /// crosses the whole noise area. The paper has no hard stop (exits only at
+    /// decision times); this is the server-side backstop for outages.
+    fn stop_price(&self, candles: &[Candle], direction: Direction) -> Option<f64> {
+        let b = self.bands_at_decision(candles)?;
+        Some(match direction {
+            Direction::Long => b.lower,
+            Direction::Short => b.upper,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::types::OHLC;
+    use chrono::{DateTime, TimeZone, Utc};
+
+    /// 2026-01-05 is a Monday in EST (UTC−5): 09:30 New York = 14:30 UTC.
+    fn session_start(day: i64) -> DateTime<Utc> {
+        let mut date = Utc.with_ymd_and_hms(2026, 1, 5, 14, 30, 0).unwrap();
+        let mut remaining = day;
+        while remaining > 0 {
+            date += Duration::days(1);
+            if date.weekday().number_from_monday() <= 5 {
+                remaining -= 1;
+            }
+        }
+        date
+    }
+
+    fn bar(time: DateTime<Utc>, open: f64, close: f64) -> Candle {
+        Candle {
+            time,
+            mid: OHLC {
+                open,
+                high: open.max(close),
+                low: open.min(close),
+                close,
+            },
+            volume: 10,
+            bid: None,
+            ask: None,
+        }
+    }
+
+    /// `n` complete prior sessions where every bar closes 0.1% above a
+    /// 100.0 open (σ = 0.001 at every slot, previous close = 100.1), then
+    /// today's first `today_bars` M5 bars from the given closes.
+    fn history(n: i64, today_closes: &[f64]) -> Vec<Candle> {
+        let mut candles = Vec::new();
+        for day in 0..n {
+            let start = session_start(day);
+            for slot in 0..78 {
+                candles.push(bar(start + Duration::minutes(5 * slot), 100.0, 100.1));
+            }
+        }
+        let start = session_start(n);
+        for (slot, close) in today_closes.iter().enumerate() {
+            candles.push(bar(
+                start + Duration::minutes(5 * slot as i64),
+                100.0,
+                *close,
+            ));
+        }
+        candles
+    }
+
+    fn params() -> NoiseAreaParams {
+        NoiseAreaParams {
+            lookback_sessions: 14,
+            band_mult: 1.0,
+        }
+    }
+
+    #[test]
+    fn breakout_above_upper_band_at_decision_signals_long() {
+        // Six bars: 09:30..09:55, newest closes at 10:00 — first decision.
+        let candles = history(14, &[100.5; 6]);
+        let ports = params().compute(&candles).expect("decision bar computes");
+
+        // upper = max(100.0, 100.1) × 1.001 ≈ 100.2001
+        assert!(ports["long"]);
+        assert!(!ports["short"]);
+        assert!(!ports["exit_long"]);
+        assert!(!ports["session_close"]);
+    }
+
+    #[test]
+    fn stop_is_the_opposite_band() {
+        let candles = history(14, &[100.5; 6]);
+        let stop = params()
+            .stop_price(&candles, Direction::Long)
+            .expect("stop at decision bar");
+        // lower = min(100.0, 100.1) × 0.999
+        assert!((stop - 99.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn non_decision_bar_never_signals() {
+        // Seven bars: newest closes at 10:05.
+        let candles = history(14, &[100.5; 7]);
+        let ports = params()
+            .compute(&candles)
+            .expect("non-decision bars compute");
+        assert!(!ports["long"] && !ports["exit_long"] && !ports["session_close"]);
+    }
+
+    #[test]
+    fn exit_long_when_price_falls_back_under_vwap() {
+        // Price ran to 101 then closes the 10:00 bar at 100.3: still above the
+        // upper band (≈100.2) but below the session VWAP — the tighter trail.
+        let mut closes = vec![101.0; 5];
+        closes.push(100.3);
+        let ports = params().compute(&history(14, &closes)).expect("computes");
+        assert!(ports["long"]);
+        assert!(ports["exit_long"]);
+    }
+
+    #[test]
+    fn last_bar_of_session_fires_session_close() {
+        let candles = history(14, &[100.0; 78]);
+        let ports = params().compute(&candles).expect("computes");
+        assert!(ports["session_close"]);
+    }
+
+    #[test]
+    fn early_close_days_follow_nyse_rules() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        assert_eq!(session_close_min(d(2025, 11, 28)), EARLY_CLOSE_MIN); // Black Friday
+        assert_eq!(session_close_min(d(2024, 12, 24)), EARLY_CLOSE_MIN); // Tuesday
+        assert_eq!(session_close_min(d(2025, 7, 3)), EARLY_CLOSE_MIN); // Thursday
+        assert_eq!(session_close_min(d(2026, 7, 3)), SESSION_CLOSE_MIN); // Friday: holiday
+        assert_eq!(session_close_min(d(2021, 12, 24)), SESSION_CLOSE_MIN); // Friday: holiday
+        assert_eq!(session_close_min(d(2025, 11, 21)), SESSION_CLOSE_MIN); // a week early
+    }
+
+    #[test]
+    fn early_close_day_flattens_at_one_pm() {
+        // 2025-11-28 (Black Friday, EST): the bar starting 12:55 closes at 13:00.
+        let start = Utc.with_ymd_and_hms(2025, 11, 28, 17, 50, 0).unwrap();
+        let candles = vec![
+            bar(start, 100.0, 100.0),
+            bar(start + Duration::minutes(5), 100.0, 100.0),
+        ];
+        let ports = params()
+            .compute(&candles)
+            .expect("non-decision bars compute");
+        assert!(ports["session_close"]);
+    }
+
+    #[test]
+    fn decision_without_enough_complete_sessions_is_none() {
+        let candles = history(13, &[100.5; 6]);
+        assert!(params().compute(&candles).is_none());
+    }
+
+    #[test]
+    fn incomplete_prior_session_is_skipped_not_counted() {
+        // Drop one bar from the most recent prior session: it no longer counts,
+        // so 14 sessions of history leave only 13 complete.
+        let mut candles = history(14, &[100.5; 6]);
+        candles.remove(13 * 78 + 40);
+        assert!(params().compute(&candles).is_none());
+    }
+}

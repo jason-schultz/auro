@@ -27,7 +27,6 @@ defmodule Opus.Trading.CircuitBreakerTest do
       granularity: "H1",
       parameters: %{},
       enabled: true,
-      max_position_size: "1000",
       created_at: now,
       updated_at: now
     })
@@ -64,7 +63,6 @@ defmodule Opus.Trading.CircuitBreakerTest do
       granularity: "H1",
       parameters: %{},
       enabled: true,
-      max_position_size: "1000",
       created_at: now,
       updated_at: now
     })
@@ -101,7 +99,6 @@ defmodule Opus.Trading.CircuitBreakerTest do
       granularity: "H1",
       parameters: %{},
       enabled: false,
-      max_position_size: "1000",
       created_at: now,
       updated_at: now
     })

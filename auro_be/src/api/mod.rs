@@ -1,16 +1,16 @@
 mod account;
-mod backtest;
 mod brokers;
 mod candles;
-pub mod evaluator;
+mod financing;
 mod health;
 mod indicators;
 mod live_strategies;
+mod massive;
 mod pipeline;
 mod positions;
 mod questrade;
 mod rules;
-mod strategies;
+mod signal_preview;
 mod wealthsimple;
 mod ws;
 
@@ -32,8 +32,12 @@ pub fn router() -> Router<AppState> {
         .route("/api/instruments", get(account::get_instruments))
         .route("/api/pricing", get(account::get_pricing))
         .route("/api/candles", get(candles::get_candles))
+        .route("/api/candles/backfill", post(candles::backfill))
+        .route(
+            "/api/strategy/signal-preview",
+            post(signal_preview::preview_signals),
+        )
         .route("/api/open-trades", get(account::get_open_trades))
-        .route("/api/evaluate/{granularity}", post(evaluator::evaluate))
         .route(
             "/api/indicators/{instrument}/{granularity}",
             get(indicators::get_indicators),
@@ -56,16 +60,9 @@ pub fn router() -> Router<AppState> {
             "/api/pipeline/monte_carlo",
             post(pipeline::run_pipeline_monte_carlo),
         )
-        // Backtest (grid search)
-        .route("/api/backtest/run", post(backtest::run_grid_search))
         .route(
-            "/api/backtest/backfill",
-            post(backtest::backfill_historical),
-        )
-        .route("/api/backtest/results", get(backtest::get_backtest_results))
-        .route(
-            "/api/backtest/runs/{id}/trades",
-            get(backtest::get_backtest_trades),
+            "/api/pipeline/holdout",
+            post(pipeline::run_pipeline_holdout),
         )
         // Live strategies
         .route(
@@ -96,10 +93,6 @@ pub fn router() -> Router<AppState> {
             "/api/live/strategies/{id}",
             delete(live_strategies::delete_live_strategy),
         )
-        .route(
-            "/api/live/deploy/{id}",
-            post(live_strategies::deploy_from_backtest),
-        )
         .route("/api/live/trades", get(live_strategies::get_live_trades))
         .route(
             "/api/live/trades/{id}",
@@ -110,16 +103,6 @@ pub fn router() -> Router<AppState> {
             "/api/live/config",
             put(live_strategies::update_trading_config),
         )
-        // Legacy strategies (can remove later)
-        .route("/api/strategies", get(strategies::list_strategies))
-        .route("/api/strategies", post(strategies::create_strategy))
-        .route("/api/strategies/{id}", get(strategies::get_strategy))
-        .route("/api/strategies/{id}", put(strategies::update_strategy))
-        .route(
-            "/api/strategies/{id}/toggle",
-            post(strategies::toggle_strategy),
-        )
-        .route("/api/strategies/{id}", delete(strategies::delete_strategy))
         // Brokers
         .route("/api/brokers", get(brokers::list_brokers))
         .route("/api/brokers/wealthsimple", get(wealthsimple::get_accounts))
@@ -132,8 +115,20 @@ pub fn router() -> Router<AppState> {
             post(wealthsimple::refresh_prices),
         )
         // Questrade
+        .route("/api/financing/snapshot", post(financing::snapshot))
         .route("/api/questrade/status", get(questrade::status))
         .route("/api/questrade/candles", get(questrade::get_candles))
+        .route("/api/questrade/quotes", get(questrade::get_quotes))
+        .route("/api/questrade/symbols", get(questrade::get_symbols))
+        .route(
+            "/api/questrade/candles/persist",
+            post(questrade::persist_candles),
+        )
+        // Massive (US equity bars)
+        .route(
+            "/api/massive/candles/persist",
+            post(massive::persist_candles),
+        )
         // WebSocket
         .route("/ws/prices", get(ws::ws_prices))
 }

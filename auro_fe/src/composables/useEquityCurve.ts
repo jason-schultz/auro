@@ -1,5 +1,7 @@
 import { computed, ref, watch } from "vue";
 
+import { getApiErrorMessage, opusApi } from "../services/api";
+
 export type EquityResolution = "1m" | "5m" | "15m" | "1h" | "1d";
 
 export interface EquityCurvePoint {
@@ -125,12 +127,7 @@ export function useEquityCurve() {
             return cached.points;
         }
 
-        const response = await fetch(`/opus/account/equity-curve?${key}`);
-        const body = (await response.json()) as EquityCurveResponse | { error: string };
-
-        if (!response.ok || !("points" in body)) {
-            throw new Error("error" in body ? body.error : "Failed to load equity curve");
-        }
+        const body = await opusApi.get<EquityCurveResponse>(`/account/equity-curve?${key}`);
 
         const normalized = normalizePoints(body.points);
         cache.set(key, { ...body, points: normalized });
@@ -156,7 +153,7 @@ export function useEquityCurve() {
 
             points.value = resolvedPoints;
         } catch (e) {
-            error.value = e instanceof Error ? e.message : "Failed to load equity curve";
+            error.value = getApiErrorMessage(e, "Failed to load equity curve");
             points.value = [];
         } finally {
             loading.value = false;

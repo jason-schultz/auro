@@ -6,21 +6,19 @@ pub mod engine;
 pub mod error;
 pub mod state;
 
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use brokers::oanda::aggregator::spawn_aggregator;
-use brokers::oanda::backfill::backfill_candles;
+use crate::brokers::massive::client::MassiveClient;
 use brokers::oanda::client::OandaClient;
-use brokers::oanda::is_forex_market_open;
 use brokers::oanda::stream::spawn_price_stream;
+use brokers::oanda::{is_forex_market_open, INSTRUMENTS};
 use brokers::questrade::client::QuestradeClient;
 use brokers::wealthsimple::client::WealthsimpleClient;
 use config::Config;
 use engine::live::account_cache::spawn_account_refresher;
+use engine::live::candle_feed::spawn_candle_feed;
 use engine::live::instrument_cache::load_instrument_metadata;
-use engine::live::{spawn_htf_poller, spawn_live_evaluator};
-use lru::LruCache;
+use engine::live::quotes::spawn_quote_tracker;
 use state::{AppState, LiveState};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -30,59 +28,9 @@ use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::EnvFilter;
 
-/// Default instruments to stream on startup.
-const DEFAULT_INSTRUMENTS: &[&str] = &[
-    // Majors (needed for live strategies)
-    "EUR_USD",
-    "GBP_USD",
-    "USD_CAD",
-    "USD_JPY",
-    "AUD_USD",
-    "XAU_USD",
-    "XCU_USD",
-    // Crosses
-    "EUR_JPY",
-    "EUR_GBP",
-    "EUR_CHF",
-    "EUR_CAD",
-    "EUR_AUD",
-    "GBP_JPY",
-    "GBP_AUD",
-    "GBP_CAD",
-    "AUD_JPY",
-    "AUD_NZD",
-    "AUD_CAD",
-    "NZD_USD",
-    "NZD_JPY",
-    "NZD_CAD",
-    "CAD_JPY",
-    "CAD_CHF",
-    "CHF_JPY",
-    // Commodities
-    "WTICO_USD",
-    "BCO_USD",
-    "NATGAS_USD",
-    "XCU_USD",
-    "CORN_USD",
-    "SOYBN_USD",
-    "WHEAT_USD",
-    "SUGAR_USD",
-    // Metals
-    "XAG_USD",
-    "XPT_USD",
-    "XPD_USD",
-    // Indices
-    "SPX500_USD",
-    "NAS100_USD",
-    "US30_USD",
-    "UK100_GBP",
-    "DE30_EUR",
-    "JP225_USD",
-    "AU200_AUD",
-    "EU50_EUR",
-];
-
-fn init_tracing() {
+/// The returned guard flushes the file writer; it must live for the whole
+/// process or file logging silently stops.
+fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     let file_appender = Builder::new()
         .filename_prefix("auro")
         .filename_suffix("log")
@@ -91,7 +39,7 @@ fn init_tracing() {
         .build("logs")
         .expect("failed to create log file appender");
 
-    let (file_writer, _file_guard) = tracing_appender::non_blocking(file_appender);
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -100,11 +48,13 @@ fn init_tracing() {
         )
         .with_writer(std::io::stdout.and(file_writer))
         .init();
+
+    file_guard
 }
 
 pub async fn run() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    init_tracing();
+    let _log_guard = init_tracing();
 
     let config = Config::from_env().map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
 
@@ -142,22 +92,11 @@ pub async fn run() -> anyhow::Result<()> {
     let (price_tx, _) = broadcast::channel(256);
 
     let questrade =
-        match QuestradeClient::from_db_or_env(&pool, config.questrade_refresh_token.as_deref())
-            .await
-        {
-            Ok(Some(mut client)) => match client.authenticate().await {
-                Ok(()) => {
-                    tracing::info!("Questrade connected.");
-                    Some(Arc::new(tokio::sync::Mutex::new(client)))
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Questrade auth failed: {}. Continuing without Questrade.",
-                        e
-                    );
-                    None
-                }
-            },
+        match QuestradeClient::connect(&pool, config.questrade_refresh_token.as_deref()).await {
+            Ok(Some(client)) => {
+                tracing::info!("Questrade connected.");
+                Some(Arc::new(tokio::sync::Mutex::new(client)))
+            }
             Ok(None) => {
                 tracing::info!("No Questrade token configured; skipping.");
                 None
@@ -168,6 +107,26 @@ pub async fn run() -> anyhow::Result<()> {
             }
         };
 
+    let massive = match config.massive_api_key.as_deref() {
+        Some(key) => match MassiveClient::new(&config.massive_base_url, key) {
+            Ok(client) => {
+                tracing::info!(
+                    "Massive market data configured ({}).",
+                    config.massive_base_url
+                );
+                Some(client)
+            }
+            Err(e) => {
+                tracing::warn!("Massive init error: {}. Continuing without Massive.", e);
+                None
+            }
+        },
+        None => {
+            tracing::info!("No Massive API key configured; US stock bars disabled.");
+            None
+        }
+    };
+
     let state = AppState {
         db: pool.clone(),
         config: config.clone(),
@@ -175,9 +134,9 @@ pub async fn run() -> anyhow::Result<()> {
         start_time: chrono::Utc::now(),
         live: Arc::new(LiveState::new()),
         price_tx: price_tx.clone(),
-        eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap()))),
         questrade,
         wealthsimple: WealthsimpleClient::new(&pool),
+        massive,
     };
 
     let instrument_metadata = load_instrument_metadata(&state.oanda, &state.db).await;
@@ -186,23 +145,12 @@ pub async fn run() -> anyhow::Result<()> {
         *cache = instrument_metadata;
     }
 
-    let aggregator_rx = price_tx.subscribe();
-    spawn_aggregator(aggregator_rx, state.db.clone());
-
-    let evaluator_rx = price_tx.subscribe();
-    spawn_live_evaluator(evaluator_rx, state.clone());
-    spawn_htf_poller(state.clone());
+    spawn_quote_tracker(price_tx.subscribe(), state.clone());
+    spawn_candle_feed(state.clone());
     spawn_account_refresher(state.clone());
 
-    let stream_instruments: Vec<String> =
-        DEFAULT_INSTRUMENTS.iter().map(|s| s.to_string()).collect();
-
+    let stream_instruments: Vec<String> = INSTRUMENTS.iter().map(|s| s.to_string()).collect();
     spawn_price_stream(state.oanda.clone(), stream_instruments, price_tx.clone());
-
-    let backfill_state = state.clone();
-    tokio::spawn(async move {
-        backfill_candles(&backfill_state.oanda, &backfill_state.db, 7).await;
-    });
 
     let app = api::router()
         .layer(

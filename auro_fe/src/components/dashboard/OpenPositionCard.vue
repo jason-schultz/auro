@@ -125,8 +125,6 @@ const riskAmount = computed(() => {
     const unitsAbs = Math.abs(Number(props.position.units));
     const entry = props.position.entry_price;
 
-    if (props.position.stop_loss_state === "Breakeven") return 0;
-
     if (props.position.direction === "Long") {
         return (entry - sl) * unitsAbs;
     }
@@ -136,46 +134,46 @@ const riskAmount = computed(() => {
 
 // Quote currency parsed from the instrument name (e.g., XAG_USD → USD).
 // Used to label the risk display and decide whether currency conversion
-// to account currency (CAD) is needed.
+// to the account's home currency is needed.
 const quoteCurrency = computed(() => {
     const parts = props.position.instrument.split("_");
     return parts[parts.length - 1] ?? "USD";
 });
 
-// Convert a value in quote currency to account currency (CAD). Returns null
-// if conversion isn't possible (rate unavailable, or unsupported quote currency).
-// Currently only handles USD → CAD via usd_to_cad_rate; other quote currencies
-// (JPY, EUR, etc.) need separate cross-rate lookups and are not converted.
-function toAccountCurrency(amount: number): number | null {
-    if (quoteCurrency.value === "CAD") return amount;
-    if (quoteCurrency.value === "USD" && props.position.usd_to_cad_rate != null) {
-        return amount * props.position.usd_to_cad_rate;
+// Convert a value in quote currency to the account's home currency. Returns
+// null if conversion isn't possible (rate unavailable, or unsupported quote
+// currency). Currently only handles USD-quoted instruments; other quote
+// currencies (JPY, EUR, etc.) need separate cross-rate lookups and are not
+// converted.
+function toHomeCurrency(amount: number): number | null {
+    if (quoteCurrency.value === props.position.home_currency) return amount;
+    if (quoteCurrency.value === "USD" && props.position.usd_to_home_rate != null) {
+        return amount * props.position.usd_to_home_rate;
     }
     return null;
 }
 
+function homePart(amount: number): string {
+    const converted = toHomeCurrency(amount);
+    return converted != null
+        ? ` $${converted.toFixed(2)} (${props.position.home_currency})`
+        : "";
+}
+
 const riskLabel = computed(() => {
-    if (props.position.stop_loss_state === "Breakeven") return "no risk";
     if (props.position.stop_loss_state === "Trailing") {
         const val = riskAmount.value ?? 0;
         if (val < 0) {
-            const cadVal = toAccountCurrency(Math.abs(val));
-            const cadPart = cadVal != null ? ` $${cadVal.toFixed(2)} (CAD)` : "";
-            return `+$${Math.abs(val).toFixed(2)} (${quoteCurrency.value}) locked${cadPart}`;
+            return `+$${Math.abs(val).toFixed(2)} (${quoteCurrency.value}) locked${homePart(Math.abs(val))}`;
         }
-        const cadVal = toAccountCurrency(val);
-        const cadPart = cadVal != null ? ` $${cadVal.toFixed(2)} (CAD)` : "";
-        return `$${val.toFixed(2)} (${quoteCurrency.value})${cadPart} at risk`;
+        return `$${val.toFixed(2)} (${quoteCurrency.value})${homePart(val)} at risk`;
     }
     if (riskAmount.value == null) return "—";
     const val = Math.max(0, riskAmount.value);
-    const cadVal = toAccountCurrency(val);
-    const cadPart = cadVal != null ? ` $${cadVal.toFixed(2)} (CAD)` : "";
-    return `$${val.toFixed(2)} (${quoteCurrency.value})${cadPart}`;
+    return `$${val.toFixed(2)} (${quoteCurrency.value})${homePart(val)}`;
 });
 
 const riskLabelClass = computed(() => {
-    if (props.position.stop_loss_state === "Breakeven") return "text-emerald-400";
     if (props.position.stop_loss_state === "Trailing") return "text-blue-400";
     return "text-foreground";
 });
@@ -197,10 +195,6 @@ function formatEntryTime(entryTime: string | null): string {
 
 function statePillClass(state: string): string {
     switch (state) {
-        case "Initial":
-            return "bg-muted text-muted-foreground";
-        case "Breakeven":
-            return "bg-blue-500/15 text-blue-400";
         case "Trailing":
             return "bg-emerald-500/15 text-emerald-400";
         default:

@@ -46,7 +46,6 @@ defmodule OpusWeb.RulesControllerTest do
         parameters: %{},
         enabled: false,
         curator_mode: "auto",
-        max_position_size: "0.02",
         created_at: now,
         updated_at: now
       }
@@ -76,7 +75,6 @@ defmodule OpusWeb.RulesControllerTest do
         parameters: %{},
         enabled: true,
         curator_mode: "auto",
-        max_position_size: "0.02",
         created_at: now,
         updated_at: now
       },
@@ -88,7 +86,6 @@ defmodule OpusWeb.RulesControllerTest do
         parameters: %{},
         enabled: true,
         curator_mode: "auto",
-        max_position_size: "0.01",
         created_at: now,
         updated_at: now
       },
@@ -100,7 +97,6 @@ defmodule OpusWeb.RulesControllerTest do
         parameters: %{},
         enabled: false,
         curator_mode: "auto",
-        max_position_size: "0.015",
         created_at: now,
         updated_at: now
       }

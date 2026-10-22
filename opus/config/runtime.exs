@@ -23,8 +23,12 @@ end
 config :opus,
   oanda_base_url: System.get_env("OANDA_BASE_URL") || "https://api-fxpractice.oanda.com",
   oanda_account_id: System.get_env("OANDA_ACCOUNT_ID"),
-  oanda_api_key: System.get_env("OANDA_API_KEY"),
-  auro_base_url: System.get_env("AURO_BASE_URL") || "http://localhost:3000"
+  oanda_api_key: System.get_env("OANDA_API_KEY")
+
+# Tests point at a closed port (config/test.exs) so they never reach a running engine.
+if config_env() != :test do
+  config :opus, auro_base_url: System.get_env("AURO_BASE_URL") || "http://localhost:3000"
+end
 
 if config_env() == :prod do
   database_url =

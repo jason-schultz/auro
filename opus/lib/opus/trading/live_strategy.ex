@@ -9,7 +9,6 @@ defmodule Opus.Trading.LiveStrategy do
     field :parameters, :map
     field :enabled, :boolean
     field :curator_mode, :string, default: "auto"
-    field :max_position_size, :string
 
     timestamps(type: :utc_datetime_usec, inserted_at: :created_at)
   end

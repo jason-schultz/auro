@@ -31,7 +31,20 @@ config :opus, OpusWeb.Endpoint,
   code_reloader: true,
   debug_errors: true,
   secret_key_base: "UcLuCZRQ30QCbvNRaJeY0KiWT0wn0uO9KecSwuCh2kVikSLxokescXkxA6RyckVR",
-  watchers: []
+  watchers: [
+    esbuild: {Esbuild, :install_and_run, [:opus, ~w(--sourcemap=inline --watch)]},
+    tailwind: {Tailwind, :install_and_run, [:opus, ~w(--watch)]}
+  ]
+
+# Watch static and templates for browser reloading.
+config :opus, OpusWeb.Endpoint,
+  live_reload: [
+    web_console_logger: true,
+    patterns: [
+      ~r"priv/static/(?!uploads/).*(js|css|png|jpeg|jpg|gif|svg)$",
+      ~r"lib/opus_web/(controllers|live|components)/.*(ex|heex)$"
+    ]
+  ]
 
 # ## SSL Support
 #
@@ -69,5 +82,10 @@ config :phoenix, :stacktrace_depth, 20
 # Initialize plugs at runtime for faster development compilation
 config :phoenix, :plug_init_mode, :runtime
 
-# Disable swoosh api client as it is only required for production adapters.
-# config :swoosh, :api_client, false
+config :phoenix_live_view,
+  # Include debug annotations and locations in rendered markup.
+  # Changing this configuration will require mix clean and a full recompile.
+  debug_heex_annotations: true,
+  debug_attributes: true,
+  # Enable helpful, but potentially expensive runtime checks
+  enable_expensive_runtime_checks: true

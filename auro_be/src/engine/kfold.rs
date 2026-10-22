@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 
+use crate::engine::financing::FinancingModel;
 use crate::engine::pipeline::{run_backtest_stats, StrategyConfig};
 use crate::engine::stats::BacktestStats;
 use crate::engine::types::Candle;
@@ -90,12 +91,14 @@ pub fn run_kfold(
     strategy: &StrategyConfig,
     candles: &[Candle],
     windows: &[TestWindow],
+    financing: &FinancingModel,
 ) -> Vec<FoldResult> {
     run_kfold_with_warmup(
         strategy,
         candles,
         windows,
         KFoldSpec::default().warmup_candles,
+        financing,
     )
 }
 
@@ -104,6 +107,7 @@ pub fn run_kfold_with_warmup(
     candles: &[Candle],
     windows: &[TestWindow],
     warmup_candles: usize,
+    financing: &FinancingModel,
 ) -> Vec<FoldResult> {
     let mut out = Vec::new();
 
@@ -116,7 +120,12 @@ pub fn run_kfold_with_warmup(
         let local_active_start_idx = w.start_idx - slice_start;
         let fold_slice = &candles[slice_start..w.end_idx];
 
-        match run_backtest_stats(fold_slice, strategy, Some(local_active_start_idx)) {
+        match run_backtest_stats(
+            fold_slice,
+            strategy,
+            Some(local_active_start_idx),
+            financing,
+        ) {
             Ok(stats) => out.push(FoldResult {
                 fold_index: w.fold_index,
                 start_time: w.start_time,

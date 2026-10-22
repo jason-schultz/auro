@@ -11,28 +11,6 @@ defmodule Opus.Auro.Client do
   def base_url, do: Application.get_env(:opus, :auro_base_url, @default_base_url)
 
   @doc """
-  Trigger evaluation of all strategies at the given granularity for the target slot.
-  Returns `{:ok, response}` on success, or `{:error, reason}` on failure.
-  Uses idempotency_key to prevent duplicate evaluations on retry.
-  """
-  @spec evaluate(String.t(), DateTime.t(), String.t()) :: {:ok, map()} | {:error, any()}
-  def evaluate(granularity, target_slot, idempotency_key)
-      when is_valid(granularity) do
-    Logger.info(
-      "[AuroClient] Triggering evaluation for #{granularity} #{target_slot} with idempotency key #{idempotency_key}"
-    )
-
-    body = %{
-      target_slot: DateTime.to_iso8601(target_slot),
-      idempotency_key: idempotency_key
-    }
-
-    client()
-    |> Req.post(url: "/api/evaluate/#{granularity}", json: body, receive_timeout: 30_000)
-    |> handle_response()
-  end
-
-  @doc """
   Remove a trade from Rust's in-memory open_positions map.
 
   Called by the reconciler after detecting an OANDA-side close, to keep
@@ -87,7 +65,14 @@ defmodule Opus.Auro.Client do
       when is_valid(granularity) do
     params =
       opts
-      |> Keyword.take([:adx_period, :bollinger_period, :bollinger_std, :atr_period, :ma_period])
+      |> Keyword.take([
+        :adx_period,
+        :bollinger_period,
+        :bollinger_std,
+        :atr_period,
+        :ma_period,
+        :roc_period
+      ])
       |> Enum.into(%{})
 
     client()
@@ -97,6 +82,18 @@ defmodule Opus.Auro.Client do
 
   def get_indicators(_instrument, granularity, _opts),
     do: {:error, {:invalid_granularity, granularity}}
+
+  @doc """
+  Create a live strategy (disabled) through Rust, which validates the config
+  and loads candle buffers for the instrument. Returns `{:error,
+  {:http_error, 409, body}}` when the strategy already exists.
+  """
+  @spec create_live_strategy(map()) :: {:ok, map()} | {:error, any()}
+  def create_live_strategy(attrs) do
+    client()
+    |> Req.post(url: "/api/live/strategies", json: attrs)
+    |> handle_response()
+  end
 
   @doc """
   Submit a strategy config to the pipeline backtest stage.
@@ -149,6 +146,111 @@ defmodule Opus.Auro.Client do
       url: "/api/pipeline/monte_carlo",
       json: %{strategy_config_id: config_id},
       receive_timeout: 120_000
+    )
+    |> handle_response()
+  end
+
+  @doc "Run the sealed-holdout stage (POST /api/pipeline/holdout)."
+  @spec run_pipeline_holdout(String.t()) :: {:ok, map()} | {:error, term()}
+  def run_pipeline_holdout(config_id) when is_binary(config_id) do
+    Logger.info("[AuroClient] Running pipeline holdout for config #{config_id}")
+
+    client()
+    |> Req.post(
+      url: "/api/pipeline/holdout",
+      json: %{strategy_config_id: config_id},
+      receive_timeout: 120_000
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  Replace a live strategy's config through Rust, which re-validates it. The
+  evaluator reads strategies from the DB each cycle, so changes apply on the
+  next bar.
+  """
+  @spec update_live_strategy(String.t(), map()) :: {:ok, map()} | {:error, any()}
+  def update_live_strategy(id, attrs) when is_binary(id) do
+    client()
+    |> Req.put(url: "/api/live/strategies/#{id}", json: attrs)
+    |> handle_response()
+  end
+
+  @doc """
+  Have Rust fetch a symbol's Questrade bars for the last `days` calendar days
+  and upsert the completed ones into `candles`. Idempotent — overlapping
+  re-fetches overwrite identical rows. `granularity` is ours ("M1", "M5").
+  """
+  @spec persist_questrade_candles(String.t(), String.t(), pos_integer()) ::
+          {:ok, map()} | {:error, any()}
+  def persist_questrade_candles(symbol, granularity, days)
+      when is_binary(symbol) and is_binary(granularity) and is_integer(days) do
+    client()
+    |> Req.post(
+      url: "/api/questrade/candles/persist",
+      json: %{symbol: symbol, granularity: granularity, days: days},
+      receive_timeout: 300_000
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  Have Rust fetch the last `days` days of a US symbol's bars from Massive and
+  upsert the completed ones into `candles`. Same contract as the Questrade
+  persist call; `granularity` is ours ("D"). Rust paces the vendor calls, so
+  a two-year backfill can take a minute per symbol.
+  """
+  @spec persist_massive_candles(String.t(), String.t(), pos_integer()) ::
+          {:ok, map()} | {:error, any()}
+  def persist_massive_candles(symbol, granularity, days)
+      when is_binary(symbol) and is_binary(granularity) and is_integer(days) do
+    client()
+    |> Req.post(
+      url: "/api/massive/candles/persist",
+      json: %{symbol: symbol, granularity: granularity, days: days},
+      receive_timeout: 300_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  Has Rust record today's OANDA financing rates (POST /api/financing/snapshot).
+  """
+  @spec snapshot_financing() :: {:ok, map()} | {:error, term()}
+  def snapshot_financing do
+    client()
+    |> Req.post(url: "/api/financing/snapshot", receive_timeout: 60_000)
+    |> handle_response()
+  end
+
+  # The three account-page reads are interactive (a person is waiting on
+  # them), so they fail fast instead of taking Req's default retries.
+
+  @doc "Connection status and balances for every broker (OANDA, Questrade, Wealthsimple)."
+  @spec list_brokers() :: {:ok, [map()]} | {:error, term()}
+  def list_brokers do
+    client()
+    |> Req.get(url: "/api/brokers", retry: false)
+    |> handle_response()
+  end
+
+  @doc "Wealthsimple accounts with their hand-entered positions."
+  @spec wealthsimple_accounts() :: {:ok, [map()]} | {:error, term()}
+  def wealthsimple_accounts do
+    client()
+    |> Req.get(url: "/api/brokers/wealthsimple", retry: false)
+    |> handle_response()
+  end
+
+  @doc "Re-price every Wealthsimple position from Questrade quotes."
+  @spec refresh_wealthsimple_prices() :: {:ok, map()} | {:error, term()}
+  def refresh_wealthsimple_prices do
+    client()
+    |> Req.post(
+      url: "/api/brokers/wealthsimple/refresh-prices",
+      receive_timeout: 30_000,
+      retry: false
     )
     |> handle_response()
   end

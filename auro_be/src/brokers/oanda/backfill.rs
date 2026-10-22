@@ -1,113 +1,136 @@
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 
 use crate::brokers::oanda::client::OandaClient;
-use crate::db;
-use crate::engine::types::{Candle, CandleRow, Granularity, OHLC};
+use crate::db::repositories::candles as candles_repo;
+use crate::engine::types::{Candle, CandleRow, Granularity};
+use crate::error::AppResult;
 
-const BACKFILL_INSTRUMENTS: &[&str] = &[
-    "EUR_USD", "USD_CAD", "GBP_USD", "USD_JPY", "AUD_USD", "XAU_USD",
-];
+/// OANDA's per-request candle limit.
+const PAGE_SIZE: i32 = 5000;
 
-pub async fn backfill_candles(oanda: &OandaClient, pool: &PgPool, days: i64) {
-    tracing::info!("Starting candle backfill ({} days)...", days);
+/// Every complete candle strictly after `after`, oldest first. Pages through
+/// OANDA's per-request limit. This is the only way candles enter Auro: the
+/// historical backfill and the live candle feed both use it, so live bars and
+/// backtest bars are byte-identical OANDA candles.
+pub async fn fetch_complete_since(
+    oanda: &OandaClient,
+    instrument: &str,
+    granularity: Granularity,
+    after: DateTime<Utc>,
+) -> AppResult<Vec<Candle>> {
+    let mut candles: Vec<Candle> = Vec::new();
 
-    for instrument in BACKFILL_INSTRUMENTS {
-        match backfill_instrument(oanda, pool, instrument, days).await {
-            Ok(count) => {
-                tracing::info!("Backfilled {} candles for {}", count, instrument);
-            }
-            Err(e) => {
-                tracing::error!("Failed to backfill {}: {}", instrument, e);
-            }
+    loop {
+        let newest = candles.last().map_or(after, |c| c.time);
+        let cursor = newest + Duration::seconds(1);
+        if cursor > Utc::now() {
+            break;
+        }
+
+        let from = cursor.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let response = oanda
+            .get_candles(
+                instrument,
+                granularity.as_str(),
+                Some(PAGE_SIZE),
+                Some(&from),
+                None,
+            )
+            .await?;
+
+        let page_len = response.candles.len();
+        let page = response.candles.iter().filter_map(|c| c.complete_candle());
+        let added = append_newer(&mut candles, page, newest);
+
+        if added == 0 || page_len < PAGE_SIZE as usize {
+            break;
         }
     }
 
-    tracing::info!("Backfill complete");
+    Ok(candles)
 }
 
-async fn backfill_instrument(
+/// Append candles strictly newer than `newest`. OANDA snaps `from` back to
+/// the start of the bar containing it, so each page repeats the previous
+/// page's last bar; this drops it. Returns how many were appended.
+fn append_newer(
+    candles: &mut Vec<Candle>,
+    page: impl Iterator<Item = Candle>,
+    newest: DateTime<Utc>,
+) -> usize {
+    let before = candles.len();
+    candles.extend(page.filter(|c| c.time > newest));
+    candles.len() - before
+}
+
+/// Fetch and persist every complete candle strictly after `after`.
+pub async fn backfill(
     oanda: &OandaClient,
     pool: &PgPool,
     instrument: &str,
-    days: i64,
-) -> Result<usize, Box<dyn std::error::Error>> {
-    // Check if we already have data — if so, start from where we left off
-    let start_time = match db::get_latest_candle_time(pool, instrument, "M1").await? {
-        Some(latest) => latest + Duration::minutes(1),
-        None => Utc::now() - Duration::days(days),
-    };
+    granularity: Granularity,
+    after: DateTime<Utc>,
+) -> AppResult<usize> {
+    let rows: Vec<CandleRow> = fetch_complete_since(oanda, instrument, granularity, after)
+        .await?
+        .into_iter()
+        .map(|candle| CandleRow {
+            instrument: instrument.to_string(),
+            granularity,
+            candle,
+        })
+        .collect();
 
-    let from = start_time.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let mut total_count = 0;
+    Ok(candles_repo::upsert_candles(pool, &rows).await?)
+}
 
-    // OANDA returns max 5000 candles per request, so we may need multiple calls
-    let mut current_from = from;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::types::OHLC;
+    use chrono::TimeZone;
 
-    loop {
-        let response = oanda
-            .get_candles(instrument, "M1", Some(5000), Some(&current_from), None)
-            .await?;
-
-        if response.candles.is_empty() {
-            break;
-        }
-
-        let rows: Vec<CandleRow> = response
-            .candles
-            .iter()
-            .filter_map(|c| {
-                let mid = c.mid.as_ref()?;
-                let time = chrono::DateTime::parse_from_rfc3339(&c.time)
-                    .ok()?
-                    .with_timezone(&Utc);
-
-                Some(CandleRow {
-                    instrument: instrument.to_string(),
-                    granularity: Granularity::M1,
-                    complete: c.complete,
-                    candle: Candle {
-                        time,
-                        mid: OHLC {
-                            open: mid.o.parse().ok()?,
-                            high: mid.h.parse().ok()?,
-                            low: mid.l.parse().ok()?,
-                            close: mid.c.parse().ok()?,
-                        },
-                        volume: c.volume,
-                        bid: c.bid.as_ref().and_then(parse_ohlc),
-                        ask: c.ask.as_ref().and_then(parse_ohlc),
-                    },
-                })
-            })
-            .collect();
-
-        let count = db::upsert_candles(pool, &rows).await?;
-        total_count += count;
-
-        // If we got less than 5000, we've caught up
-        if response.candles.len() < 5000 {
-            break;
-        }
-
-        // Move the window forward
-        if let Some(last) = rows.last() {
-            current_from = (last.candle.time + Duration::minutes(1))
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string();
-        } else {
-            break;
+    fn candle(minute: u32) -> Candle {
+        Candle {
+            time: Utc.with_ymd_and_hms(2026, 10, 13, 12, minute, 0).unwrap(),
+            mid: OHLC {
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+            },
+            volume: 1,
+            bid: None,
+            ask: None,
         }
     }
 
-    Ok(total_count)
-}
+    #[test]
+    fn append_newer_drops_the_repeated_page_boundary_bar() {
+        let mut candles = vec![candle(0), candle(5)];
+        let newest = candles.last().unwrap().time;
 
-fn parse_ohlc(data: &crate::brokers::oanda::models::CandlestickData) -> Option<OHLC> {
-    Some(OHLC {
-        open: data.o.parse().ok()?,
-        high: data.h.parse().ok()?,
-        low: data.l.parse().ok()?,
-        close: data.c.parse().ok()?,
-    })
+        // OANDA's next page starts with the bar we already have.
+        let added = append_newer(
+            &mut candles,
+            [candle(5), candle(10), candle(15)].into_iter(),
+            newest,
+        );
+
+        assert_eq!(added, 2);
+        let minutes: Vec<_> = candles
+            .iter()
+            .map(|c| c.time.format("%M").to_string())
+            .collect();
+        assert_eq!(minutes, ["00", "05", "10", "15"]);
+    }
+
+    #[test]
+    fn append_newer_reports_zero_when_page_has_nothing_new() {
+        let mut candles = vec![candle(5)];
+        let added = append_newer(&mut candles, [candle(5)].into_iter(), candle(5).time);
+        assert_eq!(added, 0);
+        assert_eq!(candles.len(), 1);
+    }
 }

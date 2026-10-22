@@ -1,13 +1,11 @@
 pub mod http;
 
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use auro::brokers::oanda::client::OandaClient;
 use auro::brokers::wealthsimple::client::WealthsimpleClient;
 use auro::config::Config;
 use auro::state::{AppState, LiveState};
-use lru::LruCache;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::broadcast;
 
@@ -25,6 +23,8 @@ pub fn test_state() -> AppState {
         host: "127.0.0.1".to_string(),
         port: 3000,
         questrade_refresh_token: None,
+        massive_api_key: None,
+        massive_base_url: "http://127.0.0.1:1".to_string(),
     };
 
     let oanda = OandaClient::new(
@@ -44,8 +44,8 @@ pub fn test_state() -> AppState {
         start_time: chrono::Utc::now(),
         live: Arc::new(LiveState::new()),
         price_tx,
-        eval_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap()))),
         questrade: None,
         wealthsimple,
+        massive: None,
     }
 }

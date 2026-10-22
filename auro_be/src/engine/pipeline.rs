@@ -1,10 +1,13 @@
-use rand::Rng;
+use rand::RngExt;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::db::repositories::candles::load_candles;
+use crate::db::repositories::financing as financing_repo;
+use crate::db::repositories::live_strategies as live_strategies_repo;
 use crate::db::repositories::pipeline as pipeline_repo;
-use crate::engine::grid::load_candles;
+use crate::engine::financing::{apply_financing, FinancingModel};
 use crate::engine::stats::{calculate_backtest_stats, BacktestStats};
 use crate::engine::strategy::{self as strategy_mod, Strategy};
 use crate::engine::types::{Candle, Granularity, Trade};
@@ -41,16 +44,21 @@ pub fn instrument_to_class(instrument: &str) -> &'static str {
             "fx_major"
         }
         "XAU_USD" | "XAG_USD" | "XPT_USD" | "XPD_USD" | "XCU_USD" => "metal",
-        "WTICO_USD" | "BCO_USD" | "NATGAS_USD" | "CORN_USD" | "WHEAT_USD" | "SOYBN_USD" => {
-            "commodity"
-        }
-        "UK100_GBP" | "EU50_EUR" | "DE30_EUR" | "FR40_EUR" | "AU200_AUD" | "JP225_USD"
-        | "US30_USD" | "SPX500_USD" | "NAS100_USD" | "HK33_HKD" | "SG30_SGD" => "index",
+        "WTICO_USD" | "BCO_USD" | "NATGAS_USD" | "CORN_USD" | "WHEAT_USD" | "SOYBN_USD"
+        | "SUGAR_USD" => "commodity",
+        "UK100_GBP" | "EU50_EUR" | "DE30_EUR" | "FR40_EUR" | "NL25_EUR" | "CH20_CHF"
+        | "AU200_AUD" | "JP225_USD" | "HK33_HKD" | "CN50_USD" | "SG30_SGD" | "US30_USD"
+        | "SPX500_USD" | "NAS100_USD" | "US2000_USD" => "index",
+        "USB02Y_USD" | "USB10Y_USD" | "USB30Y_USD" | "DE10YB_EUR" | "UK10YB_GBP" => "bond",
         _ => "fx_cross",
     }
 }
 
-fn run_strategy(candles: &[Candle], config: &StrategyConfig) -> AppResult<Vec<Trade>> {
+fn run_strategy(
+    candles: &[Candle],
+    config: &StrategyConfig,
+    financing: &FinancingModel,
+) -> AppResult<Vec<Trade>> {
     // All strategies use the composite shape. Pre-composite flat-shape strategies
     // were purged with the DB wipe; see [[decision-canonical-strategy-shape]].
     let strategy: Strategy = serde_json::from_value(config.parameters.clone()).map_err(|e| {
@@ -59,13 +67,28 @@ fn run_strategy(candles: &[Candle], config: &StrategyConfig) -> AppResult<Vec<Tr
             config.strategy_type, e
         ))
     })?;
-    Ok(strategy_mod::run_backtest(candles, &strategy))
+
+    // A warmup the live buffer can't hold means the strategy is dead live —
+    // fail loudly here instead of silently producing zero trades.
+    let warmup = strategy.warmup();
+    let capacity = strategy.granularity.buffer_capacity();
+    if warmup + 1 > capacity {
+        return Err(AppError::BadRequest(format!(
+            "warmup {} exceeds live buffer capacity {} for {} — strategy could never trade live",
+            warmup, capacity, strategy.granularity
+        )));
+    }
+
+    let mut trades = strategy_mod::run_backtest(candles, &strategy);
+    apply_financing(&mut trades, &config.instrument, financing);
+    Ok(trades)
 }
 
 pub fn run_backtest_stats(
     candles: &[Candle],
     config: &StrategyConfig,
     active_start_idx: Option<usize>,
+    financing: &FinancingModel,
 ) -> AppResult<BacktestStats> {
     if candles.is_empty() {
         let empty: Vec<Trade> = Vec::new();
@@ -82,7 +105,7 @@ pub fn run_backtest_stats(
         }
     }
 
-    let trades = run_strategy(candles, config)?;
+    let trades = run_strategy(candles, config, financing)?;
 
     match active_start_idx {
         None | Some(0) => Ok(calculate_backtest_stats(&trades)),
@@ -97,6 +120,13 @@ pub fn run_backtest_stats(
     }
 }
 
+/// Overnight financing model for a stage's backtests (one DB read per stage).
+async fn load_financing(pool: &PgPool) -> AppResult<FinancingModel> {
+    financing_repo::load_model(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("load financing model: {e}")))
+}
+
 fn compute_expectancy(stats: &BacktestStats) -> f64 {
     let loss_rate = 1.0 - stats.win_rate;
     (stats.win_rate * stats.avg_win) - (loss_rate * stats.avg_loss.abs())
@@ -109,6 +139,16 @@ fn apply_threshold(operator: &str, actual: f64, threshold: f64) -> bool {
         "gt" => actual > threshold,
         "lt" => actual < threshold,
         _ => false,
+    }
+}
+
+fn operator_failure_text(operator: &str) -> &'static str {
+    match operator {
+        "gte" => "is below minimum",
+        "gt" => "must be greater than",
+        "lte" => "is above maximum",
+        "lt" => "must be less than",
+        _ => "does not satisfy",
     }
 }
 
@@ -137,8 +177,11 @@ fn evaluate_thresholds(
             };
             if !apply_threshold(&t.operator, actual, t.value) {
                 Some(format!(
-                    "{}: {:.4} does not {} {:.4}",
-                    t.metric, actual, t.operator, t.value
+                    "{}: {:.4} {} {:.4}",
+                    t.metric,
+                    actual,
+                    operator_failure_text(&t.operator),
+                    t.value
                 ))
             } else {
                 None
@@ -238,6 +281,132 @@ async fn fail_stage(
 }
 
 // ---------------------------------------------------------------------------
+// Sealed holdout
+// ---------------------------------------------------------------------------
+
+/// Start of the sealed holdout window: `trading_config.pipeline_holdout_start`,
+/// an ISO date. The exploration stages (backtest, walk-forward, Monte Carlo)
+/// never see bars from it onward; the holdout stage alone does, once per
+/// config. A missing or malformed value is an error rather than "no holdout":
+/// the pipeline must not run unsealed by accident.
+pub async fn load_holdout_start(pool: &PgPool) -> AppResult<chrono::DateTime<chrono::Utc>> {
+    let rows = live_strategies_repo::list_trading_config(pool)
+        .await
+        .map_err(AppError::Database)?;
+    let raw = rows
+        .iter()
+        .find(|r| r.key == "pipeline_holdout_start")
+        .and_then(|r| r.value.as_str().map(str::to_string))
+        .ok_or_else(|| {
+            AppError::Internal(
+                "trading_config.pipeline_holdout_start is not set; refusing to run the pipeline unsealed"
+                    .into(),
+            )
+        })?;
+    let date = chrono::NaiveDate::parse_from_str(&raw, "%Y-%m-%d").map_err(|e| {
+        AppError::Internal(format!(
+            "pipeline_holdout_start {raw:?} is not an ISO date: {e}"
+        ))
+    })?;
+    Ok(chrono::DateTime::from_naive_utc_and_offset(
+        date.and_hms_opt(0, 0, 0).expect("midnight exists"),
+        chrono::Utc,
+    ))
+}
+
+/// The bars an exploration stage may see: everything before the holdout.
+async fn load_exploration_candles(
+    pool: &PgPool,
+    config: &StrategyConfig,
+) -> AppResult<Vec<Candle>> {
+    let holdout_start = load_holdout_start(pool).await?;
+    let candles = load_candles(pool, &config.instrument, config.granularity)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(candles
+        .into_iter()
+        .filter(|c| c.time < holdout_start)
+        .collect())
+}
+
+/// The one look at the sealed window: the strategy runs over full history
+/// (so indicators warm up on exploration bars) and only trades entered on or
+/// after the holdout start count. `holdout_looks` in the stats is how many
+/// sibling candidates (same instrument and strategy type) have been judged
+/// on this window, this one included — the more looks, the less a pass means.
+pub async fn run_holdout(pool: &PgPool, config: &StrategyConfig) -> AppResult<EvaluationResult> {
+    let evaluation_id = upsert_evaluation_running(pool, config.id, "holdout").await?;
+
+    let holdout_start = load_holdout_start(pool).await?;
+    let candles = load_candles(pool, &config.instrument, config.granularity)
+        .await
+        .map_err(AppError::Database)?;
+    let Some(active_start_idx) = candles.iter().position(|c| c.time >= holdout_start) else {
+        let failure = format!(
+            "no candles in the holdout window for {} {} (from {})",
+            config.instrument,
+            config.granularity,
+            holdout_start.format("%Y-%m-%d")
+        );
+        return fail_stage(pool, evaluation_id, failure).await;
+    };
+
+    let financing = load_financing(pool).await?;
+    let stats = match run_backtest_stats(&candles, config, Some(active_start_idx), &financing) {
+        Ok(stats) => stats,
+        Err(e) => {
+            let failure = e.to_string();
+            return fail_stage(pool, evaluation_id, failure).await;
+        }
+    };
+    let looks = pipeline_repo::count_holdout_looks(pool, &config.instrument, &config.strategy_type)
+        .await
+        .map_err(AppError::Database)?;
+
+    let mut stats_json = backtest_stats_to_json(&stats);
+    stats_json["holdout_start"] = serde_json::json!(holdout_start.format("%Y-%m-%d").to_string());
+    stats_json["holdout_looks"] = serde_json::json!(looks);
+
+    let timeframe_class = config.granularity.timeframe_class();
+    let instrument_class = instrument_to_class(&config.instrument);
+    let thresholds = load_thresholds(
+        pool,
+        "holdout",
+        timeframe_class,
+        instrument_class,
+        &config.strategy_type,
+    )
+    .await?;
+    let (status, failure_reason) =
+        evaluate_thresholds(&stats_json, &thresholds, "holdout", timeframe_class);
+
+    finalize_evaluation(
+        pool,
+        evaluation_id,
+        &status,
+        &stats_json,
+        failure_reason.as_deref(),
+    )
+    .await?;
+
+    tracing::info!(
+        config_id = %config.id,
+        instrument = %config.instrument,
+        granularity = %config.granularity,
+        status = %status,
+        holdout_looks = looks,
+        "[Pipeline] holdout stage complete"
+    );
+
+    Ok(EvaluationResult {
+        evaluation_id,
+        status,
+        stats: stats_json,
+        failure_reason,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Backtest stage
 // ---------------------------------------------------------------------------
 
@@ -256,9 +425,7 @@ fn backtest_stats_to_json(stats: &BacktestStats) -> Value {
 pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<EvaluationResult> {
     let evaluation_id = upsert_evaluation_running(pool, config.id, "backtest").await?;
 
-    let candles = load_candles(pool, &config.instrument, config.granularity.as_str())
-        .await
-        .map_err(AppError::Database)?;
+    let candles = load_exploration_candles(pool, config).await?;
 
     if candles.is_empty() {
         let failure = format!(
@@ -268,7 +435,8 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
         return fail_stage(pool, evaluation_id, failure).await;
     }
 
-    let bt_stats = match run_backtest_stats(&candles, config, None) {
+    let financing = load_financing(pool).await?;
+    let bt_stats = match run_backtest_stats(&candles, config, None, &financing) {
         Ok(stats) => stats,
         Err(e) => {
             let failure = e.to_string();
@@ -349,9 +517,7 @@ pub async fn run_walk_forward(
 ) -> AppResult<EvaluationResult> {
     let evaluation_id = upsert_evaluation_running(pool, config.id, "walk_forward").await?;
 
-    let candles = load_candles(pool, &config.instrument, config.granularity.as_str())
-        .await
-        .map_err(AppError::Database)?;
+    let candles = load_exploration_candles(pool, config).await?;
 
     // Need enough candles for a meaningful OOS window
     if candles.len() < 50 {
@@ -367,7 +533,8 @@ pub async fn run_walk_forward(
     let is_candles = &candles[..split];
     let oos_candles = &candles[split..];
 
-    let is_trades = match run_strategy(is_candles, config) {
+    let financing = load_financing(pool).await?;
+    let is_trades = match run_strategy(is_candles, config, &financing) {
         Ok(t) => t,
         Err(e) => {
             let failure = format!("IS run failed: {}", e);
@@ -375,7 +542,7 @@ pub async fn run_walk_forward(
         }
     };
 
-    let oos_trades = match run_strategy(oos_candles, config) {
+    let oos_trades = match run_strategy(oos_candles, config, &financing) {
         Ok(t) => t,
         Err(e) => {
             let failure = format!("OOS run failed: {}", e);
@@ -533,11 +700,10 @@ pub async fn run_monte_carlo(
 ) -> AppResult<EvaluationResult> {
     let evaluation_id = upsert_evaluation_running(pool, config.id, "monte_carlo").await?;
 
-    let candles = load_candles(pool, &config.instrument, config.granularity.as_str())
-        .await
-        .map_err(AppError::Database)?;
+    let candles = load_exploration_candles(pool, config).await?;
 
-    let trades = match run_strategy(&candles, config) {
+    let financing = load_financing(pool).await?;
+    let trades = match run_strategy(&candles, config, &financing) {
         Ok(t) => t,
         Err(e) => {
             let failure = e.to_string();

@@ -22,41 +22,37 @@ pub struct DonchianParams {
     pub exit_period: usize,
 }
 
-pub fn compute_ports(candles: &[Candle], params: &DonchianParams) -> Option<HashMap<String, bool>> {
-    if params.entry_period == 0 || params.exit_period == 0 {
-        return None;
-    }
-
-    let min_len = params.entry_period.max(params.exit_period) + 1;
-    if candles.len() < min_len {
-        return None;
-    }
-
-    let current = candles.last()?;
-    let entry_channel = indicators::donchian(candles, params.entry_period)?;
-    let exit_channel = indicators::donchian(candles, params.exit_period)?;
-
-    // Strict current-bar breakout convention: must exceed prior extreme, not touch.
-    let breakout_long = current.mid.high > entry_channel.upper;
-    let breakout_short = current.mid.low < entry_channel.lower;
-    let exit_long = current.mid.low < exit_channel.lower;
-    let exit_short = current.mid.high > exit_channel.upper;
-
-    let mut ports = HashMap::new();
-    ports.insert("breakout_long".to_string(), breakout_long);
-    ports.insert("breakout_short".to_string(), breakout_short);
-    ports.insert("exit_long".to_string(), exit_long);
-    ports.insert("exit_short".to_string(), exit_short);
-    Some(ports)
-}
-
 impl Signaler for DonchianParams {
     fn warmup(&self) -> usize {
         self.entry_period.max(self.exit_period) + 1
     }
 
     fn compute(&self, candles: &[Candle]) -> Option<HashMap<String, bool>> {
-        compute_ports(candles, self)
+        if self.entry_period == 0 || self.exit_period == 0 {
+            return None;
+        }
+
+        let min_len = self.entry_period.max(self.exit_period) + 1;
+        if candles.len() < min_len {
+            return None;
+        }
+
+        let current = candles.last()?;
+        let entry_channel = indicators::donchian(candles, self.entry_period)?;
+        let exit_channel = indicators::donchian(candles, self.exit_period)?;
+
+        // Strict current-bar breakout convention: must exceed prior extreme, not touch.
+        let breakout_long = current.mid.high > entry_channel.upper;
+        let breakout_short = current.mid.low < entry_channel.lower;
+        let exit_long = current.mid.low < exit_channel.lower;
+        let exit_short = current.mid.high > exit_channel.upper;
+
+        let mut ports = HashMap::new();
+        ports.insert("breakout_long".to_string(), breakout_long);
+        ports.insert("breakout_short".to_string(), breakout_short);
+        ports.insert("exit_long".to_string(), exit_long);
+        ports.insert("exit_short".to_string(), exit_short);
+        Some(ports)
     }
 
     fn entry_reason(&self, candles: &[Candle], _direction: Direction) -> EntryReason {
@@ -110,7 +106,7 @@ mod tests {
             .collect();
         candles.push(candle(125.0, 110.0, 120.0, 20));
 
-        let ports = compute_ports(&candles, &params()).expect("ports should compute");
+        let ports = params().compute(&candles).expect("ports should compute");
         assert!(ports["breakout_long"]);
         assert!(!ports["breakout_short"]);
     }
@@ -122,7 +118,7 @@ mod tests {
             .collect();
         candles.push(candle(90.0, 70.0, 75.0, 20));
 
-        let ports = compute_ports(&candles, &params()).expect("ports should compute");
+        let ports = params().compute(&candles).expect("ports should compute");
         assert!(ports["breakout_short"]);
         assert!(!ports["breakout_long"]);
     }
@@ -150,7 +146,7 @@ mod tests {
         }
         candles.push(candle(104.0, 89.0, 95.0, 20));
 
-        let ports = compute_ports(&candles, &params()).expect("ports should compute");
+        let ports = params().compute(&candles).expect("ports should compute");
         assert!(ports["exit_long"]);
         assert!(!ports["breakout_short"]);
     }

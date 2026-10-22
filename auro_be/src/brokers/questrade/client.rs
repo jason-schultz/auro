@@ -7,10 +7,12 @@ use sqlx::PgPool;
 
 use super::models::{
     AccountBalancesResponse, AccountsResponse, CandlesResponse, EquityCandle, QuestradeAccount,
-    QuoteResult, QuotesResponse, SymbolSearchResponse, TokenResponse,
+    QuoteResult, QuotesResponse, SymbolDetail, SymbolSearchResponse, SymbolsResponse,
+    TokenResponse,
 };
 use crate::brokers::client::BrokerClient;
 use crate::brokers::{BrokerAccount, BrokerKind, BrokerStatus};
+use crate::engine::types::Granularity;
 use crate::error::{AppError, AppResult};
 
 const AUTH_URL: &str = "https://login.questrade.com/oauth2/token";
@@ -28,10 +30,13 @@ pub struct QuestradeClient {
 }
 
 impl QuestradeClient {
-    /// Load the client from the DB token row, falling back to `env_token` if
-    /// the DB has no row. Seeds the DB from `env_token` when used as fallback.
-    /// Returns None when no token is available from either source.
-    pub async fn from_db_or_env(pool: &PgPool, env_token: Option<&str>) -> AppResult<Option<Self>> {
+    /// Authenticate from the DB token row (the latest rotated refresh token),
+    /// falling back to `env_token` when the DB has no row or Questrade rejects
+    /// the DB token. Refresh tokens are single-use, so a dead DB token means
+    /// the user pasted a fresh one into the env; an env token equal to the DB
+    /// token is never retried. The successful token's rotation is persisted
+    /// by `authenticate`. Returns None when no token is available.
+    pub async fn connect(pool: &PgPool, env_token: Option<&str>) -> AppResult<Option<Self>> {
         let db_token = sqlx::query_scalar!(
             "SELECT refresh_token FROM questrade_tokens WHERE singleton = TRUE"
         )
@@ -39,23 +44,27 @@ impl QuestradeClient {
         .await
         .map_err(|e| AppError::Internal(format!("DB error loading questrade token: {}", e)))?;
 
-        let refresh_token = match (db_token, env_token) {
-            (Some(t), _) => t,
-            (None, Some(t)) => {
-                sqlx::query!(
-                    "INSERT INTO questrade_tokens (refresh_token) VALUES ($1)",
-                    t
-                )
-                .execute(pool)
-                .await
-                .map_err(|e| {
-                    AppError::Internal(format!("DB error seeding questrade token: {}", e))
-                })?;
-                t.to_string()
-            }
-            (None, None) => return Ok(None),
-        };
+        let env_token = env_token.filter(|t| db_token.as_deref() != Some(*t));
+        let candidates: Vec<String> = db_token
+            .into_iter()
+            .chain(env_token.map(str::to_string))
+            .collect();
 
+        let mut last_error = None;
+        for (i, token) in candidates.into_iter().enumerate() {
+            let mut client = Self::new(pool, token)?;
+            match client.authenticate().await {
+                Ok(()) => return Ok(Some(client)),
+                Err(e) => {
+                    tracing::warn!("Questrade token candidate {} rejected: {}", i + 1, e);
+                    last_error = Some(e);
+                }
+            }
+        }
+        last_error.map_or(Ok(None), Err)
+    }
+
+    fn new(pool: &PgPool, refresh_token: String) -> AppResult<Self> {
         let http = Client::builder()
             .timeout(StdDuration::from_secs(30))
             .connect_timeout(StdDuration::from_secs(10))
@@ -64,7 +73,7 @@ impl QuestradeClient {
                 AppError::Internal(format!("Failed to build Questrade HTTP client: {}", e))
             })?;
 
-        Ok(Some(Self {
+        Ok(Self {
             http,
             pool: pool.clone(),
             refresh_token,
@@ -72,7 +81,7 @@ impl QuestradeClient {
             api_server: None,
             expires_at: None,
             symbol_cache: HashMap::new(),
-        }))
+        })
     }
 
     /// Exchange the current refresh token for a fresh access token.
@@ -284,6 +293,18 @@ impl QuestradeClient {
         Ok(result.symbol_id)
     }
 
+    /// Questrade's interval name for one of our granularities.
+    pub fn interval_for(granularity: Granularity) -> &'static str {
+        match granularity {
+            Granularity::M1 => "OneMinute",
+            Granularity::M5 => "FiveMinutes",
+            Granularity::M15 => "FifteenMinutes",
+            Granularity::H1 => "OneHour",
+            Granularity::H4 => "FourHours",
+            Granularity::D => "OneDay",
+        }
+    }
+
     /// Max days per request that keeps bar count safely under Questrade's 20k limit.
     fn interval_chunk_days(interval: &str) -> i64 {
         match interval {
@@ -399,15 +420,9 @@ impl QuestradeClient {
             return Ok(vec![]);
         }
 
-        let ids_str = symbol_ids
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-
         let url = self.api_url("markets/quotes")?;
         let resp = self
-            .request(self.http.get(&url).query(&[("ids", ids_str.as_str())]))
+            .request(self.http.get(&url).query(&[("ids", join_ids(symbol_ids))]))
             .await?;
 
         let parsed: QuotesResponse = resp
@@ -417,6 +432,36 @@ impl QuestradeClient {
 
         Ok(parsed.quotes)
     }
+
+    /// Fetch reference data (market cap, average volume, tick ladder, sector)
+    /// for one or more symbol IDs.
+    /// Questrade: GET /v1/symbols?ids=1234,5678
+    pub async fn get_symbols(&mut self, symbol_ids: &[i64]) -> AppResult<Vec<SymbolDetail>> {
+        if symbol_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let url = self.api_url("symbols")?;
+        let resp = self
+            .request(self.http.get(&url).query(&[("ids", join_ids(symbol_ids))]))
+            .await?;
+
+        let parsed: SymbolsResponse = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to parse Questrade symbols: {}", e)))?;
+
+        Ok(parsed.symbols)
+    }
+}
+
+/// Questrade's multi-id query format: "1234,5678".
+fn join_ids(symbol_ids: &[i64]) -> String {
+    symbol_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 impl BrokerClient for QuestradeClient {

@@ -97,4 +97,7 @@ export const opusApi = {
   get: <T>(path: string) => request<T>(OPUS_BASE, path),
   post: <T>(path: string, body: unknown) =>
     request<T>(OPUS_BASE, path, { method: "POST", body: JSON.stringify(body) }),
+  put: <T>(path: string, body: unknown) =>
+    request<T>(OPUS_BASE, path, { method: "PUT", body: JSON.stringify(body) }),
+  delete: <T>(path: string) => request<T>(OPUS_BASE, path, { method: "DELETE" }),
 };

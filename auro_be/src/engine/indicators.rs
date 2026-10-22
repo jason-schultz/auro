@@ -15,7 +15,55 @@
 //! Comparator strictness conventions live next to the signal logic they
 //! govern (see `mean_reversion.rs` and `trend_following.rs`).
 
+use serde::{Deserialize, Serialize};
+
 use crate::engine::types::{BollingerBands, Candle};
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MaType {
+    #[default]
+    Sma,
+    Ema,
+}
+
+/// The `period` most recent candles, or None if there aren't that many.
+fn last_n(candles: &[Candle], period: usize) -> Option<&[Candle]> {
+    if period == 0 || candles.len() < period {
+        return None;
+    }
+    Some(&candles[candles.len() - period..])
+}
+
+/// Simple moving average of the last `period` closes.
+pub fn sma(candles: &[Candle], period: usize) -> Option<f64> {
+    let window = last_n(candles, period)?;
+    Some(window.iter().map(|c| c.mid.close).sum::<f64>() / period as f64)
+}
+
+/// Mean and population standard deviation of the last `period` closes.
+pub fn mean_stdev(candles: &[Candle], period: usize) -> Option<(f64, f64)> {
+    let window = last_n(candles, period)?;
+    let p_f = period as f64;
+    let mean: f64 = window.iter().map(|c| c.mid.close).sum::<f64>() / p_f;
+    let variance: f64 = window
+        .iter()
+        .map(|c| {
+            let diff = c.mid.close - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / p_f;
+    Some((mean, variance.sqrt()))
+}
+
+/// SMA or EMA of the last `period` closes.
+pub fn moving_average(candles: &[Candle], period: usize, ma_type: MaType) -> Option<f64> {
+    match ma_type {
+        MaType::Sma => sma(candles, period),
+        MaType::Ema => ema(candles, period),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MacdOutput {
@@ -37,33 +85,33 @@ pub struct DonchianChannel {
 /// standard smoothing factor k = 2 / (period + 1). With adequate history
 /// (roughly 3x period or more), this converges close to fully historical EMA.
 pub fn ema(candles: &[Candle], period: usize) -> Option<f64> {
-    if period == 0 || candles.len() < period {
-        return None;
-    }
-
-    let mut ema_value = candles[..period].iter().map(|c| c.mid.close).sum::<f64>() / period as f64;
-    let k = 2.0 / (period as f64 + 1.0);
-
-    for candle in candles.iter().skip(period) {
-        ema_value = candle.mid.close * k + ema_value * (1.0 - k);
-    }
-
-    Some(ema_value)
+    let closes: Vec<f64> = candles.iter().map(|c| c.mid.close).collect();
+    ema_values(&closes, period)
 }
 
 fn ema_values(values: &[f64], period: usize) -> Option<f64> {
+    ema_running(values, period)?.last().copied()
+}
+
+/// Running EMA value at every index from `period - 1` to the end. Identical
+/// recursion to `ema()` evaluated on each prefix — same SMA seed, same update
+/// order — but computed in one pass instead of once per prefix.
+fn ema_running(values: &[f64], period: usize) -> Option<Vec<f64>> {
     if period == 0 || values.len() < period {
         return None;
     }
 
+    let mut out = Vec::with_capacity(values.len() - period + 1);
     let mut ema_value = values[..period].iter().sum::<f64>() / period as f64;
     let k = 2.0 / (period as f64 + 1.0);
+    out.push(ema_value);
 
     for value in values.iter().skip(period) {
         ema_value = value * k + ema_value * (1.0 - k);
+        out.push(ema_value);
     }
 
-    Some(ema_value)
+    Some(out)
 }
 
 /// MACD over the candle window using window-seeded EMAs.
@@ -71,6 +119,10 @@ fn ema_values(values: &[f64], period: usize) -> Option<f64> {
 /// Returns None when periods are invalid (`fast >= slow`, zero periods) or
 /// when there are fewer than `slow + signal` candles to build the MACD series
 /// and then smooth it with the signal EMA.
+///
+/// Values are identical to evaluating `ema()` on every prefix of the window
+/// (the original implementation); computed in a single pass so the cost is
+/// O(window) instead of O(window²) — this function runs once per backtest bar.
 pub fn macd(candles: &[Candle], fast: usize, slow: usize, signal: usize) -> Option<MacdOutput> {
     if fast == 0 || slow == 0 || signal == 0 || fast >= slow {
         return None;
@@ -79,13 +131,17 @@ pub fn macd(candles: &[Candle], fast: usize, slow: usize, signal: usize) -> Opti
         return None;
     }
 
-    let mut macd_series: Vec<f64> = Vec::with_capacity(candles.len() - slow + 1);
-    for end_exclusive in slow..=candles.len() {
-        let window = &candles[..end_exclusive];
-        let fast_ema = ema(window, fast)?;
-        let slow_ema = ema(window, slow)?;
-        macd_series.push(fast_ema - slow_ema);
-    }
+    let closes: Vec<f64> = candles.iter().map(|c| c.mid.close).collect();
+    let fast_running = ema_running(&closes, fast)?; // values at indices fast-1..
+    let slow_running = ema_running(&closes, slow)?; // values at indices slow-1..
+
+    // MACD series starts where the slow EMA exists (index slow-1).
+    let offset = fast_running.len() - slow_running.len();
+    let macd_series: Vec<f64> = slow_running
+        .iter()
+        .enumerate()
+        .map(|(i, slow_ema)| fast_running[i + offset] - slow_ema)
+        .collect();
 
     let macd_line = *macd_series.last()?;
     let signal_line = ema_values(&macd_series, signal)?;
@@ -259,22 +315,7 @@ pub fn atr_pct(candles: &[Candle], period: usize) -> Option<f64> {
 /// Returns None if there are fewer than `period` candles.
 /// Uses population standard deviation (divide by N), per Bollinger's original spec.
 pub fn bollinger(candles: &[Candle], period: usize, std_dev_mult: f64) -> Option<BollingerBands> {
-    if period == 0 || candles.len() < period {
-        return None;
-    }
-
-    let window = &candles[candles.len() - period..];
-    let p_f = period as f64;
-    let middle: f64 = window.iter().map(|c| c.mid.close).sum::<f64>() / p_f;
-    let variance: f64 = window
-        .iter()
-        .map(|c| {
-            let diff = c.mid.close - middle;
-            diff * diff
-        })
-        .sum::<f64>()
-        / p_f;
-    let std_dev = variance.sqrt();
+    let (middle, std_dev) = mean_stdev(candles, period)?;
 
     let upper = middle + std_dev_mult * std_dev;
     let lower = middle - std_dev_mult * std_dev;
@@ -305,22 +346,7 @@ pub fn bollinger(candles: &[Candle], period: usize, std_dev_mult: f64) -> Option
 ///   Z = (price - mean) / stdev
 /// Returns None if fewer than `period` candles or stdev is zero.
 pub fn z_score(candles: &[Candle], period: usize) -> Option<f64> {
-    if period == 0 || candles.len() < period {
-        return None;
-    }
-
-    let window = &candles[candles.len() - period..];
-    let p_f = period as f64;
-    let mean: f64 = window.iter().map(|c| c.mid.close).sum::<f64>() / p_f;
-    let variance: f64 = window
-        .iter()
-        .map(|c| {
-            let diff = c.mid.close - mean;
-            diff * diff
-        })
-        .sum::<f64>()
-        / p_f;
-    let std_dev = variance.sqrt();
+    let (mean, std_dev) = mean_stdev(candles, period)?;
     if std_dev <= 0.0 {
         return None;
     }
@@ -377,12 +403,7 @@ pub fn rsi(candles: &[Candle], period: usize) -> Option<f64> {
 /// Percentage deviation of the most recent close from the `period`-bar SMA.
 /// Positive = price above MA, negative = below. Returns None if fewer than `period` candles.
 pub fn ma_deviation_pct(candles: &[Candle], period: usize) -> Option<f64> {
-    if period == 0 || candles.len() < period {
-        return None;
-    }
-
-    let window = &candles[candles.len() - period..];
-    let ma: f64 = window.iter().map(|c| c.mid.close).sum::<f64>() / period as f64;
+    let ma = sma(candles, period)?;
     if ma <= 0.0 {
         return None;
     }
@@ -532,6 +553,18 @@ pub fn pivot_points(prev_high: f64, prev_low: f64, prev_close: f64) -> PivotPoin
 
 /// Rate of Change over `period` bars, as a percentage.
 ///
+/// Bar length in minutes, inferred from the tightest spacing among the last
+/// few candles so a weekend or overnight gap before the newest bar can't skew
+/// it. Components only see candles, not the strategy's granularity.
+pub fn bar_minutes(candles: &[Candle]) -> Option<i64> {
+    const SAMPLE: usize = 5;
+    candles[candles.len().saturating_sub(SAMPLE)..]
+        .windows(2)
+        .map(|w| (w[1].time - w[0].time).num_minutes())
+        .filter(|m| *m > 0)
+        .min()
+}
+
 /// ROC = (close − close[period bars ago]) / close[period bars ago] × 100
 ///
 /// Returns None if `period == 0`, the slice has fewer than `period + 1`
@@ -659,6 +692,43 @@ mod tests {
             out.signal_line
         );
         assert!((out.histogram - 0.0).abs() < 1e-9, "hist={}", out.histogram);
+    }
+
+    #[test]
+    fn macd_single_pass_matches_prefix_window_method() {
+        // The original implementation evaluated `ema()` on every prefix of
+        // the window. The single-pass rewrite must be bit-identical — same
+        // seed, same recursion, same operation order.
+        let candles: Vec<Candle> = (0..120)
+            .map(|i| {
+                // Deterministic pseudo-random walk, no RNG dependency.
+                let wobble = ((i as f64 * 0.7).sin() * 3.0) + ((i as f64 * 0.13).cos() * 1.7);
+                flat(100.0 + i as f64 * 0.05 + wobble, i)
+            })
+            .collect();
+
+        let (fast, slow, signal) = (12, 26, 9);
+
+        // Reference: the old prefix-window method.
+        let mut reference_series: Vec<f64> = Vec::new();
+        for end_exclusive in slow..=candles.len() {
+            let window = &candles[..end_exclusive];
+            let fast_ema = ema(window, fast).unwrap();
+            let slow_ema = ema(window, slow).unwrap();
+            reference_series.push(fast_ema - slow_ema);
+        }
+        let reference_line = *reference_series.last().unwrap();
+        let reference_signal = ema_values(&reference_series, signal).unwrap();
+
+        let out = macd(&candles, fast, slow, signal).expect("MACD should compute");
+        assert_eq!(
+            out.macd_line, reference_line,
+            "macd line must be bit-identical"
+        );
+        assert_eq!(
+            out.signal_line, reference_signal,
+            "signal must be bit-identical"
+        );
     }
 
     #[test]

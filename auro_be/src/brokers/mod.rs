@@ -1,4 +1,5 @@
 pub mod client;
+pub mod massive;
 pub mod oanda;
 pub mod questrade;
 pub mod wealthsimple;

@@ -11,7 +11,7 @@ defmodule Mix.Tasks.Pipeline.Seed do
     mix pipeline.seed --granularity M5
 
   Skips instrument/strategy/granularity combos that already have a root config
-  (source=manual, no parent). Safe to re-run after a partial seed.
+  (source=manual). Safe to re-run after a partial seed.
   """
 
   use Mix.Task
@@ -170,8 +170,7 @@ defmodule Mix.Tasks.Pipeline.Seed do
           c.instrument == ^instrument and
             c.granularity == ^granularity and
             c.strategy_type == ^strategy_type and
-            c.source == "manual" and
-            is_nil(c.parent_config_id)
+            c.source == "manual"
     )
   end
 end

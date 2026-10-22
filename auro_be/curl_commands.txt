@@ -1,0 +1,27 @@
+# SPY - 2 years daily
+curl "http://localhost:3000/api/questrade/candles?symbol=SPY&start=2024-06-10&end=2026-06-10&interval=OneDay" | jq '.' > spy_daily.json
+
+# XIU.TO - 2 years daily
+curl "http://localhost:3000/api/questrade/candles?symbol=XIU.TO&start=2024-06-10&end=2026-06-10&interval=OneDay" | jq '.' > xiu_daily.json
+
+# SPY - 2 years hourly
+curl "http://localhost:3000/api/questrade/candles?symbol=SPY&start=2024-06-10&end=2026-06-10&interval=OneHour" | jq '.' > spy_hourly.json
+
+# XIU.TO - 2 years hourly
+curl "http://localhost:3000/api/questrade/candles?symbol=XIU.TO&start=2024-06-10&end=2026-06-10&interval=OneHour" | jq '.' > xiu_hourly.json
+
+# M15
+curl "http://localhost:3000/api/questrade/candles?symbol=SPY&start=2024-06-10&end=2026-06-10&interval=FifteenMinutes" | jq '.' > spy_m15.json
+curl "http://localhost:3000/api/questrade/candles?symbol=XIU.TO&start=2024-06-10&end=2026-06-10&interval=FifteenMinutes" | jq '.' > xiu_m15.json
+
+# M5
+curl "http://localhost:3000/api/questrade/candles?symbol=SPY&start=2024-06-10&end=2026-06-10&interval=FiveMinutes" | jq '.' > spy_m5.json
+curl "http://localhost:3000/api/questrade/candles?symbol=XIU.TO&start=2024-06-10&end=2026-06-10&interval=FiveMinutes" | jq '.' > xiu_m5.json
+
+# M1
+curl "http://localhost:3000/api/questrade/candles?symbol=SPY&start=2024-06-10&end=2026-06-10&interval=OneMinute" | jq '.' > spy_m1.json
+curl "http://localhost:3000/api/questrade/candles?symbol=XIU.TO&start=2024-06-10&end=2026-06-10&interval=OneMinute" | jq '.' > xiu_m1.json
+
+curl "http://localhost:3000/api/questrade/candles?symbol=SPY&interval=FiveMinutes&start=2024-01-01&end=2026-06-10" | jq '.' > spy_m5_2yr.json
+
+curl "http://localhost:3000/api/questrade/candles?symbol=XIU.TO&interval=FiveMinutes&start=2024-01-01&end=2026-06-10" | jq '.' > xiu_m5_2yr.json

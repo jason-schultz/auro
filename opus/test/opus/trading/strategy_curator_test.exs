@@ -142,7 +142,6 @@ defmodule Opus.Trading.StrategyCuratorTest do
         parameters: %{},
         enabled: Keyword.fetch!(opts, :enabled),
         curator_mode: Keyword.fetch!(opts, :curator_mode),
-        max_position_size: "1000",
         created_at: now,
         updated_at: now
       }

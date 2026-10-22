@@ -60,7 +60,7 @@ defmodule OpusWeb.PositionsControllerTest do
   end
 
   test "returns sparkline candles for a live trade", %{conn: conn} do
-    conn = get(conn, "/positions/#{@trade_id}/sparkline", %{bars: "2"})
+    conn = get(conn, "/api/positions/#{@trade_id}/sparkline", %{bars: "2"})
 
     assert %{
              "trade_id" => @trade_id,
@@ -75,7 +75,7 @@ defmodule OpusWeb.PositionsControllerTest do
   end
 
   test "returns 404 when trade id is unknown", %{conn: conn} do
-    conn = get(conn, "/positions/UNKNOWN-TRADE/sparkline")
+    conn = get(conn, "/api/positions/UNKNOWN-TRADE/sparkline")
 
     assert %{"error" => "trade not found"} = json_response(conn, 404)
   end

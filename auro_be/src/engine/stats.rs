@@ -111,7 +111,7 @@ mod tests {
                 fast_ma: 0.0,
                 slow_ma: 0.0,
             },
-            exit_reason: ExitReason::TakeProfit,
+            exit_reason: ExitReason::TrendReversal,
         }
     }
 

@@ -2,40 +2,15 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::indicators;
+use crate::engine::indicators::{self, MaType};
 use crate::engine::strategy::Signaler;
-use crate::engine::trend_following::MaType;
 use crate::engine::types::{Candle, Direction, EntryReason};
-
-fn default_ma_type() -> MaType {
-    MaType::Sma
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MaFilterParams {
     pub period: usize,
-    #[serde(default = "default_ma_type")]
+    #[serde(default)]
     pub ma_type: MaType,
-}
-
-pub fn compute_ports(candles: &[Candle], params: &MaFilterParams) -> Option<HashMap<String, bool>> {
-    if params.period == 0 || candles.len() < params.period {
-        return None;
-    }
-
-    let close = candles.last()?.mid.close;
-    let ma = match params.ma_type {
-        MaType::Sma => {
-            let window = &candles[candles.len() - params.period..];
-            window.iter().map(|c| c.mid.close).sum::<f64>() / params.period as f64
-        }
-        MaType::Ema => indicators::ema(candles, params.period)?,
-    };
-
-    let mut ports = HashMap::new();
-    ports.insert("above".to_string(), close > ma);
-    ports.insert("below".to_string(), close < ma);
-    Some(ports)
 }
 
 impl Signaler for MaFilterParams {
@@ -44,22 +19,18 @@ impl Signaler for MaFilterParams {
     }
 
     fn compute(&self, candles: &[Candle]) -> Option<HashMap<String, bool>> {
-        compute_ports(candles, self)
+        let close = candles.last()?.mid.close;
+        let ma = indicators::moving_average(candles, self.period, self.ma_type)?;
+
+        let mut ports = HashMap::new();
+        ports.insert("above".to_string(), close > ma);
+        ports.insert("below".to_string(), close < ma);
+        Some(ports)
     }
 
     fn entry_reason(&self, candles: &[Candle], direction: Direction) -> EntryReason {
         let close = candles.last().map(|c| c.mid.close).unwrap_or(0.0);
-        let ma = match self.ma_type {
-            MaType::Sma => {
-                if candles.len() < self.period || self.period == 0 {
-                    0.0
-                } else {
-                    let window = &candles[candles.len() - self.period..];
-                    window.iter().map(|c| c.mid.close).sum::<f64>() / self.period as f64
-                }
-            }
-            MaType::Ema => indicators::ema(candles, self.period).unwrap_or(0.0),
-        };
+        let ma = indicators::moving_average(candles, self.period, self.ma_type).unwrap_or(0.0);
 
         match direction {
             Direction::Long => EntryReason::CrossAbove {
@@ -102,7 +73,7 @@ mod tests {
             period: 3,
             ma_type: MaType::Sma,
         };
-        let ports = compute_ports(&candles, &params).expect("ports should compute");
+        let ports = params.compute(&candles).expect("ports should compute");
 
         assert!(ports["above"]);
         assert!(!ports["below"]);
@@ -115,6 +86,6 @@ mod tests {
             period: 3,
             ma_type: MaType::Sma,
         };
-        assert!(compute_ports(&candles, &params).is_none());
+        assert!(params.compute(&candles).is_none());
     }
 }

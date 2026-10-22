@@ -5,6 +5,7 @@ use std::time::Duration;
 use super::models::*;
 use crate::brokers::client::BrokerClient;
 use crate::brokers::{BrokerAccount, BrokerKind, BrokerStatus};
+use crate::engine::pipeline::instrument_to_class;
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone)]
@@ -149,20 +150,7 @@ impl OandaClient {
     ) -> AppResult<CandlesResponse> {
         let url = format!("{}/v3/instruments/{}/candles", self.base_url, instrument);
 
-        let mut query: Vec<(&str, String)> = vec![
-            ("granularity", granularity.to_string()),
-            ("price", "BAM".to_string()),
-        ];
-
-        if let Some(c) = count {
-            query.push(("count", c.to_string()));
-        }
-        if let Some(f) = from {
-            query.push(("from", f.to_string()));
-        }
-        if let Some(t) = to {
-            query.push(("to", t.to_string()));
-        }
+        let query = candle_query(instrument, granularity, count, from, to);
 
         let resp = self
             .http_client
@@ -220,35 +208,26 @@ impl OandaClient {
     }
 
     // --- Orders ---
+    /// Market order with a server-side stop loss. Every live entry carries
+    /// the stop its strategy config computed; exits are strategy-driven.
     pub async fn create_market_order(
         &self,
         instrument: &str,
         units: &str,
-        stop_loss_price: Option<&str>,
-        take_profit_price: Option<&str>,
-        trailing_stop_distance: Option<&str>,
+        stop_loss_price: &str,
     ) -> AppResult<serde_json::Value> {
         let url = format!("{}/v3/accounts/{}/orders", self.base_url, self.account_id);
 
-        let mut order = json!({
-            "type": "MARKET",
-            "instrument": instrument,
-            "units": units,
-            "timeInForce": "FOK",
-            "positionFill": "DEFAULT",
+        let body = json!({
+            "order": {
+                "type": "MARKET",
+                "instrument": instrument,
+                "units": units,
+                "timeInForce": "FOK",
+                "positionFill": "DEFAULT",
+                "stopLossOnFill": {"price": stop_loss_price, "timeInForce": "GTC"},
+            }
         });
-
-        if let Some(dist) = trailing_stop_distance {
-            order["trailingStopLossOnFill"] = json!({"distance": dist, "timeInForce": "GTC"});
-        } else if let Some(sl) = stop_loss_price {
-            order["stopLossOnFill"] = json!({"price": sl, "timeInForce": "GTC"})
-        }
-
-        if let Some(tp) = take_profit_price {
-            order["takeProfitOnFill"] = json!({"price": tp, "timeInForce": "GTC"});
-        }
-
-        let body = json!({"order": order});
 
         let resp = self
             .http_client
@@ -476,6 +455,69 @@ impl BrokerClient for OandaClient {
                     }],
                 }
             }
+        }
+    }
+}
+
+/// Query for OANDA's candles endpoint. Daily bars for index CFDs are aligned
+/// to the 16:00 New York cash close instead of OANDA's default 17:00 FX
+/// rollover: the index strategies were researched on 16:00 bars, and a
+/// decision taken at 17:00 fills into the 17:00–18:00 halt where spreads are
+/// widest. Forex, metals and bonds have no cash close, so they keep 17:00, as
+/// does H4 on every instrument.
+fn candle_query(
+    instrument: &str,
+    granularity: &str,
+    count: Option<i32>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut query = vec![
+        ("granularity", granularity.to_string()),
+        ("price", "BAM".to_string()),
+    ];
+    if granularity == "D" && instrument_to_class(instrument) == "index" {
+        query.push(("dailyAlignment", "16".to_string()));
+        query.push(("alignmentTimezone", "America/New_York".to_string()));
+    }
+    if let Some(c) = count {
+        query.push(("count", c.to_string()));
+    }
+    if let Some(f) = from {
+        query.push(("from", f.to_string()));
+    }
+    if let Some(t) = to {
+        query.push(("to", t.to_string()));
+    }
+    query
+}
+
+#[cfg(test)]
+mod candle_query_tests {
+    use super::candle_query;
+
+    #[test]
+    fn index_daily_bars_align_to_the_new_york_cash_close() {
+        for inst in ["SPX500_USD", "EU50_EUR", "US2000_USD"] {
+            let q = candle_query(inst, "D", Some(10), None, None);
+            assert!(q.contains(&("dailyAlignment", "16".to_string())), "{inst}");
+            assert!(q.contains(&("alignmentTimezone", "America/New_York".to_string())));
+            assert!(q.contains(&("count", "10".to_string())));
+        }
+    }
+
+    #[test]
+    fn other_daily_bars_and_all_intraday_bars_keep_oanda_defaults() {
+        for (inst, g) in [
+            ("EUR_USD", "D"),
+            ("XAU_USD", "D"),
+            ("USB10Y_USD", "D"),
+            ("SPX500_USD", "H4"),
+            ("SPX500_USD", "M5"),
+        ] {
+            let q = candle_query(inst, g, None, Some("2026-01-01T00:00:00Z"), None);
+            assert!(!q.iter().any(|(k, _)| *k == "dailyAlignment"), "{inst} {g}");
+            assert!(q.contains(&("from", "2026-01-01T00:00:00Z".to_string())));
         }
     }
 }

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::indicators::{rsi, z_score};
+use crate::engine::indicators::{self, rsi, z_score};
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
 
@@ -83,10 +83,7 @@ impl Signaler for MeanReversionParams {
     }
 
     fn entry_reason(&self, candles: &[Candle], _direction: Direction) -> EntryReason {
-        let ma: f64 = {
-            let window = &candles[candles.len() - self.ma_period..];
-            window.iter().map(|c| c.mid.close).sum::<f64>() / self.ma_period as f64
-        };
+        let ma = indicators::sma(candles, self.ma_period).unwrap_or(0.0);
         let z = z_score(candles, self.ma_period).unwrap_or(0.0);
         let r = rsi(candles, self.rsi_period).unwrap_or(50.0);
         EntryReason::MeanReversionEntry {
@@ -101,21 +98,7 @@ impl Signaler for MeanReversionParams {
     ///   Short: SL = MA + stop_z_threshold * stdev
     /// Returns the absolute price.
     fn stop_price(&self, candles: &[Candle], direction: Direction) -> Option<f64> {
-        if candles.len() < self.ma_period {
-            return None;
-        }
-        let window = &candles[candles.len() - self.ma_period..];
-        let p_f = self.ma_period as f64;
-        let mean: f64 = window.iter().map(|c| c.mid.close).sum::<f64>() / p_f;
-        let variance: f64 = window
-            .iter()
-            .map(|c| {
-                let d = c.mid.close - mean;
-                d * d
-            })
-            .sum::<f64>()
-            / p_f;
-        let stdev = variance.sqrt();
+        let (mean, stdev) = indicators::mean_stdev(candles, self.ma_period)?;
         if stdev <= 0.0 {
             return None;
         }
