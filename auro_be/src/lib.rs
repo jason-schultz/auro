@@ -108,7 +108,11 @@ pub async fn run() -> anyhow::Result<()> {
         };
 
     let massive = match config.massive_api_key.as_deref() {
-        Some(key) => match MassiveClient::new(&config.massive_base_url, key) {
+        Some(key) => match MassiveClient::new(
+            &config.massive_base_url,
+            key,
+            config.massive_calls_per_minute,
+        ) {
             Ok(client) => {
                 tracing::info!(
                     "Massive market data configured ({}).",

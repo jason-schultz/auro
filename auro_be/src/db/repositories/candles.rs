@@ -78,6 +78,22 @@ pub async fn load_candles(
     Ok(rows.into_iter().map(CandleDbRow::into_candle).collect())
 }
 
+/// Close of the newest complete bar, or None when the instrument has none.
+pub async fn latest_close(
+    pool: &PgPool,
+    instrument: &str,
+    granularity: Granularity,
+) -> Result<Option<f64>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT close FROM candles WHERE instrument = $1 AND granularity = $2 AND complete = true \
+         ORDER BY timestamp DESC LIMIT 1",
+    )
+    .bind(instrument)
+    .bind(granularity.as_str())
+    .fetch_optional(pool)
+    .await
+}
+
 /// The most recent `limit` complete candles, oldest first.
 pub async fn load_recent_candles(
     pool: &PgPool,

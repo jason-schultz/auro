@@ -6,6 +6,7 @@ mod health;
 mod indicators;
 mod live_strategies;
 mod massive;
+mod options;
 mod pipeline;
 mod positions;
 mod questrade;
@@ -129,6 +130,16 @@ pub fn router() -> Router<AppState> {
             "/api/massive/candles/persist",
             post(massive::persist_candles),
         )
+        .route(
+            "/api/massive/options/contracts/sync",
+            post(massive::sync_option_contracts),
+        )
+        .route(
+            "/api/massive/options/bars/persist",
+            post(massive::persist_option_bars),
+        )
+        // Options what-if (pure math; spot/rate defaults from storage)
+        .route("/api/options/scenarios", post(options::scenarios))
         // WebSocket
         .route("/ws/prices", get(ws::ws_prices))
 }

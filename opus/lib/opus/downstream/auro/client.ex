@@ -215,6 +215,71 @@ defmodule Opus.Auro.Client do
   end
 
   @doc """
+  Have Rust list the option contracts on `underlying` expiring within
+  `max_days_to_expiry` days and striking within `strike_band_pct` of the
+  last close, and upsert them into `option_contracts`. Needs the
+  underlying's daily bars stored first (that is where the spot comes from).
+  """
+  @spec sync_option_contracts(String.t(), keyword()) :: {:ok, map()} | {:error, any()}
+  def sync_option_contracts(underlying, opts \\ []) when is_binary(underlying) do
+    client()
+    |> Req.post(
+      url: "/api/massive/options/contracts/sync",
+      json: option_body(underlying, opts),
+      receive_timeout: 300_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  Have Rust fetch the last `days` days of daily bars for every stored
+  contract on `underlying` that is live and near the money, and upsert the
+  completed ones into `option_bars`. One vendor call per contract: on the
+  free plan budget about twelve seconds each.
+  """
+  @spec persist_option_bars(String.t(), pos_integer(), keyword()) ::
+          {:ok, map()} | {:error, any()}
+  def persist_option_bars(underlying, days, opts \\ [])
+      when is_binary(underlying) and is_integer(days) do
+    client()
+    |> Req.post(
+      url: "/api/massive/options/bars/persist",
+      json: Map.put(option_body(underlying, opts), :days, days),
+      receive_timeout: 3_600_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  What one single-leg option position does at expiry
+  (POST /api/options/scenarios): breakeven, yield, assignment odds and a
+  price-by-price outcome table. Pure math in Rust; spot and rate are filled
+  from storage when left out. Interactive, so no retries.
+  """
+  @spec option_scenarios(map()) :: {:ok, map()} | {:error, any()}
+  def option_scenarios(params) when is_map(params) do
+    client()
+    |> Req.post(
+      url: "/api/options/scenarios",
+      json: params,
+      receive_timeout: 15_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  defp option_body(underlying, opts) do
+    %{underlying: underlying}
+    |> maybe_put(:max_days_to_expiry, opts[:max_days_to_expiry])
+    |> maybe_put(:strike_band_pct, opts[:strike_band_pct])
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  @doc """
   Has Rust record today's OANDA financing rates (POST /api/financing/snapshot).
   """
   @spec snapshot_financing() :: {:ok, map()} | {:error, term()}

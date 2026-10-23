@@ -9,6 +9,7 @@ pub mod macd;
 pub mod mean_reversion;
 pub mod momentum;
 pub mod noise_area;
+pub mod options;
 pub mod pipeline;
 pub mod rsi_reversion;
 pub mod rules;
