@@ -1,11 +1,14 @@
-//! `option_contracts` and `option_bars` (Opus-owned migration
-//! `20261022200000_create_option_tables`). Rust writes both from Massive and
-//! reads them for screens and backtests.
+//! `option_contracts`, `option_bars` and `option_quotes` (Opus-owned
+//! migrations `20261022200000_create_option_tables` and
+//! `20261022230000_create_option_quotes`). Contracts come from whichever
+//! vendor listed the chain, bars are Massive history, quotes are nightly
+//! Questrade snapshots; Rust reads all three for screens and backtests.
 
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
 
-use crate::brokers::massive::models::{AggBar, OptionContract};
+use crate::brokers::massive::models::AggBar;
+use crate::engine::options::ContractSpec;
 use crate::error::{AppError, AppResult};
 
 /// Rows per INSERT statement (same reasoning as `candles::UPSERT_CHUNK`).
@@ -52,12 +55,39 @@ impl OptionBarRow {
     }
 }
 
+/// One contract's quote at one capture, as the vendor reported it. Greeks
+/// and `volatility` are stored as given (Questrade quotes `volatility` in
+/// percent); `spot` is the underlying's price at the same capture so the
+/// implied vol can be re-solved from the premium later.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptionQuoteRow {
+    pub ticker: String,
+    pub captured_at: DateTime<Utc>,
+    /// Which vendor's quote this is (`questrade`).
+    pub source: String,
+    pub spot: f64,
+    pub bid: Option<f64>,
+    pub ask: Option<f64>,
+    pub last: Option<f64>,
+    pub bid_size: Option<i32>,
+    pub ask_size: Option<i32>,
+    pub volume: Option<i32>,
+    pub open_interest: Option<i32>,
+    pub volatility: Option<f64>,
+    pub delta: Option<f64>,
+    pub gamma: Option<f64>,
+    pub theta: Option<f64>,
+    pub vega: Option<f64>,
+    pub rho: Option<f64>,
+    /// How stale the vendor said the quote was; 0 = real-time.
+    pub delay_seconds: Option<i32>,
+}
+
 /// Insert new contracts, refresh `last_seen_at` on known ones. Returns the
-/// number of rows sent (vendor records with an unknown `contract_type` are
-/// stored as-is; the screens filter on call/put).
+/// number of rows sent.
 pub async fn upsert_contracts(
     pool: &PgPool,
-    contracts: &[OptionContract],
+    contracts: &[ContractSpec],
     seen_at: DateTime<Utc>,
 ) -> Result<usize, sqlx::Error> {
     for chunk in contracts.chunks(UPSERT_CHUNK) {
@@ -82,16 +112,11 @@ pub async fn upsert_contracts(
             "#,
         )
         .bind(chunk.iter().map(|c| c.ticker.clone()).collect::<Vec<_>>())
-        .bind(chunk.iter().map(|c| c.underlying_ticker.clone()).collect::<Vec<_>>())
-        .bind(chunk.iter().map(|c| c.contract_type.clone()).collect::<Vec<_>>())
-        .bind(chunk.iter().map(|c| c.expiration_date).collect::<Vec<_>>())
-        .bind(chunk.iter().map(|c| c.strike_price).collect::<Vec<_>>())
-        .bind(
-            chunk
-                .iter()
-                .map(|c| c.shares_per_contract.round().clamp(1.0, f64::from(i32::MAX)) as i32)
-                .collect::<Vec<_>>(),
-        )
+        .bind(chunk.iter().map(|c| c.underlying.clone()).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|c| c.kind.as_str()).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|c| c.expiration).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|c| c.strike).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|c| c.shares_per_contract).collect::<Vec<_>>())
         .bind(chunk.iter().map(|c| c.exercise_style.clone()).collect::<Vec<_>>())
         .bind(chunk.iter().map(|c| c.primary_exchange.clone()).collect::<Vec<_>>())
         .bind(seen_at)
@@ -125,6 +150,50 @@ pub async fn upsert_bars(pool: &PgPool, rows: &[OptionBarRow]) -> Result<usize, 
         .bind(chunk.iter().map(|r| r.close).collect::<Vec<_>>())
         .bind(chunk.iter().map(|r| r.volume).collect::<Vec<_>>())
         .bind(chunk.iter().map(|r| r.transactions).collect::<Vec<_>>())
+        .execute(pool)
+        .await?;
+    }
+    Ok(rows.len())
+}
+
+/// Store one capture's quotes. A repeated capture at the same instant is
+/// ignored rather than overwritten; snapshots are append-only.
+pub async fn insert_quotes(pool: &PgPool, rows: &[OptionQuoteRow]) -> Result<usize, sqlx::Error> {
+    for chunk in rows.chunks(UPSERT_CHUNK) {
+        sqlx::query(
+            r#"
+            INSERT INTO option_quotes (
+                ticker, captured_at, source, spot, bid, ask, last, bid_size, ask_size,
+                volume, open_interest, volatility, delta, gamma, theta, vega, rho,
+                delay_seconds
+            )
+            SELECT * FROM UNNEST(
+                $1::varchar[], $2::timestamptz[], $3::varchar[], $4::float8[], $5::float8[],
+                $6::float8[], $7::float8[], $8::int4[], $9::int4[], $10::int4[], $11::int4[],
+                $12::float8[], $13::float8[], $14::float8[], $15::float8[], $16::float8[],
+                $17::float8[], $18::int4[]
+            )
+            ON CONFLICT (ticker, captured_at) DO NOTHING
+            "#,
+        )
+        .bind(chunk.iter().map(|r| r.ticker.clone()).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.captured_at).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.source.clone()).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.spot).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.bid).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.ask).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.last).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.bid_size).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.ask_size).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.volume).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.open_interest).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.volatility).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.delta).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.gamma).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.theta).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.vega).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.rho).collect::<Vec<_>>())
+        .bind(chunk.iter().map(|r| r.delay_seconds).collect::<Vec<_>>())
         .execute(pool)
         .await?;
     }

@@ -195,3 +195,90 @@ pub struct SymbolDetail {
 pub struct SymbolsResponse {
     pub symbols: Vec<SymbolDetail>,
 }
+
+// ── Options ─────────────────────────────────────────────────────────────────
+
+/// GET /v1/symbols/{id}/options. The documentation names the list
+/// `optionChain` in its sample and `options` in its field table; both are
+/// accepted.
+#[derive(Debug, Deserialize)]
+pub struct OptionChainResponse {
+    #[serde(rename = "optionChain", alias = "options")]
+    pub option_chain: Vec<ChainExpiry>,
+}
+
+/// One expiry on the chain, with every root listed for it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainExpiry {
+    /// `2026-11-20T00:00:00.000000-05:00`; only the date matters.
+    pub expiry_date: String,
+    pub description: Option<String>,
+    pub listing_exchange: Option<String>,
+    /// `American` | `European`.
+    pub option_exercise_type: Option<String>,
+    #[serde(default)]
+    pub chain_per_root: Vec<ChainRoot>,
+}
+
+/// One option root (`SPY`, or `SPY1` for an adjusted contract) and its
+/// strikes. `multiplier` is the shares per contract.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainRoot {
+    #[serde(alias = "root")]
+    pub option_root: String,
+    #[serde(default)]
+    pub chain_per_strike_price: Vec<ChainStrike>,
+    #[serde(default = "default_multiplier")]
+    pub multiplier: i32,
+}
+
+fn default_multiplier() -> i32 {
+    100
+}
+
+/// One strike: the call and put symbol IDs to quote it by.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainStrike {
+    pub strike_price: f64,
+    pub call_symbol_id: Option<i64>,
+    pub put_symbol_id: Option<i64>,
+}
+
+/// POST /v1/markets/quotes/options, one entry per option symbol: Level 1
+/// quote plus the exchange greeks. `volatility` is implied vol in percent;
+/// the greeks are per share. Every market field is optional, as on
+/// `QuoteResult`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all(deserialize = "camelCase"))]
+pub struct OptionQuote {
+    pub symbol: String,
+    pub symbol_id: i64,
+    pub underlying: Option<String>,
+    pub underlying_id: Option<i64>,
+    pub bid_price: Option<f64>,
+    pub bid_size: Option<f64>,
+    pub ask_price: Option<f64>,
+    pub ask_size: Option<f64>,
+    pub last_trade_price: Option<f64>,
+    pub last_trade_time: Option<String>,
+    pub volume: Option<f64>,
+    pub open_interest: Option<f64>,
+    pub volatility: Option<f64>,
+    pub delta: Option<f64>,
+    pub gamma: Option<f64>,
+    pub theta: Option<f64>,
+    pub vega: Option<f64>,
+    pub rho: Option<f64>,
+    /// Seconds of delay on this quote; 0 = real-time.
+    pub delay: Option<i64>,
+    pub is_halted: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OptionQuotesResponse {
+    #[serde(rename = "optionQuotes")]
+    pub option_quotes: Vec<OptionQuote>,
+}

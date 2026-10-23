@@ -125,7 +125,11 @@ pub fn router() -> Router<AppState> {
             "/api/questrade/candles/persist",
             post(questrade::persist_candles),
         )
-        // Massive (US equity bars)
+        .route(
+            "/api/questrade/options/snapshot",
+            post(questrade::snapshot_option_chain),
+        )
+        // Massive (US equity bars, option contract history)
         .route(
             "/api/massive/candles/persist",
             post(massive::persist_candles),

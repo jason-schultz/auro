@@ -215,7 +215,26 @@ defmodule Opus.Auro.Client do
   end
 
   @doc """
-  Have Rust list the option contracts on `underlying` expiring within
+  Have Rust capture tonight's chain on `underlying` from Questrade
+  (POST /api/questrade/options/snapshot): the near-the-money contracts into
+  `option_contracts` and their quotes with the exchange greeks into
+  `option_quotes`. One chain call plus one quotes call per hundred
+  contracts, inside Questrade's rate limit.
+  """
+  @spec snapshot_option_chain(String.t(), keyword()) :: {:ok, map()} | {:error, any()}
+  def snapshot_option_chain(underlying, opts \\ []) when is_binary(underlying) do
+    client()
+    |> Req.post(
+      url: "/api/questrade/options/snapshot",
+      json: option_body(underlying, opts),
+      receive_timeout: 300_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  Massive history path. Have Rust list the option contracts on `underlying` expiring within
   `max_days_to_expiry` days and striking within `strike_band_pct` of the
   last close, and upsert them into `option_contracts`. Needs the
   underlying's daily bars stored first (that is where the spot comes from).
@@ -233,7 +252,7 @@ defmodule Opus.Auro.Client do
   end
 
   @doc """
-  Have Rust fetch the last `days` days of daily bars for every stored
+  Massive history path. Have Rust fetch the last `days` days of daily bars for every stored
   contract on `underlying` that is live and near the money, and upsert the
   completed ones into `option_bars`. One vendor call per contract: on the
   free plan budget about twelve seconds each.

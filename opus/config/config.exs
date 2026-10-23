@@ -35,8 +35,8 @@ config :opus, Oban,
        # (one job per symbol). Rust treats a daily bar as final once extended
        # hours end at 20:00 New York, which is 00:00/01:00 UTC by season.
        {"30 1 * * 2-6", Opus.MarketData.MassiveBarsWorker},
-       # Option chains after the stock bars: the strike band is centred on
-       # the underlying's last stored close.
+       # Option chain snapshots from Questrade after the close (02:00 UTC is
+       # 21:00/22:00 New York): the quotes are the day's closing values.
        {"0 2 * * 2-6", Opus.MarketData.OptionsChainWorker},
        # 20:30 UTC is before the 17:00 New York rollover (21:00/22:00 UTC) the
        # day's financing rates apply to.
@@ -64,16 +64,13 @@ config :opus, Opus.MarketData.QuestradeBarsWorker,
     SHOP BABA BAC CCL AAL DKNG RBLX AFRM UPST IONQ RKLB SOUN CVNA
   )
 
-# US option chains from Massive via Rust: near-the-money contracts for the
-# next weeks on a few liquid underlyings, refreshed nightly. Keep the list
-# and window small on the free plan (one vendor call per contract, five a
-# minute); the names should be ones the owner would accept being assigned.
+# Option chain snapshots from Questrade via Rust: near-the-money contracts
+# for the next weeks on a few liquid underlyings, quoted nightly with the
+# exchange greeks. Tickers are Questrade's (US names bare, Canadian names
+# with .TO); the names should be ones the owner would accept being assigned.
 config :opus, Opus.MarketData.OptionsChainWorker,
-  # Off until a Massive options plan with unlimited calls is active; see the
-  # worker's moduledoc. Flip to true with MASSIVE_CALLS_PER_MINUTE=0 in Rust.
-  enabled: false,
+  enabled: true,
   underlyings: ~w(SPY QQQ IWM AAPL MSFT NVDA AMZN GOOGL),
-  days: 5,
   max_days_to_expiry: 45,
   strike_band_pct: 0.10
 

@@ -2,6 +2,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
+use crate::engine::options::{ContractSpec, OptionKind};
 use crate::engine::types::{Candle, OHLC};
 use crate::error::{AppError, AppResult};
 
@@ -82,6 +83,34 @@ pub struct OptionContract {
 
 fn default_shares() -> f64 {
     100.0
+}
+
+impl TryFrom<&OptionContract> for ContractSpec {
+    type Error = AppError;
+
+    /// The vendor's `contract_type` "other" (rare adjusted contracts) has no
+    /// place in `option_contracts`; callers skip those with a warning.
+    fn try_from(c: &OptionContract) -> AppResult<Self> {
+        let kind = OptionKind::parse(&c.contract_type).ok_or_else(|| {
+            AppError::Internal(format!(
+                "Massive contract {} has contract_type {:?}",
+                c.ticker, c.contract_type
+            ))
+        })?;
+        Ok(ContractSpec {
+            ticker: c.ticker.clone(),
+            underlying: c.underlying_ticker.clone(),
+            kind,
+            expiration: c.expiration_date,
+            strike: c.strike_price,
+            shares_per_contract: c
+                .shares_per_contract
+                .round()
+                .clamp(1.0, f64::from(i32::MAX)) as i32,
+            exercise_style: c.exercise_style.clone(),
+            primary_exchange: c.primary_exchange.clone(),
+        })
+    }
 }
 
 impl TryFrom<&AggBar> for Candle {

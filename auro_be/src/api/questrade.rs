@@ -1,12 +1,18 @@
+use std::collections::HashMap;
+
 use axum::extract::{Query, State};
 use axum::Json;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::options::ChainWindow;
 use crate::brokers::questrade::client::QuestradeClient;
-use crate::brokers::questrade::models::{EquityCandle, QuoteResult, SymbolDetail};
+use crate::brokers::questrade::models::{EquityCandle, OptionQuote, QuoteResult, SymbolDetail};
+use crate::brokers::questrade::options::{select_contracts, SelectedContract};
 use crate::db::repositories::candles as candles_repo;
+use crate::db::repositories::options::{self as options_repo, OptionQuoteRow};
+use crate::engine::options::ContractSpec;
 use crate::engine::types::{Candle, CandleRow, Granularity};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -327,9 +333,153 @@ pub async fn persist_candles(
     })))
 }
 
+// --- Options ---
+//
+// The live chain path: Questrade lists the chain and quotes it with the
+// exchange greeks, free and inside the rate limit, so the nightly snapshot
+// comes from here. History stays with Massive (api/massive.rs).
+
+#[derive(Debug, Deserialize)]
+pub struct SnapshotChain {
+    pub underlying: String,
+    #[serde(flatten)]
+    pub window: ChainWindow,
+}
+
+/// Which vendor's quote a snapshot row holds.
+const QUOTE_SOURCE: &str = "questrade";
+
+/// The underlying's price for the strike band and the stored `spot`: the
+/// last trade, or the bid/ask mid when nothing has traded.
+fn quote_price(q: &QuoteResult) -> Option<f64> {
+    q.last_trade_price.filter(|p| *p > 0.0).or_else(|| {
+        let (bid, ask) = (q.bid_price?, q.ask_price?);
+        (bid > 0.0 && ask >= bid).then(|| (bid + ask) / 2.0)
+    })
+}
+
+/// Capture the near-the-money chain on `underlying` as Questrade quotes it
+/// now: the contracts into `option_contracts`, one `option_quotes` row per
+/// contract with the exchange greeks. Opus runs it nightly after the close,
+/// when the quotes are the day's closing values and the data delay does
+/// not matter.
+pub async fn snapshot_option_chain(
+    State(state): State<AppState>,
+    Json(body): Json<SnapshotChain>,
+) -> AppResult<Json<Value>> {
+    let Some(qt) = state.questrade.as_ref() else {
+        return Err(AppError::Internal("Questrade not configured".into()));
+    };
+    body.window.validate()?;
+    let underlying = body.underlying.trim().to_uppercase();
+    let captured_at = Utc::now();
+
+    let mut client = qt.lock().await;
+    let symbol_id = client.search_symbol(&underlying).await?;
+    let spot = client
+        .get_quotes(&[symbol_id])
+        .await?
+        .first()
+        .and_then(quote_price)
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "Questrade has no price for {underlying} (symbolId={symbol_id})"
+            ))
+        })?;
+    let chain = client.get_option_chain(symbol_id).await?;
+    let (expiries, strikes) = body.window.bounds(captured_at.date_naive(), spot);
+    let selected = select_contracts(&chain, &underlying, expiries, strikes)?;
+    let option_ids: Vec<i64> = selected.iter().map(|c| c.option_id).collect();
+    let quotes = client.get_option_quotes(&option_ids).await?;
+    drop(client);
+
+    let specs: Vec<ContractSpec> = selected.iter().map(|c| c.spec.clone()).collect();
+    let contracts_stored = options_repo::upsert_contracts(&state.db, &specs, captured_at)
+        .await
+        .map_err(AppError::Database)?;
+    let rows = quote_rows(&selected, &quotes, spot, captured_at);
+    let quotes_stored = options_repo::insert_quotes(&state.db, &rows)
+        .await
+        .map_err(AppError::Database)?;
+    let max_delay = rows.iter().filter_map(|r| r.delay_seconds).max();
+    tracing::info!(
+        "Snapshot {} option chain: {} contracts, {} quotes (spot {:.2}, ±{:.0}%, {} days, delay ≤ {:?}s)",
+        underlying,
+        contracts_stored,
+        quotes_stored,
+        spot,
+        body.window.strike_band_pct * 100.0,
+        body.window.max_days_to_expiry,
+        max_delay
+    );
+
+    Ok(Json(json!({
+        "underlying": underlying,
+        "symbol_id": symbol_id,
+        "spot": spot,
+        "captured_at": captured_at,
+        "expires_from": expiries.0,
+        "expires_to": expiries.1,
+        "strikes": strikes,
+        "chain_expiries": chain.len(),
+        "contracts_selected": selected.len(),
+        "contracts_stored": contracts_stored,
+        "quotes_fetched": quotes.len(),
+        "quotes_stored": quotes_stored,
+        "max_delay_seconds": max_delay,
+    })))
+}
+
+/// Join the quotes back to the contracts they were requested for. A
+/// contract Questrade returned no quote for is left out, not stored empty.
+fn quote_rows(
+    selected: &[SelectedContract],
+    quotes: &[OptionQuote],
+    spot: f64,
+    captured_at: DateTime<Utc>,
+) -> Vec<OptionQuoteRow> {
+    let tickers: HashMap<i64, &str> = selected
+        .iter()
+        .map(|c| (c.option_id, c.spec.ticker.as_str()))
+        .collect();
+    quotes
+        .iter()
+        .filter_map(|q| {
+            let ticker = tickers.get(&q.symbol_id)?;
+            Some(OptionQuoteRow {
+                ticker: ticker.to_string(),
+                captured_at,
+                source: QUOTE_SOURCE.to_string(),
+                spot,
+                bid: q.bid_price,
+                ask: q.ask_price,
+                last: q.last_trade_price,
+                bid_size: count(q.bid_size),
+                ask_size: count(q.ask_size),
+                volume: count(q.volume),
+                open_interest: count(q.open_interest),
+                volatility: q.volatility,
+                delta: q.delta,
+                gamma: q.gamma,
+                theta: q.theta,
+                vega: q.vega,
+                rho: q.rho,
+                delay_seconds: q.delay.map(|d| d.clamp(0, i64::from(i32::MAX)) as i32),
+            })
+        })
+        .collect()
+}
+
+/// Vendor counts arrive as numbers; the columns are integers.
+fn count(v: Option<f64>) -> Option<i32> {
+    v.map(|v| v.round().clamp(0.0, f64::from(i32::MAX)) as i32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::options::OptionKind;
+    use chrono::NaiveDate;
 
     #[test]
     fn equity_candle_converts_offset_time_to_utc() {
@@ -360,5 +510,94 @@ mod tests {
         assert_eq!(spread_pct(None, Some(10.0)), None);
         assert_eq!(spread_pct(Some(0.0), Some(10.0)), None);
         assert_eq!(spread_pct(Some(10.02), Some(10.0)), None);
+    }
+
+    fn quote(last: Option<f64>, bid: Option<f64>, ask: Option<f64>) -> QuoteResult {
+        QuoteResult {
+            symbol: "SPY".into(),
+            symbol_id: 1,
+            last_trade_price: last,
+            last_trade_time: None,
+            bid_price: bid,
+            bid_size: None,
+            ask_price: ask,
+            ask_size: None,
+            open_price: None,
+            high_price: None,
+            low_price: None,
+            volume: None,
+            delay: None,
+            is_halted: None,
+        }
+    }
+
+    #[test]
+    fn spot_is_the_last_trade_then_the_mid() {
+        assert_eq!(
+            quote_price(&quote(Some(769.05), Some(768.0), Some(770.0))),
+            Some(769.05)
+        );
+        assert_eq!(
+            quote_price(&quote(Some(0.0), Some(768.0), Some(770.0))),
+            Some(769.0)
+        );
+        assert_eq!(quote_price(&quote(None, None, Some(770.0))), None);
+    }
+
+    fn option_quote(symbol_id: i64) -> OptionQuote {
+        OptionQuote {
+            symbol: "SPY20Nov26P640.00".into(),
+            symbol_id,
+            underlying: Some("SPY".into()),
+            underlying_id: Some(1),
+            bid_price: Some(6.3),
+            bid_size: Some(12.0),
+            ask_price: Some(6.5),
+            ask_size: Some(40.0),
+            last_trade_price: Some(6.4),
+            last_trade_time: None,
+            volume: Some(1500.6),
+            open_interest: Some(23_000.0),
+            volatility: Some(40.45),
+            delta: Some(-0.14),
+            gamma: Some(0.004),
+            theta: Some(-0.21),
+            vega: Some(0.55),
+            rho: Some(-0.08),
+            delay: Some(900),
+            is_halted: Some(false),
+        }
+    }
+
+    #[test]
+    fn quote_rows_join_on_the_option_id_and_drop_strangers() {
+        let selected = vec![SelectedContract {
+            spec: ContractSpec {
+                ticker: "O:SPY261120P00640000".into(),
+                underlying: "SPY".into(),
+                kind: OptionKind::Put,
+                expiration: NaiveDate::from_ymd_opt(2026, 11, 20).unwrap(),
+                strike: 640.0,
+                shares_per_contract: 100,
+                exercise_style: None,
+                primary_exchange: None,
+            },
+            option_id: 42,
+        }];
+        let captured_at = Utc::now();
+        let rows = quote_rows(
+            &selected,
+            &[option_quote(42), option_quote(43)],
+            769.05,
+            captured_at,
+        );
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.ticker, "O:SPY261120P00640000");
+        assert_eq!(row.source, "questrade");
+        assert_eq!(row.spot, 769.05);
+        assert_eq!((row.volume, row.open_interest), (Some(1501), Some(23_000)));
+        assert_eq!(row.delay_seconds, Some(900));
+        assert_eq!(row.volatility, Some(40.45));
     }
 }

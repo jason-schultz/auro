@@ -1,23 +1,20 @@
 defmodule Opus.MarketData.OptionsChainWorker do
   @moduledoc """
-  Nightly US option chains from Massive, persisted by Rust.
+  Nightly option chain snapshots from Questrade, persisted by Rust.
 
   Two job shapes share this worker, like `MassiveBarsWorker`:
 
     * no args (the nightly cron) — fan out one job per configured underlying;
-    * `%{"underlying" => _}` — sync that underlying's near-the-money
-      contracts (`POST /api/massive/options/contracts/sync`), then fetch the
-      last `days` days of daily bars for them
-      (`POST /api/massive/options/bars/persist`).
+    * `%{"underlying" => _}` — capture that underlying's near-the-money
+      chain (`POST /api/questrade/options/snapshot`): the contracts into
+      `option_contracts`, tonight's quotes with the exchange greeks into
+      `option_quotes`.
 
-  Runs after `MassiveBarsWorker` because the strike band is centred on the
-  underlying's last stored daily close. Bars are one vendor call per
-  contract, and SPY alone lists over 2,000 contracts inside ten days, so on
-  the free plan (five calls a minute) one underlying takes hours and would
-  hold the single-worker `market_data` queue for days. The cron fan-out is
-  therefore gated on `enabled: true`, to be set together with an unlimited
-  plan (`MASSIVE_CALLS_PER_MINUTE=0` on the Rust side). The two-year history
-  is a separate flat-file load, not this worker's job.
+  Runs after the close, when the quotes are the day's closing values, so
+  Questrade's data delay does not matter. The strike band is centred on the
+  underlying's Questrade quote at capture time, not on stored bars. The
+  cron fan-out is gated on `enabled`. Historical bars are the Massive
+  flat-file path, not this worker's job.
   """
 
   use Oban.Worker,
@@ -37,16 +34,16 @@ defmodule Opus.MarketData.OptionsChainWorker do
       strike_band_pct: config(:strike_band_pct)
     ]
 
-    with {:ok, contracts} <- Client.sync_option_contracts(underlying, opts),
-         {:ok, bars} <- Client.persist_option_bars(underlying, config(:days), opts) do
-      Logger.info(
-        "[OptionsChain] #{underlying}: #{contracts["contracts_stored"]} contracts, " <>
-          "#{bars["bars_stored"]} bars for #{bars["contracts"]} contracts " <>
-          "(#{length(bars["failed_contracts"] || [])} failed)"
-      )
+    case Client.snapshot_option_chain(underlying, opts) do
+      {:ok, snapshot} ->
+        Logger.info(
+          "[OptionsChain] #{underlying}: #{snapshot["contracts_stored"]} contracts, " <>
+            "#{snapshot["quotes_stored"]} quotes at spot #{snapshot["spot"]} " <>
+            "(delay ≤ #{snapshot["max_delay_seconds"]}s)"
+        )
 
-      :ok
-    else
+        :ok
+
       {:error, reason} ->
         Logger.error("[OptionsChain] #{underlying} failed: #{inspect(reason)}")
         {:error, reason}

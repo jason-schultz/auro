@@ -6,9 +6,9 @@ use reqwest::Client;
 use sqlx::PgPool;
 
 use super::models::{
-    AccountBalancesResponse, AccountsResponse, CandlesResponse, EquityCandle, QuestradeAccount,
-    QuoteResult, QuotesResponse, SymbolDetail, SymbolSearchResponse, SymbolsResponse,
-    TokenResponse,
+    AccountBalancesResponse, AccountsResponse, CandlesResponse, ChainExpiry, EquityCandle,
+    OptionChainResponse, OptionQuote, OptionQuotesResponse, QuestradeAccount, QuoteResult,
+    QuotesResponse, SymbolDetail, SymbolSearchResponse, SymbolsResponse, TokenResponse,
 };
 use crate::brokers::client::BrokerClient;
 use crate::brokers::{BrokerAccount, BrokerKind, BrokerStatus};
@@ -16,6 +16,11 @@ use crate::engine::types::Granularity;
 use crate::error::{AppError, AppResult};
 
 const AUTH_URL: &str = "https://login.questrade.com/oauth2/token";
+
+/// Option symbol IDs per quotes request. The documentation states no cap;
+/// this keeps each request well under the response sizes the equity quotes
+/// call is known to handle.
+const OPTION_QUOTE_BATCH: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct QuestradeClient {
@@ -180,7 +185,7 @@ impl QuestradeClient {
         self.ensure_authenticated().await?;
 
         // Clone before send so we can retry once on 401.
-        // try_clone returns None only for streaming bodies; all our requests are GET with no body.
+        // try_clone returns None only for streaming bodies; ours are GET or small JSON.
         let retry = builder.try_clone();
 
         let resp = builder
@@ -453,6 +458,38 @@ impl QuestradeClient {
             .map_err(|e| AppError::Internal(format!("Failed to parse Questrade symbols: {}", e)))?;
 
         Ok(parsed.symbols)
+    }
+
+    /// The option chain on an underlying: every expiry and root with the
+    /// strikes and their call/put symbol IDs.
+    /// Questrade: GET /v1/symbols/{id}/options
+    pub async fn get_option_chain(&mut self, symbol_id: i64) -> AppResult<Vec<ChainExpiry>> {
+        let url = self.api_url(&format!("symbols/{}/options", symbol_id))?;
+        let resp = self.request(self.http.get(&url)).await?;
+
+        let parsed: OptionChainResponse = resp.json().await.map_err(|e| {
+            AppError::Internal(format!("Failed to parse Questrade option chain: {}", e))
+        })?;
+
+        Ok(parsed.option_chain)
+    }
+
+    /// Level 1 quotes with the exchange greeks for option symbol IDs, fetched
+    /// in batches of `OPTION_QUOTE_BATCH`.
+    /// Questrade: POST /v1/markets/quotes/options {"optionIds": [...]}
+    pub async fn get_option_quotes(&mut self, option_ids: &[i64]) -> AppResult<Vec<OptionQuote>> {
+        let mut quotes = Vec::with_capacity(option_ids.len());
+        for batch in option_ids.chunks(OPTION_QUOTE_BATCH) {
+            let url = self.api_url("markets/quotes/options")?;
+            let body = serde_json::json!({ "optionIds": batch });
+            let resp = self.request(self.http.post(&url).json(&body)).await?;
+
+            let parsed: OptionQuotesResponse = resp.json().await.map_err(|e| {
+                AppError::Internal(format!("Failed to parse Questrade option quotes: {}", e))
+            })?;
+            quotes.extend(parsed.option_quotes);
+        }
+        Ok(quotes)
     }
 }
 

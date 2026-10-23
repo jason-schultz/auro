@@ -1,13 +1,15 @@
 use axum::extract::State;
 use axum::Json;
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::options::ChainWindow;
 use crate::brokers::massive::client::ContractFilter;
 use crate::brokers::massive::models::AggBar;
 use crate::db::repositories::candles as candles_repo;
 use crate::db::repositories::options::{self as options_repo, OptionBarRow};
+use crate::engine::options::ContractSpec;
 use crate::engine::types::{Candle, CandleRow, Granularity};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -118,28 +120,16 @@ fn completes_at(open: DateTime<Utc>, granularity: Granularity) -> DateTime<Utc> 
 
 // --- Options ---
 //
-// Phase 1 plumbing: the chain near the money for the next weeks, kept
-// current nightly by Opus. Bars come one vendor call per contract, which the
-// free plan's five-a-minute limit makes slow; the two-year history load is a
-// separate flat-file path on a paid plan.
-
-fn default_max_days_to_expiry() -> i64 {
-    60
-}
-
-fn default_strike_band_pct() -> f64 {
-    0.15
-}
+// The history path: contracts near the money and their daily bars, one
+// vendor call per contract, which the free plan's five-a-minute limit makes
+// slow. The nightly chain snapshot is the Questrade path; the two-year
+// history load is a separate flat-file path on a paid plan.
 
 #[derive(Debug, Deserialize)]
 pub struct SyncContracts {
     pub underlying: String,
-    /// Expiries from today out to this many calendar days.
-    #[serde(default = "default_max_days_to_expiry")]
-    pub max_days_to_expiry: i64,
-    /// Strikes within this fraction of the underlying's last close.
-    #[serde(default = "default_strike_band_pct")]
-    pub strike_band_pct: f64,
+    #[serde(flatten)]
+    pub window: ChainWindow,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,15 +138,8 @@ pub struct PersistOptionBars {
     /// Calendar days back to (re)fetch per contract.
     #[serde(default = "default_persist_days")]
     pub days: i64,
-    #[serde(default = "default_max_days_to_expiry")]
-    pub max_days_to_expiry: i64,
-    #[serde(default = "default_strike_band_pct")]
-    pub strike_band_pct: f64,
-}
-
-/// Strike window around `spot`.
-fn strike_band(spot: f64, pct: f64) -> (f64, f64) {
-    (spot * (1.0 - pct), spot * (1.0 + pct))
+    #[serde(flatten)]
+    pub window: ChainWindow,
 }
 
 /// The underlying's last stored daily close; the stock bars job must have
@@ -172,20 +155,6 @@ async fn underlying_spot(state: &AppState, underlying: &str) -> AppResult<f64> {
         })
 }
 
-fn validate_band_and_window(pct: f64, max_days: i64) -> AppResult<()> {
-    if !(0.0..=1.0).contains(&pct) {
-        return Err(AppError::BadRequest(format!(
-            "strike_band_pct must be in 0..=1, got {pct}"
-        )));
-    }
-    if !(1..=MAX_PERSIST_DAYS).contains(&max_days) {
-        return Err(AppError::BadRequest(format!(
-            "max_days_to_expiry must be in 1..={MAX_PERSIST_DAYS}, got {max_days}"
-        )));
-    }
-    Ok(())
-}
-
 /// Fetch the contracts on `underlying` expiring within the window and
 /// striking within the band, and upsert them into `option_contracts`.
 pub async fn sync_option_contracts(
@@ -195,22 +164,30 @@ pub async fn sync_option_contracts(
     let Some(massive) = state.massive.as_ref() else {
         return Err(AppError::Internal("Massive not configured".into()));
     };
-    validate_band_and_window(body.strike_band_pct, body.max_days_to_expiry)?;
+    body.window.validate()?;
     let underlying = body.underlying.trim().to_uppercase();
     let spot = underlying_spot(&state, &underlying).await?;
     let now = Utc::now();
-    let (expires_from, expires_to) = expiry_window(now.date_naive(), body.max_days_to_expiry);
+    let ((expires_from, expires_to), strikes) = body.window.bounds(now.date_naive(), spot);
     let filter = ContractFilter {
         underlying: underlying.clone(),
         expires_from,
         expires_to,
-        strikes: Some(strike_band(spot, body.strike_band_pct)),
+        strikes: Some(strikes),
         expired: false,
         as_of: None,
     };
 
     let contracts = massive.list_option_contracts(&filter).await?;
-    let stored = options_repo::upsert_contracts(&state.db, &contracts, now)
+    let specs: Vec<ContractSpec> = contracts
+        .iter()
+        .filter_map(|c| {
+            ContractSpec::try_from(c)
+                .map_err(|e| tracing::warn!("Skipping Massive contract: {}", e))
+                .ok()
+        })
+        .collect();
+    let stored = options_repo::upsert_contracts(&state.db, &specs, now)
         .await
         .map_err(AppError::Database)?;
     tracing::info!(
@@ -218,8 +195,8 @@ pub async fn sync_option_contracts(
         stored,
         underlying,
         spot,
-        body.strike_band_pct * 100.0,
-        body.max_days_to_expiry
+        body.window.strike_band_pct * 100.0,
+        body.window.max_days_to_expiry
     );
     Ok(Json(json!({
         "underlying": underlying,
@@ -246,7 +223,7 @@ pub async fn persist_option_bars(
     let Some(massive) = state.massive.as_ref() else {
         return Err(AppError::Internal("Massive not configured".into()));
     };
-    validate_band_and_window(body.strike_band_pct, body.max_days_to_expiry)?;
+    body.window.validate()?;
     if !(1..=MAX_PERSIST_DAYS).contains(&body.days) {
         return Err(AppError::BadRequest(format!(
             "days must be in 1..={MAX_PERSIST_DAYS}, got {}",
@@ -258,17 +235,13 @@ pub async fn persist_option_bars(
     let now = Utc::now();
     let today = now.date_naive();
     let from = today - Duration::days(body.days);
+    let ((_, expires_to), strikes) = body.window.bounds(today, spot);
 
     // Contracts that expired inside the window still have bars to collect.
-    let contracts = options_repo::list_contracts(
-        &state.db,
-        &underlying,
-        from,
-        expiry_window(today, body.max_days_to_expiry).1,
-        Some(strike_band(spot, body.strike_band_pct)),
-    )
-    .await
-    .map_err(AppError::Database)?;
+    let contracts =
+        options_repo::list_contracts(&state.db, &underlying, from, expires_to, Some(strikes))
+            .await
+            .map_err(AppError::Database)?;
 
     let mut rows: Vec<OptionBarRow> = Vec::new();
     let mut fetched = 0usize;
@@ -337,11 +310,6 @@ fn completed_option_rows(
         .collect()
 }
 
-/// Expiry window used by the sync and the bars endpoints.
-fn expiry_window(today: NaiveDate, max_days: i64) -> (NaiveDate, NaiveDate) {
-    (today, today + Duration::days(max_days))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,23 +368,6 @@ mod tests {
         let rows = completed_rows(&bars, "SPY", Granularity::D, now).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].candle.time, yesterday);
-    }
-
-    #[test]
-    fn strike_band_is_symmetric_around_spot() {
-        let (lo, hi) = strike_band(650.0, 0.1);
-        assert!((lo - 585.0).abs() < 1e-9 && (hi - 715.0).abs() < 1e-9);
-        assert_eq!(
-            expiry_window(NaiveDate::from_ymd_opt(2026, 10, 22).unwrap(), 60).1,
-            NaiveDate::from_ymd_opt(2026, 12, 21).unwrap()
-        );
-    }
-
-    #[test]
-    fn band_and_window_are_validated() {
-        assert!(validate_band_and_window(0.15, 60).is_ok());
-        assert!(validate_band_and_window(1.5, 60).is_err());
-        assert!(validate_band_and_window(0.15, 0).is_err());
     }
 
     #[test]
