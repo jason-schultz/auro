@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct WealthsimplePosition {
     pub id: i32,
     pub account_id: i32,
@@ -12,7 +12,7 @@ pub struct WealthsimplePosition {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct WealthsimpleAccount {
     pub id: i32,
     pub account_type: String,
@@ -22,6 +22,8 @@ pub struct WealthsimpleAccount {
     pub market_value: Option<f64>,
     pub total_equity: Option<f64>,
     pub updated_at: DateTime<Utc>,
+    /// Loaded by a second query, not a column of `wealthsimple_accounts`.
+    #[sqlx(skip)]
     pub positions: Vec<WealthsimplePosition>,
 }
 

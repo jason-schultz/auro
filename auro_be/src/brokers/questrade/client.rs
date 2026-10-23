@@ -37,12 +37,13 @@ impl QuestradeClient {
     /// token is never retried. The successful token's rotation is persisted
     /// by `authenticate`. Returns None when no token is available.
     pub async fn connect(pool: &PgPool, env_token: Option<&str>) -> AppResult<Option<Self>> {
-        let db_token = sqlx::query_scalar!(
-            "SELECT refresh_token FROM questrade_tokens WHERE singleton = TRUE"
-        )
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("DB error loading questrade token: {}", e)))?;
+        let db_token: Option<String> =
+            sqlx::query_scalar("SELECT refresh_token FROM questrade_tokens WHERE singleton = TRUE")
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| {
+                    AppError::Internal(format!("DB error loading questrade token: {}", e))
+                })?;
 
         let env_token = env_token.filter(|t| db_token.as_deref() != Some(*t));
         let candidates: Vec<String> = db_token
@@ -118,7 +119,7 @@ impl QuestradeClient {
 
         // Persist the new tokens before updating self — if DB write fails we
         // haven't thrown away the in-memory state yet.
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO questrade_tokens (singleton, refresh_token, access_token, api_server, expires_at, updated_at)
             VALUES (TRUE, $1, $2, $3, $4, NOW())
@@ -129,11 +130,11 @@ impl QuestradeClient {
                     expires_at    = EXCLUDED.expires_at,
                     updated_at    = NOW()
             "#,
-            token.refresh_token,
-            token.access_token,
-            token.api_server,
-            expires_at,
         )
+        .bind(&token.refresh_token)
+        .bind(&token.access_token)
+        .bind(&token.api_server)
+        .bind(expires_at)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("DB error persisting questrade tokens: {}", e)))?;

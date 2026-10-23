@@ -86,7 +86,7 @@ pub(crate) async fn upsert_evaluation_running(
     config_id: Uuid,
     stage: &str,
 ) -> Result<Uuid, sqlx::Error> {
-    let row = sqlx::query_scalar!(
+    sqlx::query_scalar(
         r#"
         INSERT INTO strategy_evaluations (id, strategy_config_id, stage, status, inserted_at, updated_at)
         VALUES (gen_random_uuid(), $1, $2, 'running', NOW(), NOW())
@@ -94,13 +94,11 @@ pub(crate) async fn upsert_evaluation_running(
         DO UPDATE SET status = 'running', stats = NULL, failure_reason = NULL, evaluated_at = NULL, updated_at = NOW()
         RETURNING id
         "#,
-        config_id,
-        stage,
     )
+    .bind(config_id)
+    .bind(stage)
     .fetch_one(pool)
-    .await?;
-
-    Ok(row)
+    .await
 }
 
 pub(crate) async fn finalize_evaluation(
