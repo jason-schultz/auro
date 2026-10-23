@@ -13,6 +13,8 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "kfold_validations",
     "live_strategies",
     "live_trades",
+    "option_bars",
+    "option_contracts",
     "policy_rates",
     "questrade_tokens",
     "rules",

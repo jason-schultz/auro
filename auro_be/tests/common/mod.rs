@@ -25,6 +25,7 @@ pub fn test_state() -> AppState {
         questrade_refresh_token: None,
         massive_api_key: None,
         massive_base_url: "http://127.0.0.1:1".to_string(),
+        massive_calls_per_minute: 0,
     };
 
     let oanda = OandaClient::new(

@@ -4,6 +4,7 @@ pub(crate) mod financing;
 pub(crate) mod live_queries;
 pub(crate) mod live_strategies;
 pub(crate) mod live_trades;
+pub mod options;
 pub(crate) mod pipeline;
 pub(crate) mod rules;
 pub(crate) mod signal_events;

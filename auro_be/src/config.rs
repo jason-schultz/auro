@@ -15,6 +15,8 @@ pub struct Config {
     /// Massive (Polygon) market data. Absent key = US stock bars disabled.
     pub massive_api_key: Option<String>,
     pub massive_base_url: String,
+    /// Plan rate limit; 5 on the free plan, 0 = unlimited (paid plans).
+    pub massive_calls_per_minute: u32,
 }
 
 impl Config {
@@ -30,6 +32,10 @@ impl Config {
             massive_api_key: env::var("MASSIVE_API_KEY").ok().filter(|k| !k.is_empty()),
             massive_base_url: env::var("MASSIVE_BASE_URL")
                 .unwrap_or_else(|_| "https://api.massive.com".to_string()),
+            massive_calls_per_minute: env::var("MASSIVE_CALLS_PER_MINUTE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
             port: env::var("PORT")
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()
