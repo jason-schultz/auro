@@ -15,6 +15,14 @@ impl OptionKind {
             _ => None,
         }
     }
+
+    /// The `option_contracts.contract_type` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Call => "call",
+            Self::Put => "put",
+        }
+    }
 }
 
 /// Per-share greeks. `theta` is per calendar year (divide by 365 for a daily

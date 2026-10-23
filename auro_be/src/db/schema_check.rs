@@ -15,6 +15,7 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "live_trades",
     "option_bars",
     "option_contracts",
+    "option_quotes",
     "policy_rates",
     "questrade_tokens",
     "rules",
