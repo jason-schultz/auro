@@ -5,6 +5,7 @@ defmodule Opus.Trading.LiveStrategy do
   schema "live_strategies" do
     field :strategy_type, :string
     field :instrument, :string
+    field :instrument_id, :integer
     field :granularity, :string
     field :parameters, :map
     field :enabled, :boolean

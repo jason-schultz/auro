@@ -6,6 +6,7 @@ defmodule Opus.Trading.LiveTrade do
   schema "live_trades" do
     field :live_strategy_id, Ecto.UUID
     field :instrument, :string
+    field :instrument_id, :integer
     field :pnl, :float
     field :mfe_pct, :float
     field :mae_pct, :float

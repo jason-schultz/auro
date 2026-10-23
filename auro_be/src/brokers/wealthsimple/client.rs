@@ -3,6 +3,7 @@ use sqlx::PgPool;
 use super::models::{UpsertAccount, WealthsimpleAccount};
 use crate::brokers::client::BrokerClient;
 use crate::brokers::{BrokerAccount, BrokerKind, BrokerStatus};
+use crate::db::repositories::instruments as instruments_repo;
 use crate::error::{AppError, AppResult};
 
 #[derive(Clone)]
@@ -73,11 +74,13 @@ impl WealthsimpleClient {
             .map_err(|e| AppError::Internal(format!("DB error inserting wealthsimple account: {}", e)))?;
 
             for pos in &acct.positions {
-                sqlx::query(
-                    "INSERT INTO wealthsimple_positions
-                        (account_id, symbol, shares, avg_cost, current_price, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, NOW())",
-                )
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "INSERT INTO wealthsimple_positions \
+                        (account_id, symbol, instrument_id, shares, avg_cost, current_price, \
+                         updated_at) \
+                     VALUES ($1, $2, {}, $3, $4, $5, NOW())",
+                    instruments_repo::id_for_name_sql("$2")
+                )))
                 .bind(account_id)
                 .bind(pos.symbol.to_uppercase())
                 .bind(pos.shares)

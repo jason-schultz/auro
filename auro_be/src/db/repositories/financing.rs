@@ -23,17 +23,21 @@ pub async fn load_model(pool: &PgPool) -> Result<FinancingModel, sqlx::Error> {
 }
 
 /// Record OANDA's (long, short) annual financing rates for `as_of`,
-/// overwriting an earlier snapshot of the same day. Returns rows written.
+/// overwriting an earlier snapshot of the same day. Returns rows written;
+/// an OANDA name the master does not know is skipped with a warning, not
+/// stored (the table requires the instrument id).
 pub async fn upsert_instrument_financing(
     pool: &PgPool,
     as_of: NaiveDate,
     rates: &[(String, f64, f64)],
 ) -> Result<usize, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    let mut written = 0usize;
     for (instrument, long_rate, short_rate) in rates {
-        sqlx::query(
-            "INSERT INTO instrument_financing (instrument, as_of, long_rate, short_rate) \
-             VALUES ($1, $2, $3, $4) \
+        let result = sqlx::query(
+            "INSERT INTO instrument_financing \
+                 (instrument, instrument_id, as_of, long_rate, short_rate) \
+             SELECT $1, id, $2, $3, $4 FROM instruments WHERE oanda_symbol = $1 \
              ON CONFLICT (instrument, as_of) DO UPDATE \
              SET long_rate = EXCLUDED.long_rate, short_rate = EXCLUDED.short_rate, \
                  recorded_at = NOW()",
@@ -44,7 +48,14 @@ pub async fn upsert_instrument_financing(
         .bind(short_rate)
         .execute(&mut *tx)
         .await?;
+        match result.rows_affected() {
+            0 => tracing::warn!(
+                "Financing for {} not stored: not in the instruments table",
+                instrument
+            ),
+            _ => written += 1,
+        }
     }
     tx.commit().await?;
-    Ok(rates.len())
+    Ok(written)
 }

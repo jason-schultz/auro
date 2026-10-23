@@ -3,6 +3,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::instruments as instruments_repo;
 use crate::engine::types::LiveStrategy;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -150,12 +151,12 @@ pub(crate) async fn insert_live_strategy(
     granularity: &str,
     parameters: &Value,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        INSERT INTO live_strategies (id, strategy_type, instrument, granularity, parameters, enabled)
-        VALUES ($1, $2, $3, $4, $5, false)
-        "#,
-    )
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO live_strategies \
+            (id, strategy_type, instrument, instrument_id, granularity, parameters, enabled) \
+         VALUES ($1, $2, $3, {}, $4, $5, false)",
+        instruments_repo::id_for_name_sql("$3")
+    )))
     .bind(id)
     .bind(strategy_type)
     .bind(instrument)
@@ -187,14 +188,13 @@ pub(crate) async fn update_live_strategy(
     granularity: &str,
     parameters: &Value,
 ) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        r#"
-        UPDATE live_strategies
-        SET strategy_type = $1, instrument = $2, granularity = $3, parameters = $4,
-            updated_at = NOW()
-        WHERE id = $5
-        "#,
-    )
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE live_strategies \
+         SET strategy_type = $1, instrument = $2, instrument_id = {}, granularity = $3, \
+             parameters = $4, updated_at = NOW() \
+         WHERE id = $5",
+        instruments_repo::id_for_name_sql("$2")
+    )))
     .bind(strategy_type)
     .bind(instrument)
     .bind(granularity)

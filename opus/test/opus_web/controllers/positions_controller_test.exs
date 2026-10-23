@@ -7,53 +7,25 @@ defmodule OpusWeb.PositionsControllerTest do
   @instrument "EUR_USD"
 
   setup do
-    Repo.query!("""
-    CREATE TABLE IF NOT EXISTS live_trades (
-      id UUID PRIMARY KEY,
-      oanda_trade_id VARCHAR(50),
-      instrument VARCHAR(20) NOT NULL,
-      direction VARCHAR(10) NOT NULL,
-      units VARCHAR(20) NOT NULL,
-      entry_time TIMESTAMPTZ NOT NULL,
-      status VARCHAR(20) NOT NULL
-    )
-    """)
-
-    Repo.query!("""
-    CREATE TABLE IF NOT EXISTS candles (
-      id UUID PRIMARY KEY,
-      instrument VARCHAR(20) NOT NULL,
-      granularity VARCHAR(5) NOT NULL,
-      timestamp TIMESTAMPTZ NOT NULL,
-      open DOUBLE PRECISION NOT NULL,
-      high DOUBLE PRECISION NOT NULL,
-      low DOUBLE PRECISION NOT NULL,
-      close DOUBLE PRECISION NOT NULL,
-      volume INTEGER NOT NULL,
-      complete BOOLEAN NOT NULL
-    )
-    """)
-
-    Repo.query!("DELETE FROM candles WHERE instrument = $1", [@instrument])
-    Repo.query!("DELETE FROM live_trades WHERE oanda_trade_id = $1", [@trade_id])
+    {:ok, eur} = Opus.Instruments.add(@instrument, "fx_major")
 
     Repo.query!(
       """
-      INSERT INTO live_trades (id, oanda_trade_id, instrument, direction, units, entry_time, status)
-      VALUES ('00000000-0000-0000-0000-00000000aa01', $1, $2, 'long', '1000', NOW() - interval '5 minutes', 'open')
+      INSERT INTO live_trades (id, oanda_trade_id, instrument, instrument_id, direction, units, entry_time, status)
+      VALUES ('00000000-0000-0000-0000-00000000aa01', $1, $2, $3, 'long', '1000', NOW() - interval '5 minutes', 'open')
       """,
-      [@trade_id, @instrument]
+      [@trade_id, @instrument, eur.id]
     )
 
     Repo.query!(
       """
-      INSERT INTO candles (id, instrument, granularity, timestamp, open, high, low, close, volume, complete)
+      INSERT INTO candles (instrument_id, instrument, granularity, timestamp, open, high, low, close, volume, complete)
       VALUES
-      ('00000000-0000-0000-0000-00000000bb01', $1, 'M1', NOW() - interval '4 minutes', 1.1000, 1.1010, 1.0990, 1.1005, 10, true),
-      ('00000000-0000-0000-0000-00000000bb02', $1, 'M1', NOW() - interval '3 minutes', 1.1005, 1.1015, 1.1000, 1.1010, 12, true),
-      ('00000000-0000-0000-0000-00000000bb03', $1, 'M1', NOW() - interval '2 minutes', 1.1010, 1.1020, 1.1008, 1.1018, 14, true)
+      ($1, $2, 'M1', NOW() - interval '4 minutes', 1.1000, 1.1010, 1.0990, 1.1005, 10, true),
+      ($1, $2, 'M1', NOW() - interval '3 minutes', 1.1005, 1.1015, 1.1000, 1.1010, 12, true),
+      ($1, $2, 'M1', NOW() - interval '2 minutes', 1.1010, 1.1020, 1.1008, 1.1018, 14, true)
       """,
-      [@instrument]
+      [eur.id, @instrument]
     )
 
     :ok

@@ -5,8 +5,8 @@ defmodule Opus.MarketData.MassiveBarsWorker do
   Two job shapes share this worker:
 
     * no args (the nightly cron) — fan out one job per (symbol, granularity)
-      from config, each re-fetching the last `days` days so a missed night
-      heals on the next;
+      over the listings flagged `feed_massive_daily`, each re-fetching the
+      last `days` days so a missed night heals on the next;
     * `%{"symbol" => _, "granularity" => _, "days" => _}` — one symbol, one
       call to Rust's `POST /api/massive/candles/persist`.
 
@@ -16,8 +16,8 @@ defmodule Opus.MarketData.MassiveBarsWorker do
   stays on the Questrade worker.
 
   Massive owns US symbols at D; Questrade owns everything Canadian and the US
-  intraday watchlist. Symbol lists live in config (`watchlist`), mirrored from
-  `auro_research/data/yahoo/universes.py` (SP100 + US_ETF).
+  intraday list. Which listings each feed covers is a flag on the
+  instruments table (`Opus.Instruments.feed_symbols/1`).
   """
 
   use Oban.Worker,
@@ -28,6 +28,7 @@ defmodule Opus.MarketData.MassiveBarsWorker do
   require Logger
 
   alias Opus.Auro.Client
+  alias Opus.Instruments
 
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok | {:error, term()}
@@ -55,14 +56,15 @@ defmodule Opus.MarketData.MassiveBarsWorker do
   end
 
   @doc """
-  Enqueue one job per configured (symbol, granularity) fetching `days` back.
+  Enqueue one job per flagged listing and configured granularity, fetching
+  `days` back.
   The nightly cron uses the configured `days`; a one-off backfill passes the
   plan window, e.g. `enqueue_all(740)`.
   """
   @spec enqueue_all(pos_integer()) :: {:ok, non_neg_integer()}
   def enqueue_all(days) when is_integer(days) and days > 0 do
     jobs =
-      for symbol <- config(:watchlist),
+      for symbol <- Instruments.feed_symbols(:massive_daily),
           granularity <- config(:granularities),
           do: new(%{symbol: symbol, granularity: granularity, days: days})
 

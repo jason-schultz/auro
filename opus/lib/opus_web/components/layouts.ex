@@ -38,6 +38,7 @@ defmodule OpusWeb.Layouts do
         <a href={~p"/journal"} class="text-muted hover:text-base-content">Journal</a>
         <a href={~p"/accounts"} class="text-muted hover:text-base-content">Accounts</a>
         <a href={~p"/options"} class="text-muted hover:text-base-content">Options</a>
+        <a href={~p"/instruments"} class="text-muted hover:text-base-content">Instruments</a>
         <.theme_toggle />
       </nav>
     </header>

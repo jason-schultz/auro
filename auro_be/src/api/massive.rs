@@ -8,7 +8,9 @@ use super::options::ChainWindow;
 use crate::brokers::massive::client::ContractFilter;
 use crate::brokers::massive::models::AggBar;
 use crate::db::repositories::candles as candles_repo;
-use crate::db::repositories::options::{self as options_repo, OptionBarRow};
+use crate::db::repositories::instruments as instruments_repo;
+use crate::db::repositories::options::{self as options_repo, ContractRow, OptionBarRow};
+use crate::engine::instrument::Instrument;
 use crate::engine::options::ContractSpec;
 use crate::engine::types::{Candle, CandleRow, Granularity};
 use crate::error::{AppError, AppResult};
@@ -34,6 +36,18 @@ pub struct PersistCandles {
     pub days: i64,
 }
 
+/// The listing Massive calls `ticker`, which must be in the master: the
+/// feeds store nothing for an instrument nobody has added.
+async fn require_instrument(state: &AppState, ticker: &str) -> AppResult<Instrument> {
+    instruments_repo::find_by_massive_ticker(&state.db, ticker)
+        .await?
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "{ticker} is not in the instruments table; add it there first"
+            ))
+        })
+}
+
 /// Fetch `days` of `symbol` bars from Massive and upsert the completed ones
 /// into `candles`. Same contract as the Questrade persist endpoint; this is
 /// the US-equity source, Questrade stays the Canadian one.
@@ -53,6 +67,7 @@ pub async fn persist_candles(
     }
 
     let symbol = body.symbol.trim().to_uppercase();
+    let instrument = require_instrument(&state, &symbol).await?;
     let now = Utc::now();
     let from = (now - Duration::days(body.days)).date_naive();
     let to = now.date_naive();
@@ -78,6 +93,7 @@ pub async fn persist_candles(
 
     Ok(Json(json!({
         "symbol": symbol,
+        "instrument_id": instrument.id,
         "granularity": granularity.as_str(),
         "days": body.days,
         "candles_fetched": raw.len(),
@@ -166,6 +182,7 @@ pub async fn sync_option_contracts(
     };
     body.window.validate()?;
     let underlying = body.underlying.trim().to_uppercase();
+    let instrument = require_instrument(&state, &underlying).await?;
     let spot = underlying_spot(&state, &underlying).await?;
     let now = Utc::now();
     let ((expires_from, expires_to), strikes) = body.window.bounds(now.date_naive(), spot);
@@ -187,25 +204,26 @@ pub async fn sync_option_contracts(
                 .ok()
         })
         .collect();
-    let stored = options_repo::upsert_contracts(&state.db, &specs, now)
+    let stored = options_repo::upsert_contracts(&state.db, instrument.id, &specs, now)
         .await
         .map_err(AppError::Database)?;
     tracing::info!(
         "Synced {} {} option contracts (spot {:.2}, ±{:.0}%, {} days)",
-        stored,
-        underlying,
+        stored.len(),
+        instrument.label(),
         spot,
         body.window.strike_band_pct * 100.0,
         body.window.max_days_to_expiry
     );
     Ok(Json(json!({
         "underlying": underlying,
+        "instrument_id": instrument.id,
         "spot": spot,
         "expires_from": filter.expires_from,
         "expires_to": filter.expires_to,
         "strikes": filter.strikes,
         "contracts_fetched": contracts.len(),
-        "contracts_stored": stored,
+        "contracts_stored": stored.len(),
     })))
 }
 
@@ -231,6 +249,7 @@ pub async fn persist_option_bars(
         )));
     }
     let underlying = body.underlying.trim().to_uppercase();
+    let instrument = require_instrument(&state, &underlying).await?;
     let spot = underlying_spot(&state, &underlying).await?;
     let now = Utc::now();
     let today = now.date_naive();
@@ -239,7 +258,7 @@ pub async fn persist_option_bars(
 
     // Contracts that expired inside the window still have bars to collect.
     let contracts =
-        options_repo::list_contracts(&state.db, &underlying, from, expires_to, Some(strikes))
+        options_repo::list_contracts(&state.db, instrument.id, from, expires_to, Some(strikes))
             .await
             .map_err(AppError::Database)?;
 
@@ -256,7 +275,7 @@ pub async fn persist_option_bars(
             Ok(bars) => {
                 consecutive_failures = 0;
                 fetched += bars.len();
-                rows.extend(completed_option_rows(&contract.ticker, &bars, now)?);
+                rows.extend(completed_option_rows(contract, &bars, now)?);
             }
             Err(e) => {
                 tracing::warn!("Option bars {} failed: {}", contract.ticker, e);
@@ -285,6 +304,7 @@ pub async fn persist_option_bars(
     );
     Ok(Json(json!({
         "underlying": underlying,
+        "instrument_id": instrument.id,
         "spot": spot,
         "days": body.days,
         "contracts": contracts.len(),
@@ -296,12 +316,12 @@ pub async fn persist_option_bars(
 
 /// Daily option bars share the stock rule: final once extended hours end.
 fn completed_option_rows(
-    ticker: &str,
+    contract: &ContractRow,
     bars: &[AggBar],
     now: DateTime<Utc>,
 ) -> AppResult<Vec<OptionBarRow>> {
     bars.iter()
-        .map(|b| OptionBarRow::from_agg(ticker, b))
+        .map(|b| OptionBarRow::from_agg(contract, b))
         .filter(|r| {
             r.as_ref()
                 .map(|r| completes_at(r.time, Granularity::D) <= now)
@@ -379,7 +399,17 @@ mod tests {
             bar((today - Duration::days(1)).timestamp_millis()),
             bar(today.timestamp_millis()),
         ];
-        let rows = completed_option_rows("O:SPY261219C00650000", &bars, now).unwrap();
+        let contract = ContractRow {
+            id: 1,
+            ticker: "O:SPY261219C00650000".into(),
+            underlying_instrument_id: crate::engine::instrument::InstrumentId(1),
+            underlying: "SPY".into(),
+            contract_type: "call".into(),
+            expiration_date: chrono::NaiveDate::from_ymd_opt(2026, 12, 19).unwrap(),
+            strike: 650.0,
+            shares_per_contract: 100,
+        };
+        let rows = completed_option_rows(&contract, &bars, now).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ticker, "O:SPY261219C00650000");
     }

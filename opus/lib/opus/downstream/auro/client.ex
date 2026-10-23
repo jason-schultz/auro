@@ -289,6 +289,18 @@ defmodule Opus.Auro.Client do
     |> handle_response()
   end
 
+  @doc """
+  Have Rust ask Questrade who each listing in the instruments table is
+  (POST /api/instruments/enrich): records the symbol id, exchange and
+  currency Questrade reports. One search and one detail call per listing.
+  """
+  @spec enrich_instruments() :: {:ok, map()} | {:error, any()}
+  def enrich_instruments do
+    client()
+    |> Req.post(url: "/api/instruments/enrich", json: %{}, receive_timeout: 300_000, retry: false)
+    |> handle_response()
+  end
+
   defp option_body(underlying, opts) do
     %{underlying: underlying}
     |> maybe_put(:max_days_to_expiry, opts[:max_days_to_expiry])

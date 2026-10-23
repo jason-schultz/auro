@@ -155,13 +155,15 @@ async fn upsert_chunk(pool: &PgPool, rows: &[CandleRow]) -> Result<(), sqlx::Err
     sqlx::query(
         r#"
         INSERT INTO candles (
-            instrument, granularity, timestamp, open, high, low, close, volume, complete,
+            instrument_id, instrument, granularity, timestamp,
+            open, high, low, close, volume, complete,
             bid_open, bid_high, bid_low, bid_close,
             ask_open, ask_high, ask_low, ask_close
         )
-        SELECT instrument, granularity, timestamp, open, high, low, close, volume, true,
-               bid_open, bid_high, bid_low, bid_close,
-               ask_open, ask_high, ask_low, ask_close
+        SELECT i.id, t.instrument, t.granularity, t.timestamp,
+               t.open, t.high, t.low, t.close, t.volume, true,
+               t.bid_open, t.bid_high, t.bid_low, t.bid_close,
+               t.ask_open, t.ask_high, t.ask_low, t.ask_close
         FROM UNNEST(
             $1::varchar[], $2::varchar[], $3::timestamptz[],
             $4::float8[], $5::float8[], $6::float8[], $7::float8[], $8::int4[],
@@ -170,8 +172,15 @@ async fn upsert_chunk(pool: &PgPool, rows: &[CandleRow]) -> Result<(), sqlx::Err
         ) AS t(instrument, granularity, timestamp, open, high, low, close, volume,
                bid_open, bid_high, bid_low, bid_close,
                ask_open, ask_high, ask_low, ask_close)
+        -- Dual-write period: the id comes from the master by vendor spelling;
+        -- a name not in the master stores NULL and phase 3 refuses it.
+        LEFT JOIN instruments i
+          ON i.oanda_symbol = t.instrument
+          OR i.questrade_symbol = t.instrument
+          OR i.massive_ticker = t.instrument
         ON CONFLICT (instrument, granularity, timestamp)
         DO UPDATE SET
+            instrument_id = COALESCE(EXCLUDED.instrument_id, candles.instrument_id),
             open = EXCLUDED.open,
             high = EXCLUDED.high,
             low = EXCLUDED.low,
