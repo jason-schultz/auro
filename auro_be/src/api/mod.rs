@@ -4,6 +4,7 @@ mod candles;
 mod financing;
 mod health;
 mod indicators;
+mod instruments;
 mod live_strategies;
 mod massive;
 mod options;
@@ -31,6 +32,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/health/live", get(health::live_health))
         .route("/api/account", get(account::get_account))
         .route("/api/instruments", get(account::get_instruments))
+        .route("/api/instruments/enrich", post(instruments::enrich))
         .route("/api/pricing", get(account::get_pricing))
         .route("/api/candles", get(candles::get_candles))
         .route("/api/candles/backfill", post(candles::backfill))

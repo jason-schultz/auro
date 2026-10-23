@@ -11,6 +11,8 @@ defmodule Opus.Pipeline.StrategyConfig do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias Opus.Instruments
+  alias Opus.Instruments.Instrument
   alias Opus.Trading.Granularity
 
   @primary_key {:id, Ecto.UUID, autogenerate: true}
@@ -22,6 +24,7 @@ defmodule Opus.Pipeline.StrategyConfig do
     field(:granularity, :string)
     field(:strategy_type, :string)
     field(:parameters, :map)
+    belongs_to(:instrument_ref, Instrument, foreign_key: :instrument_id, type: :id)
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -33,6 +36,7 @@ defmodule Opus.Pipeline.StrategyConfig do
           id: Ecto.UUID.t() | nil,
           source: String.t() | nil,
           instrument: String.t() | nil,
+          instrument_id: integer() | nil,
           granularity: String.t() | nil,
           strategy_type: String.t() | nil,
           parameters: map() | nil
@@ -45,5 +49,17 @@ defmodule Opus.Pipeline.StrategyConfig do
     |> validate_required(@required)
     |> validate_inclusion(:source, ["manual"])
     |> validate_inclusion(:granularity, Granularity.all())
+    |> put_instrument_id()
+  end
+
+  # The config is keyed on the master; an instrument nobody has added
+  # cannot enter the pipeline.
+  defp put_instrument_id(%Ecto.Changeset{valid?: false} = changeset), do: changeset
+
+  defp put_instrument_id(changeset) do
+    case changeset |> get_field(:instrument) |> Instruments.id_for() do
+      {:ok, id} -> put_change(changeset, :instrument_id, id)
+      :error -> add_error(changeset, :instrument, "is not in the instruments table")
+    end
   end
 end

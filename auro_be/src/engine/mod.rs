@@ -2,6 +2,7 @@ pub mod donchian;
 pub mod event_window;
 pub mod financing;
 pub mod indicators;
+pub mod instrument;
 pub mod kfold;
 pub mod live;
 pub mod ma_filter;

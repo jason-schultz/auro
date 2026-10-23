@@ -3,6 +3,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::instruments as instruments_repo;
 use crate::engine::types::{Direction, Granularity};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -251,16 +252,15 @@ pub(crate) async fn insert_open_trade(
 ) -> Result<(), sqlx::Error> {
     // The row id and entry time are set here, not left to column defaults:
     // the Ecto migration that owns this table defines neither.
-    sqlx::query(
-        r#"
-        INSERT INTO live_trades
-            (id, entry_time, live_strategy_id, oanda_trade_id, instrument, direction, units,
-             entry_price, stop_loss_price, entry_reason,
-             indicators_at_entry, regime_at_entry, sizing_metadata,
-             signal_price, expected_entry_price, entry_spread, status)
-        VALUES ($15, $16, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'open')
-        "#,
-    )
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO live_trades \
+            (id, entry_time, live_strategy_id, oanda_trade_id, instrument, instrument_id, \
+             direction, units, entry_price, stop_loss_price, entry_reason, \
+             indicators_at_entry, regime_at_entry, sizing_metadata, \
+             signal_price, expected_entry_price, entry_spread, status) \
+         VALUES ($15, $16, $1, $2, $3, {}, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'open')",
+        instruments_repo::id_for_name_sql("$3")
+    )))
     .bind(trade.live_strategy_id)
     .bind(trade.oanda_trade_id)
     .bind(trade.instrument)

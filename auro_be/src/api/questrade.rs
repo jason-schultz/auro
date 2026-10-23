@@ -8,10 +8,13 @@ use serde_json::{json, Value};
 
 use super::options::ChainWindow;
 use crate::brokers::questrade::client::QuestradeClient;
+use crate::brokers::questrade::identity;
 use crate::brokers::questrade::models::{EquityCandle, OptionQuote, QuoteResult, SymbolDetail};
 use crate::brokers::questrade::options::{select_contracts, SelectedContract};
 use crate::db::repositories::candles as candles_repo;
-use crate::db::repositories::options::{self as options_repo, OptionQuoteRow};
+use crate::db::repositories::instruments as instruments_repo;
+use crate::db::repositories::options::{self as options_repo, OptionQuoteRow, StoredContract};
+use crate::engine::instrument::Instrument;
 use crate::engine::options::ContractSpec;
 use crate::engine::types::{Candle, CandleRow, Granularity};
 use crate::error::{AppError, AppResult};
@@ -258,6 +261,18 @@ pub struct PersistCandles {
     pub days: i64,
 }
 
+/// The listing Questrade calls `symbol`, which must be in the master: the
+/// feeds store nothing for an instrument nobody has added.
+async fn require_instrument(state: &AppState, symbol: &str) -> AppResult<Instrument> {
+    instruments_repo::find_by_questrade_symbol(&state.db, symbol)
+        .await?
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "{symbol} is not in the instruments table; add it there first"
+            ))
+        })
+}
+
 /// Fetch a symbol's Questrade bars and store the completed ones in the shared
 /// `candles` table under the Questrade ticker (e.g. "HUT.TO"), building the
 /// history Questrade itself only retains for ~3 months.
@@ -283,8 +298,9 @@ pub async fn persist_candles(
         .to_string();
     let end = now.format("%Y-%m-%d").to_string();
 
+    let instrument = require_instrument(&state, &symbol).await?;
     let mut client = qt.lock().await;
-    let symbol_id = client.search_symbol(&symbol).await?;
+    let symbol_id = identity::resolve_symbol_id(&mut client, &state.db, &instrument).await?;
     let raw = client
         .get_candles(
             symbol_id,
@@ -324,6 +340,7 @@ pub async fn persist_candles(
 
     Ok(Json(json!({
         "symbol": symbol,
+        "instrument_id": instrument.id,
         "symbol_id": symbol_id,
         "granularity": granularity.as_str(),
         "days": body.days,
@@ -372,10 +389,11 @@ pub async fn snapshot_option_chain(
     };
     body.window.validate()?;
     let underlying = body.underlying.trim().to_uppercase();
+    let instrument = require_instrument(&state, &underlying).await?;
     let captured_at = Utc::now();
 
     let mut client = qt.lock().await;
-    let symbol_id = client.search_symbol(&underlying).await?;
+    let symbol_id = identity::resolve_symbol_id(&mut client, &state.db, &instrument).await?;
     let spot = client
         .get_quotes(&[symbol_id])
         .await?
@@ -388,24 +406,24 @@ pub async fn snapshot_option_chain(
         })?;
     let chain = client.get_option_chain(symbol_id).await?;
     let (expiries, strikes) = body.window.bounds(captured_at.date_naive(), spot);
-    let selected = select_contracts(&chain, &underlying, expiries, strikes)?;
+    let selected = select_contracts(&chain, &instrument.symbol, expiries, strikes)?;
     let option_ids: Vec<i64> = selected.iter().map(|c| c.option_id).collect();
     let quotes = client.get_option_quotes(&option_ids).await?;
     drop(client);
 
     let specs: Vec<ContractSpec> = selected.iter().map(|c| c.spec.clone()).collect();
-    let contracts_stored = options_repo::upsert_contracts(&state.db, &specs, captured_at)
+    let stored = options_repo::upsert_contracts(&state.db, instrument.id, &specs, captured_at)
         .await
         .map_err(AppError::Database)?;
-    let rows = quote_rows(&selected, &quotes, spot, captured_at);
+    let rows = quote_rows(&selected, &stored, &quotes, spot, captured_at);
     let quotes_stored = options_repo::insert_quotes(&state.db, &rows)
         .await
         .map_err(AppError::Database)?;
     let max_delay = rows.iter().filter_map(|r| r.delay_seconds).max();
     tracing::info!(
         "Snapshot {} option chain: {} contracts, {} quotes (spot {:.2}, ±{:.0}%, {} days, delay ≤ {:?}s)",
-        underlying,
-        contracts_stored,
+        instrument.label(),
+        stored.len(),
         quotes_stored,
         spot,
         body.window.strike_band_pct * 100.0,
@@ -415,6 +433,7 @@ pub async fn snapshot_option_chain(
 
     Ok(Json(json!({
         "underlying": underlying,
+        "instrument_id": instrument.id,
         "symbol_id": symbol_id,
         "spot": spot,
         "captured_at": captured_at,
@@ -423,17 +442,19 @@ pub async fn snapshot_option_chain(
         "strikes": strikes,
         "chain_expiries": chain.len(),
         "contracts_selected": selected.len(),
-        "contracts_stored": contracts_stored,
+        "contracts_stored": stored.len(),
         "quotes_fetched": quotes.len(),
         "quotes_stored": quotes_stored,
         "max_delay_seconds": max_delay,
     })))
 }
 
-/// Join the quotes back to the contracts they were requested for. A
-/// contract Questrade returned no quote for is left out, not stored empty.
+/// Join the quotes back to the contracts they were requested for, by the
+/// ids the upsert handed back. A contract Questrade returned no quote for
+/// is left out, not stored empty.
 fn quote_rows(
     selected: &[SelectedContract],
+    stored: &[StoredContract],
     quotes: &[OptionQuote],
     spot: f64,
     captured_at: DateTime<Utc>,
@@ -442,11 +463,14 @@ fn quote_rows(
         .iter()
         .map(|c| (c.option_id, c.spec.ticker.as_str()))
         .collect();
+    let ids: HashMap<&str, i64> = stored.iter().map(|c| (c.ticker.as_str(), c.id)).collect();
     quotes
         .iter()
         .filter_map(|q| {
             let ticker = tickers.get(&q.symbol_id)?;
+            let contract_id = *ids.get(ticker)?;
             Some(OptionQuoteRow {
+                contract_id,
                 ticker: ticker.to_string(),
                 captured_at,
                 source: QUOTE_SOURCE.to_string(),
@@ -584,16 +608,24 @@ mod tests {
             },
             option_id: 42,
         }];
+        let stored = vec![StoredContract {
+            id: 7,
+            ticker: "O:SPY261120P00640000".into(),
+        }];
         let captured_at = Utc::now();
         let rows = quote_rows(
             &selected,
+            &stored,
             &[option_quote(42), option_quote(43)],
             769.05,
             captured_at,
         );
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
-        assert_eq!(row.ticker, "O:SPY261120P00640000");
+        assert_eq!(
+            (row.contract_id, row.ticker.as_str()),
+            (7, "O:SPY261120P00640000")
+        );
         assert_eq!(row.source, "questrade");
         assert_eq!(row.spot, 769.05);
         assert_eq!((row.volume, row.open_interest), (Some(1501), Some(23_000)));

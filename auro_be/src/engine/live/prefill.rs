@@ -281,6 +281,15 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
+        sqlx::query(
+            "INSERT INTO instruments (symbol, exchange, currency, asset_class, oanda_symbol)
+             VALUES ($1, 'OANDA', 'USD', 'fx_cross', $1)
+             ON CONFLICT (symbol, exchange) DO NOTHING",
+        )
+        .bind(instrument)
+        .execute(&state.db)
+        .await
+        .unwrap();
 
         candles_repo::upsert_candles(
             &state.db,
@@ -301,8 +310,8 @@ mod tests {
 
         // A newer in-progress bar left by an older code path must never load.
         sqlx::query(
-            "INSERT INTO candles (instrument, granularity, timestamp, open, high, low, close, volume, complete)
-             VALUES ($1, 'H1', $2, 9, 9, 9, 9, 1, false)",
+            "INSERT INTO candles (instrument_id, instrument, granularity, timestamp, open, high, low, close, volume, complete)
+             VALUES ((SELECT id FROM instruments WHERE oanda_symbol = $1), $1, 'H1', $2, 9, 9, 9, 9, 1, false)",
         )
         .bind(instrument)
         .bind(ts + Duration::hours(1))
@@ -341,6 +350,11 @@ mod tests {
         drop(buffers);
 
         sqlx::query("DELETE FROM candles WHERE instrument = $1")
+            .bind(instrument)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM instruments WHERE oanda_symbol = $1")
             .bind(instrument)
             .execute(&state.db)
             .await

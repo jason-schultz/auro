@@ -4,7 +4,8 @@ defmodule Opus.MarketData.OptionsChainWorker do
 
   Two job shapes share this worker, like `MassiveBarsWorker`:
 
-    * no args (the nightly cron) — fan out one job per configured underlying;
+    * no args (the nightly cron) — fan out one job per listing flagged
+      `feed_options_chain` in the instruments table;
     * `%{"underlying" => _}` — capture that underlying's near-the-money
       chain (`POST /api/questrade/options/snapshot`): the contracts into
       `option_contracts`, tonight's quotes with the exchange greeks into
@@ -25,6 +26,7 @@ defmodule Opus.MarketData.OptionsChainWorker do
   require Logger
 
   alias Opus.Auro.Client
+  alias Opus.Instruments
 
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok | {:error, term()}
@@ -61,10 +63,13 @@ defmodule Opus.MarketData.OptionsChainWorker do
     :ok
   end
 
-  @doc "Enqueue one job per configured underlying."
+  @doc "Enqueue one job per listing flagged for option chains."
   @spec enqueue_all() :: {:ok, non_neg_integer()}
   def enqueue_all do
-    jobs = for underlying <- config(:underlyings), do: new(%{underlying: underlying})
+    jobs =
+      for underlying <- Instruments.feed_symbols(:options_chain),
+          do: new(%{underlying: underlying})
+
     inserted = Oban.insert_all(jobs)
     {:ok, length(inserted)}
   end

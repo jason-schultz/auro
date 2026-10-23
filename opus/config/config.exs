@@ -49,47 +49,29 @@ config :opus, Oban,
   ],
   queues: [pipeline: 2, market_data: 1]
 
-# Questrade intraday bars persisted daily via Rust. Tickers use Questrade's
-# notation (.TO = TSX, .VN = TSX Venture, bare = US).
+# Which instruments each feed stores is a flag on the `instruments` table
+# (the Instruments page); config keeps only the feed parameters.
+
+# Questrade intraday bars persisted daily via Rust for the listings flagged
+# `feed_questrade_bars`.
 config :opus, Opus.MarketData.QuestradeBarsWorker,
   days: 5,
-  granularities: ["M1", "M5"],
-  watchlist: ~w(
-    HIVE.TO HUT.TO DMGI.VN DML.TO NXE.TO EFR.TO EQX.TO IMG.TO OGC.TO WDO.TO
-    KNT.TO ARIS.TO SVM.TO ERO.TO TKO.TO CS.TO LUN.TO FL.VN WELL.TO BB.TO
-    WEED.TO OGI.TO ACB.TO BTE.TO ATH.TO CJ.TO OBE.TO TVE.TO SDE.TO GOOS.TO
-    BHC.TO DOO.TO AC.TO TFPM.TO SII.TO AYA.TO FVI.TO PAAS.TO XIU.TO
-    SPY QQQ TSLA NVDA AMD PLTR SOFI AAPL AMZN META MSFT GOOGL NFLX COIN MSTR
-    HOOD MARA RIOT SMCI ARM AVGO MU INTC F NIO RIVN LCID GME AMC SNAP UBER
-    SHOP BABA BAC CCL AAL DKNG RBLX AFRM UPST IONQ RKLB SOUN CVNA
-  )
+  granularities: ["M1", "M5"]
 
 # Option chain snapshots from Questrade via Rust: near-the-money contracts
-# for the next weeks on a few liquid underlyings, quoted nightly with the
-# exchange greeks. Tickers are Questrade's (US names bare, Canadian names
-# with .TO); the names should be ones the owner would accept being assigned.
+# for the next weeks on the listings flagged `feed_options_chain`, quoted
+# nightly with the exchange greeks. Flag only names the owner would accept
+# being assigned.
 config :opus, Opus.MarketData.OptionsChainWorker,
   enabled: true,
-  underlyings: ~w(SPY QQQ IWM AAPL MSFT NVDA AMZN GOOGL),
   max_days_to_expiry: 45,
   strike_band_pct: 0.10
 
-# US equity daily bars from Massive via Rust. Lists mirror
-# auro_research/data/yahoo/universes.py (SP100 + US_ETF); Massive tickers use
-# "." for share classes (BRK.B). US intraday stays with the Questrade worker.
+# US equity daily bars from Massive via Rust for the listings flagged
+# `feed_massive_daily`. US intraday stays with the Questrade worker.
 config :opus, Opus.MarketData.MassiveBarsWorker,
   days: 7,
-  granularities: ["D"],
-  watchlist: ~w(
-    SPY QQQ IWM DIA EFA EEM TLT IEF GLD SLV USO XLE XLF XLK XLV XLY XLP XLI XLU
-    XLB XLRE XME SMH KRE GDX EWJ EWG EWU EWC EWA FXI
-    AAPL MSFT NVDA AMZN GOOGL META BRK.B AVGO TSLA LLY JPM V UNH XOM MA JNJ PG HD
-    COST ABBV MRK WMT NFLX BAC CVX KO PEP ADBE CRM ORCL AMD TMO LIN MCD ACN CSCO
-    ABT WFC DIS INTC IBM QCOM TXN DHR PM VZ AMGN NEE CAT GE INTU UNP HON LOW SPGI
-    RTX AXP BKNG ISRG GS NKE MS T BLK PFE SBUX MDT C CVS DE ELV GILD MDLZ ADP AMT
-    LMT BMY MO SCHW CI SO DUK CL TGT USB MMM COP BA UPS PYPL KHC GM F MET AIG EMR
-    FDX CHTR COF BNY SPG GD
-  )
+  granularities: ["D"]
 
 # Configures the mailer
 #

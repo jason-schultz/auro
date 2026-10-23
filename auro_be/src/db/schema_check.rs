@@ -10,6 +10,8 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "account_snapshots",
     "candles",
     "instrument_financing",
+    "instrument_unit_caps",
+    "instruments",
     "kfold_validations",
     "live_strategies",
     "live_trades",

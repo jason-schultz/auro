@@ -1,5 +1,6 @@
 use sqlx::PgPool;
 
+use super::instruments as instruments_repo;
 use crate::engine::types::{SignalAction, SignalReport};
 
 pub async fn record_signal_event(pool: &PgPool, report: &SignalReport) -> Result<(), sqlx::Error> {
@@ -17,14 +18,13 @@ pub async fn record_signal_event(pool: &PgPool, report: &SignalReport) -> Result
     });
     let payload_text = payload.to_string();
 
-    sqlx::query(
-        r#"
-        INSERT INTO signal_events
-            (strategy_id, strategy_type, instrument, granularity, action, price, reason, oanda_trade_id, payload)
-        VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        "#,
-    )
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO signal_events \
+            (strategy_id, strategy_type, instrument, instrument_id, granularity, action, \
+             price, reason, oanda_trade_id, payload) \
+         VALUES ($1, $2, $3, {}, $4, $5, $6, $7, $8, $9)",
+        instruments_repo::id_for_name_sql("$3")
+    )))
     .bind(report.strategy_id)
     .bind(&report.strategy_type)
     .bind(&report.instrument)
