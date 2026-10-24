@@ -32,18 +32,39 @@ defmodule OpusWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="mx-auto flex w-full max-w-5xl items-center justify-between gap-4 px-4 pt-6 sm:px-6">
-      <a href={~p"/accounts"} class="text-base font-semibold tracking-tight">Auro</a>
-      <nav class="flex items-center gap-5 text-sm">
-        <a href={~p"/journal"} class="text-muted hover:text-base-content">Journal</a>
-        <a href={~p"/accounts"} class="text-muted hover:text-base-content">Accounts</a>
-        <a href={~p"/options"} class="text-muted hover:text-base-content">Options</a>
-        <a href={~p"/instruments"} class="text-muted hover:text-base-content">Instruments</a>
-        <.theme_toggle />
-      </nav>
+    <header class="sticky top-0 z-10 border-b border-base-300 bg-base-100/95 backdrop-blur">
+      <%!-- Safari on macOS 26 draws its bookmarks bar over the top ~40px of the
+           page, so the bar's own content starts below that strip; the hit areas
+           are tall enough that a link stays clickable even half-covered. --%>
+      <div class="mx-auto flex w-full max-w-7xl items-center justify-between gap-6 px-4 pt-[max(2.5rem,env(safe-area-inset-top))] pb-3 sm:px-6">
+        <a href={~p"/strategies"} class="py-2 text-base font-semibold tracking-tight">Auro</a>
+        <nav class="flex min-w-0 items-center gap-5 overflow-x-auto whitespace-nowrap text-sm">
+          <a href={~p"/strategies"} class="py-2 text-muted hover:text-base-content"><.t
+            s="Strategies"
+            wsb="Plays"
+          /></a>
+          <a href={~p"/journal"} class="py-2 text-muted hover:text-base-content"><.t
+            s="Journal"
+            wsb="Loss porn"
+          /></a>
+          <a href={~p"/accounts"} class="py-2 text-muted hover:text-base-content"><.t
+            s="Accounts"
+            wsb="The bag"
+          /></a>
+          <a href={~p"/options"} class="py-2 text-muted hover:text-base-content"><.t
+            s="Options"
+            wsb="Casino"
+          /></a>
+          <a href={~p"/instruments"} class="py-2 text-muted hover:text-base-content"><.t
+            s="Instruments"
+            wsb="Tickers"
+          /></a>
+          <.theme_toggle />
+        </nav>
+      </div>
     </header>
 
-    <main class="mx-auto w-full max-w-5xl px-4 py-10 sm:px-6">
+    <main class="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6">
       {render_slot(@inner_block)}
     </main>
 
@@ -108,10 +129,10 @@ defmodule OpusWeb.Layouts do
   def theme_toggle(assigns) do
     ~H"""
     <div class="card relative flex flex-row items-center border border-base-300 bg-base-300 rounded-full">
-      <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 [[data-theme-source=system]_&]:!left-0 transition-[left]" />
+      <div class="absolute w-1/4 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/4 [[data-theme=dark]_&]:left-2/4 [[data-theme=wsb]_&]:left-3/4 [[data-theme-source=system]_&]:!left-0 transition-[left]" />
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="flex p-2 cursor-pointer w-1/4"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="system"
         aria-label="Use system theme"
@@ -120,7 +141,7 @@ defmodule OpusWeb.Layouts do
       </button>
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="flex p-2 cursor-pointer w-1/4"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="light"
         aria-label="Use light theme"
@@ -129,12 +150,21 @@ defmodule OpusWeb.Layouts do
       </button>
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="flex p-2 cursor-pointer w-1/4"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="dark"
         aria-label="Use dark theme"
       >
         <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
+      </button>
+
+      <button
+        class="flex p-2 cursor-pointer w-1/4"
+        phx-click={JS.dispatch("phx:set-theme")}
+        data-phx-theme="wsb"
+        aria-label="Use the WallStreetBets theme"
+      >
+        <.icon name="hero-rocket-launch-micro" class="size-4 opacity-75 hover:opacity-100" />
       </button>
     </div>
     """

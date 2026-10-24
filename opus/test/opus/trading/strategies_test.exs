@@ -1,0 +1,210 @@
+defmodule Opus.Trading.StrategiesTest do
+  use Opus.DataCase, async: false
+
+  import Ecto.Query
+
+  alias Opus.Repo
+  alias Opus.Trading.{LiveStrategy, LiveTrade, Rule, Strategies, Suspension}
+
+  @enabled_id "aaaaaaaa-0000-0000-0000-000000000001"
+  @held_id "aaaaaaaa-0000-0000-0000-000000000002"
+
+  setup do
+    for schema <- [Suspension, Rule, LiveTrade, LiveStrategy], do: Repo.delete_all(schema)
+    Repo.delete_all("signal_events")
+    now = DateTime.utc_now()
+
+    Repo.insert!(%LiveStrategy{
+      id: @enabled_id,
+      strategy_type: "composite",
+      instrument: "NAS100_USD",
+      granularity: "D",
+      parameters: %{"strategy_name" => "Index RSI(2) dip-buy"},
+      enabled: true,
+      curator_mode: "pinned_on",
+      created_at: now,
+      updated_at: now
+    })
+
+    Repo.insert!(%LiveStrategy{
+      id: @held_id,
+      strategy_type: "mean_reversion",
+      instrument: "AUD_CAD",
+      granularity: "H1",
+      parameters: %{},
+      enabled: false,
+      curator_mode: "pinned_off",
+      created_at: now,
+      updated_at: now
+    })
+
+    Repo.insert!(%Rule{
+      live_strategy_id: @enabled_id,
+      enabled: false,
+      reason: "uncertain MR disabled (fail-closed) — H4:24.6 H1:39.4",
+      computed_at: now,
+      regime_inputs: %{
+        "composite" => "uncertain",
+        "frames" => [
+          %{"frame" => "H4", "regime" => "uncertain", "adx" => 24.63},
+          %{"frame" => "H1", "regime" => "trending", "adx" => 39.44}
+        ]
+      }
+    })
+
+    Repo.insert!(%Suspension{
+      live_strategy_id: @held_id,
+      triggered_at: now,
+      trigger_kind: "consecutive_losses",
+      trigger_detail: "3 losing trades in a row"
+    })
+
+    Repo.insert!(%LiveTrade{
+      live_strategy_id: @enabled_id,
+      instrument: "NAS100_USD",
+      status: "open",
+      entry_time: now,
+      created_at: now,
+      updated_at: now
+    })
+
+    Repo.insert_all("signal_events", [
+      signal(@enabled_id, "opened_long", DateTime.add(now, -3600, :second)),
+      signal(@enabled_id, "entry_rejected", now)
+    ])
+
+    :ok
+  end
+
+  defp signal(strategy_id, action, at) do
+    %{
+      strategy_id: Ecto.UUID.dump!(strategy_id),
+      strategy_type: "composite",
+      instrument: "NAS100_USD",
+      granularity: "D",
+      action: action,
+      price: 20_000.0,
+      reason: "#{action} reason",
+      timestamp: at,
+      payload: %{}
+    }
+  end
+
+  test "list/0 puts enabled strategies first and joins what Opus knows about each" do
+    assert [enabled, held] = Strategies.list()
+
+    assert enabled.id == @enabled_id
+    assert enabled.name == "Index RSI(2) dip-buy"
+    assert enabled.rule.enabled == false
+    assert enabled.rule.composite == "uncertain"
+    assert [%{frame: "H4", adx: 24.63}, %{frame: "H1", regime: "trending"}] = enabled.rule.frames
+    assert enabled.open_trades == 1
+    assert enabled.last_signal.action == "entry_rejected"
+    assert enabled.suspension == nil
+
+    assert held.name == "Mean reversion"
+    assert held.rule == nil
+    assert held.suspension.trigger_detail == "3 losing trades in a row"
+    assert held.open_trades == 0
+    assert held.last_signal == nil
+  end
+
+  test "reset_suspension/1 clears open suspensions once, then reports none open" do
+    assert {:ok, 1} = Strategies.reset_suspension(@held_id)
+    assert {:error, :none_open} = Strategies.reset_suspension(@held_id)
+    assert {:error, :invalid_id} = Strategies.reset_suspension("not-a-uuid")
+
+    assert Repo.one(from(s in Suspension, select: s.cleared_by)) == "manual"
+    assert [%{suspension: nil}] = Enum.filter(Strategies.list(), &(&1.id == @held_id))
+  end
+
+  test "regime_summary/1 reads string or atom keys and tolerates missing inputs" do
+    assert Strategies.regime_summary(nil) == {nil, []}
+    assert Strategies.regime_summary(%{}) == {nil, []}
+
+    assert {"trending", [%{frame: "H4", regime: "trending", adx: 51.0}]} =
+             Strategies.regime_summary(%{
+               composite: :trending,
+               frames: [%{frame: "H4", regime: :trending, adx: 51.0}]
+             })
+  end
+
+  test "stats/0 reports the engine as unreachable instead of raising" do
+    assert {:error, %{reason: :econnrefused}} = Strategies.stats()
+  end
+
+  test "get/1 assembles the detail page from Opus's tables and marks the engine down" do
+    {:ok, nas} = Opus.Instruments.add("NAS100_USD", "index")
+    t0 = ~U[2026-10-22 14:00:00Z]
+
+    Repo.insert_all(
+      "candles",
+      for i <- 0..4 do
+        %{
+          instrument_id: nas.id,
+          instrument: "NAS100_USD",
+          granularity: "D",
+          timestamp: DateTime.add(t0, i * 86_400, :second),
+          open: 100.0 + i,
+          high: 102.0 + i,
+          low: 99.0 + i,
+          close: 101.0 + i,
+          volume: 1,
+          complete: i < 4
+        }
+      end
+    )
+
+    assert {:ok, detail} = Strategies.get(@enabled_id)
+
+    assert detail.name == "Index RSI(2) dip-buy"
+    assert detail.open_trade.status == "open"
+    assert length(detail.trades) == 1
+    assert [%{action: "entry_rejected"}, %{action: "opened_long"}] = detail.signals
+    # Only the four completed bars, oldest first.
+    assert Enum.map(detail.candles, & &1.close) == [101.0, 102.0, 103.0, 104.0]
+    assert detail.stats == nil and detail.indicators == nil
+    assert %{reason: :econnrefused} = detail.engine_error
+    assert detail.logic == %{components: [], rules: [], settings: []}
+
+    assert Strategies.get("not-a-uuid") == :error
+    assert Strategies.get("dddddddd-0000-0000-0000-000000000009") == :error
+  end
+
+  test "logic/1 explains composite parameters and lists legacy ones plainly" do
+    composite = %{
+      "components" => %{
+        "r" => %{"type" => "RsiReversion", "params" => %{"rsi_period" => 2, "oversold" => 20}},
+        "t" => %{"type" => "MaFilter", "params" => %{"period" => 100, "ma_type" => "sma"}}
+      },
+      "entry" => %{"long" => %{"and" => ["r.long", "t.above"]}},
+      "exit" => %{"long" => "r.exit_long"},
+      "stop" => %{"type" => "AtrMultiple", "params" => %{"k" => 3.0, "period" => 14}},
+      "sizing" => %{"type" => "RiskPct", "params" => %{"pct" => 0.005}},
+      "max_hold_bars" => 10
+    }
+
+    logic = Strategies.logic(composite)
+
+    assert [
+             %{key: "r", type: "RsiReversion", params: [{"oversold", "20"}, {"rsi_period", "2"}]},
+             %{key: "t"}
+           ] =
+             logic.components
+
+    assert logic.rules == [
+             {"Long when", "r.long and t.above"},
+             {"Exit long", "r.exit_long"},
+             {"Stop", "AtrMultiple (k 3.0, period 14)"},
+             {"Sizing", "RiskPct (pct 0.005)"},
+             {"Max hold", "10 bars"}
+           ]
+
+    assert Strategies.logic(%{
+             "ma_period" => 20,
+             "entry_threshold" => 0.02,
+             "strategy_name" => "x"
+           }).settings ==
+             [{"entry_threshold", "0.02"}, {"ma_period", "20"}]
+  end
+end

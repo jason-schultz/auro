@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::candles as candles_repo;
 use crate::engine::indicators;
+use crate::engine::options::vol;
 use crate::engine::types::{BollingerBands, Granularity};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -23,6 +24,12 @@ pub struct IndicatorParams {
     pub ma_period: usize,
     #[serde(default = "default_roc_period")]
     pub roc_period: usize,
+    #[serde(default = "default_rsi_period")]
+    pub rsi_period: usize,
+    /// Bars of close-to-close realized volatility (the options screen's
+    /// "what the underlying actually did").
+    #[serde(default = "default_rv_period")]
+    pub rv_period: usize,
 }
 
 fn default_adx_period() -> usize {
@@ -43,6 +50,12 @@ fn default_ma_period() -> usize {
 fn default_roc_period() -> usize {
     5
 }
+fn default_rsi_period() -> usize {
+    14
+}
+fn default_rv_period() -> usize {
+    20
+}
 
 #[derive(Serialize)]
 pub struct IndicatorResponse {
@@ -62,6 +75,23 @@ pub struct IndicatorScalars {
     pub bollinger: Option<BollingerBands>,
     /// Percent change over `roc_period` bars — Opus's risk-mood input.
     pub roc_pct: Option<f64>,
+    pub rsi: Option<f64>,
+    /// Annualized close-to-close realized volatility over `rv_period` bars,
+    /// in percent like the exchange's implied volatility.
+    pub realized_vol_pct: Option<f64>,
+}
+
+/// Close-to-close realized volatility over the last `period` bars, as a
+/// percent. `None` until there are `period + 1` closes.
+fn realized_vol_pct(candles: &[crate::engine::types::Candle], period: usize) -> Option<f64> {
+    if period < 2 || candles.len() < period + 1 {
+        return None;
+    }
+    let closes: Vec<f64> = candles[candles.len() - period - 1..]
+        .iter()
+        .map(|c| c.mid.close)
+        .collect();
+    vol::realized_vol_close(&closes).map(|v| v * 100.0)
 }
 
 pub async fn get_indicators(
@@ -108,6 +138,8 @@ pub async fn get_indicators(
         ma_deviation_pct: indicators::ma_deviation_pct(candles, params.ma_period),
         bollinger: indicators::bollinger(candles, params.bollinger_period, params.bollinger_std),
         roc_pct: indicators::rate_of_change(candles, params.roc_period),
+        rsi: indicators::rsi(candles, params.rsi_period),
+        realized_vol_pct: realized_vol_pct(candles, params.rv_period),
     };
 
     Ok(Json(IndicatorResponse {

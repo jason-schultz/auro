@@ -83,6 +83,7 @@ defmodule OpusWeb do
       import Phoenix.HTML
       # Core UI components
       import OpusWeb.CoreComponents
+      import OpusWeb.Copy
 
       # Common modules used in templates
       alias Phoenix.LiveView.JS

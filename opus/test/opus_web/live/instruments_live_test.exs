@@ -12,9 +12,9 @@ defmodule OpusWeb.InstrumentsLiveTest do
 
     assert html =~ "Instruments"
     assert html =~ ~s(id="instrument-#{ry.id}")
-    assert html =~ "RY.TO"
-    assert html =~ "TSX"
-    assert html =~ "1 listings"
+    assert html =~ "Questrade RY.TO"
+    assert html =~ "TSX · CAD · equity"
+    assert html =~ "listings shown"
   end
 
   test "adds a listing from its spelling", %{conn: conn} do
@@ -45,14 +45,33 @@ defmodule OpusWeb.InstrumentsLiveTest do
     assert Instruments.feed_symbols(:options_chain) == []
   end
 
-  test "search narrows the table", %{conn: conn} do
+  test "search and the market chips narrow the table", %{conn: conn} do
     {:ok, ry} = Instruments.add("RY.TO", "equity")
     {:ok, eur} = Instruments.add("EUR_USD", "fx_major")
+    {:ok, spy} = Instruments.add("SPY", "etf")
     {:ok, view, _html} = live(conn, ~p"/instruments")
 
     html = view |> form("#search-form", search: "eur") |> render_change()
     assert html =~ ~s(id="instrument-#{eur.id}")
     refute html =~ ~s(id="instrument-#{ry.id}")
+
+    view |> form("#search-form", search: "") |> render_change()
+    html = view |> element("button", "Canada") |> render_click()
+    assert html =~ ~s(id="instrument-#{ry.id}")
+    refute html =~ ~s(id="instrument-#{spy.id}")
+    refute html =~ ~s(id="instrument-#{eur.id}")
+  end
+
+  test "retired listings hide until asked for", %{conn: conn} do
+    {:ok, ry} = Instruments.add("RY.TO", "equity")
+    {:ok, _} = Instruments.toggle(ry, :active)
+    {:ok, view, html} = live(conn, ~p"/instruments")
+
+    refute html =~ ~s(id="instrument-#{ry.id}")
+    assert html =~ "Nothing matches."
+
+    html = view |> element("input[phx-click=inactive]") |> render_click()
+    assert html =~ ~s(id="instrument-#{ry.id}")
   end
 
   # config/test.exs points the Auro client at a closed port.

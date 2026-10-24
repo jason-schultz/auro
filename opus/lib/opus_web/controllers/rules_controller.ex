@@ -2,7 +2,7 @@ defmodule OpusWeb.RulesController do
   use OpusWeb, :controller
 
   alias Opus.Repo
-  alias Opus.Trading.{LiveStrategy, Rule}
+  alias Opus.Trading.{LiveStrategy, Rule, Strategies}
 
   import Ecto.Query
 
@@ -46,7 +46,7 @@ defmodule OpusWeb.RulesController do
   end
 
   defp to_strategy_row(row) do
-    {composite_regime, frames} = parse_regime_inputs(row.regime_inputs)
+    {composite_regime, frames} = Strategies.regime_summary(row.regime_inputs)
 
     %{
       live_strategy_id: row.live_strategy_id,
@@ -60,41 +60,6 @@ defmodule OpusWeb.RulesController do
       frames: frames
     }
   end
-
-  defp parse_regime_inputs(nil), do: {nil, []}
-
-  defp parse_regime_inputs(regime_inputs) do
-    composite = regime_inputs |> value_for([:composite, "composite"]) |> normalize_regime()
-
-    frames =
-      regime_inputs
-      |> value_for([:frames, "frames"])
-      |> case do
-        list when is_list(list) ->
-          Enum.map(list, fn frame ->
-            %{
-              frame: value_for(frame, [:frame, "frame"]),
-              regime: frame |> value_for([:regime, "regime"]) |> normalize_regime(),
-              adx: value_for(frame, [:adx, "adx"])
-            }
-          end)
-
-        _ ->
-          []
-      end
-
-    {composite, frames}
-  end
-
-  defp value_for(map, keys) when is_map(map) do
-    Enum.find_value(keys, fn key -> Map.get(map, key) end)
-  end
-
-  defp value_for(_value, _keys), do: nil
-
-  defp normalize_regime(nil), do: nil
-  defp normalize_regime(regime) when is_atom(regime), do: Atom.to_string(regime)
-  defp normalize_regime(regime), do: regime
 
   defp curator_enabled? do
     case Repo.query("SELECT to_regclass('public.trading_config')") do

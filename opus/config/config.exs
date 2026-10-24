@@ -38,6 +38,9 @@ config :opus, Oban,
        # Option chain snapshots from Questrade after the close (02:00 UTC is
        # 21:00/22:00 New York): the quotes are the day's closing values.
        {"0 2 * * 2-6", Opus.MarketData.OptionsChainWorker},
+       # Half an hour after the snapshot: which of tonight's contracts are
+       # worth a look (Options page ideas).
+       {"30 2 * * 2-6", Opus.Options.ScanWorker},
        # 20:30 UTC is before the 17:00 New York rollover (21:00/22:00 UTC) the
        # day's financing rates apply to.
        {"30 20 * * 1-5", Opus.MarketData.FinancingSnapshotWorker},
@@ -62,6 +65,8 @@ config :opus, Opus.MarketData.QuestradeBarsWorker,
 # for the next weeks on the listings flagged `feed_options_chain`, quoted
 # nightly with the exchange greeks. Flag only names the owner would accept
 # being assigned.
+config :opus, Opus.Options.ScanWorker, enabled: true
+
 config :opus, Opus.MarketData.OptionsChainWorker,
   enabled: true,
   max_days_to_expiry: 45,

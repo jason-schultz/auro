@@ -7,7 +7,14 @@ defmodule Opus.Options do
   (`POST /api/options/scenarios`). All option math lives in Rust.
   """
 
+  import Ecto.Query
+
   alias Opus.Auro.Client
+  alias Opus.Options.Idea
+  alias Opus.Repo
+
+  # Strikes shown either side of the spot price when picking from a chain.
+  @strikes_each_side 8
 
   @strategies [
     {"cash_secured_put", "Sell a put (cash-secured)", "put", "sell"},
@@ -19,6 +26,195 @@ defmodule Opus.Options do
   @doc "Select options for the form: `{label, value}`."
   @spec strategy_options() :: [{String.t(), String.t()}]
   def strategy_options, do: for({value, label, _, _} <- @strategies, do: {label, value})
+
+  @doc "Whether a strategy sells the option (so its premium is the bid) or buys it (the ask)."
+  @spec side(String.t()) :: :sell | :buy
+  def side(strategy) do
+    case Enum.find(@strategies, &(elem(&1, 0) == strategy)) do
+      {_, _, _, "sell"} -> :sell
+      _ -> :buy
+    end
+  end
+
+  @doc "The single-leg strategy for a side and kind: selling a put is the cash-secured put, and so on."
+  @spec strategy_for(:buy | :sell, String.t()) :: String.t()
+  def strategy_for(side, kind) do
+    side = if side == :sell, do: "sell", else: "buy"
+
+    case Enum.find(@strategies, fn {_, _, k, s} -> k == kind and s == side end) do
+      {value, _, _, _} -> value
+      nil -> "cash_secured_put"
+    end
+  end
+
+  @doc "The option kind a strategy trades: `\"put\"` or `\"call\"`."
+  @spec kind(String.t()) :: String.t()
+  def kind(strategy) do
+    case Enum.find(@strategies, &(elem(&1, 0) == strategy)) do
+      {_, _, kind, _} -> kind
+      nil -> "put"
+    end
+  end
+
+  @doc """
+  Underlyings with a stored option chain, each with when its latest
+  snapshot was taken: the nightly Questrade capture for listings flagged
+  `feed_options_chain` on the Instruments page.
+  """
+  @spec underlyings() :: [%{symbol: String.t(), captured_at: NaiveDateTime.t()}]
+  def underlyings do
+    from(q in "option_quotes",
+      join: c in "option_contracts",
+      on: c.id == q.contract_id,
+      join: i in "instruments",
+      on: i.id == c.underlying_instrument_id,
+      group_by: [i.id, i.symbol, i.asset_class],
+      order_by: i.symbol,
+      select: %{
+        symbol: i.symbol,
+        instrument_id: i.id,
+        asset_class: i.asset_class,
+        captured_at: type(max(q.captured_at), :naive_datetime_usec)
+      }
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Every contract of either kind in the latest snapshot expiring between
+  `dte_min` and `dte_max` days from today, with its quote: the scan's raw
+  material.
+  """
+  @spec candidates(String.t(), pos_integer(), pos_integer()) :: [map()]
+  def candidates(symbol, dte_min, dte_max) do
+    today = Date.utc_today()
+    first = Date.add(today, dte_min)
+    last = Date.add(today, dte_max)
+
+    symbol
+    |> latest_quotes()
+    |> where([q, c, i], c.expiration_date >= ^first and c.expiration_date <= ^last)
+    |> order_by([q, c, i], [c.expiration_date, c.contract_type, c.strike])
+    |> select([q, c, i], %{
+      contract_id: c.id,
+      symbol: i.symbol,
+      kind: c.contract_type,
+      strike: c.strike,
+      expiration: c.expiration_date,
+      bid: q.bid,
+      ask: q.ask,
+      volatility: q.volatility,
+      delta: q.delta,
+      open_interest: q.open_interest,
+      spot: q.spot
+    })
+    |> Repo.all()
+    |> Enum.map(&Map.put(&1, :dte, Date.diff(&1.expiration, today)))
+  end
+
+  @doc "The most recent night's ideas, best score first, with the underlying's symbol."
+  @spec latest_ideas() :: {Date.t() | nil, [Idea.t()]}
+  def latest_ideas do
+    case Repo.one(from(i in Idea, select: max(i.scanned_on))) do
+      nil ->
+        {nil, []}
+
+      scanned_on ->
+        ideas =
+          from(i in Idea,
+            join: u in "instruments",
+            on: u.id == i.underlying_instrument_id,
+            where: i.scanned_on == ^scanned_on,
+            order_by: [asc: i.list, desc: i.score],
+            select: %{i | symbol: u.symbol}
+          )
+          |> Repo.all()
+
+        {scanned_on, ideas}
+    end
+  end
+
+  @spec set_idea_status(integer() | String.t(), String.t()) ::
+          {:ok, Idea.t()} | {:error, Ecto.Changeset.t()}
+  def set_idea_status(id, status) do
+    Idea |> Repo.get!(id) |> Idea.status_changeset(status) |> Repo.update()
+  end
+
+  @doc "Expiration dates in an underlying's latest snapshot, nearest first."
+  @spec expiries(String.t()) :: [Date.t()]
+  def expiries(symbol) do
+    symbol
+    |> latest_quotes()
+    |> group_by([q, c, i], c.expiration_date)
+    |> order_by([q, c, i], c.expiration_date)
+    |> select([q, c, i], c.expiration_date)
+    |> Repo.all()
+  end
+
+  @doc """
+  The strikes of one kind at one expiry from the latest snapshot, the
+  nearest to the spot price either side, each with the quote the page
+  shows, the spot and capture time they were taken at, and `at_the_money`
+  on the strike closest to the spot.
+  """
+  @spec chain(String.t(), Date.t(), String.t()) :: [map()]
+  def chain(symbol, %Date{} = expiration, kind) do
+    rows =
+      symbol
+      |> latest_quotes()
+      |> where([q, c, i], c.expiration_date == ^expiration and c.contract_type == ^kind)
+      |> order_by([q, c, i], c.strike)
+      |> select([q, c, i], %{
+        strike: c.strike,
+        bid: q.bid,
+        ask: q.ask,
+        last: q.last,
+        volatility: q.volatility,
+        delta: q.delta,
+        open_interest: q.open_interest,
+        spot: q.spot,
+        captured_at: type(q.captured_at, :naive_datetime_usec)
+      })
+      |> Repo.all()
+
+    case rows do
+      [] ->
+        []
+
+      [%{spot: spot} | _] ->
+        nearest =
+          rows |> Enum.map(&abs(&1.strike - spot)) |> Enum.with_index() |> Enum.min() |> elem(1)
+
+        first = max(nearest - @strikes_each_side, 0)
+
+        rows
+        |> Enum.with_index()
+        |> Enum.slice(first, 2 * @strikes_each_side + 1)
+        |> Enum.map(fn {row, i} -> Map.put(row, :at_the_money, i == nearest) end)
+    end
+  end
+
+  # Quotes from the latest capture of an underlying's chain: the snapshot
+  # worker writes one capture time per underlying per night.
+  defp latest_quotes(symbol) do
+    latest =
+      from(q in "option_quotes",
+        join: c in "option_contracts",
+        on: c.id == q.contract_id,
+        join: i in "instruments",
+        on: i.id == c.underlying_instrument_id,
+        where: i.symbol == ^symbol,
+        select: max(q.captured_at)
+      )
+
+    from(q in "option_quotes",
+      join: c in "option_contracts",
+      on: c.id == q.contract_id,
+      join: i in "instruments",
+      on: i.id == c.underlying_instrument_id,
+      where: i.symbol == ^symbol and q.captured_at == subquery(latest)
+    )
+  end
 
   @doc """
   Analyse the position described by the form params (string keys, string

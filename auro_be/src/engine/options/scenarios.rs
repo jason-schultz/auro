@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::black_scholes::{greeks, implied_vol, Greeks};
+use super::black_scholes::{greeks, implied_vol, price as model_price, Greeks};
 use super::income::{self, CONTRACT_MULTIPLIER};
 use super::vol::expected_move;
 use super::OptionKind;
@@ -119,7 +119,27 @@ pub struct Analysis {
     /// Position greeks in share terms (already × contracts × 100, signed).
     pub greeks: Option<Greeks>,
     pub scenarios: Vec<Scenario>,
+    /// P&L across the price grid at expiry, halfway there and today, for
+    /// the payoff chart. Only the expiry curve exists without a volatility.
+    pub curves: Vec<Curve>,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CurvePoint {
+    pub price: f64,
+    pub pnl: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Curve {
+    pub label: String,
+    pub days_to_expiry: f64,
+    pub points: Vec<CurvePoint>,
+}
+
+/// Price grid for the payoff curves: ±25% in 1% steps.
+const CURVE_STEPS: i32 = 25;
+const CURVE_STEP: f64 = 0.01;
 
 /// Price grid for the scenario table: ±20% in 2.5% steps, plus the strike
 /// and breakeven so the table shows where the outcome flips.
@@ -215,6 +235,33 @@ pub fn analyze(input: &Input) -> Analysis {
         })
         .collect();
 
+    let curve_prices: Vec<f64> = (-CURVE_STEPS..=CURVE_STEPS)
+        .map(|i| spot * (1.0 + f64::from(i) * CURVE_STEP))
+        .filter(|p| *p > 0.0)
+        .collect();
+    let curve = |label: &str, t_rem: f64| Curve {
+        label: label.to_string(),
+        days_to_expiry: t_rem * 365.0,
+        points: curve_prices
+            .iter()
+            .map(|&price| CurvePoint {
+                price,
+                pnl: match sigma {
+                    Some(s) if t_rem > 0.0 => mark_to_model(
+                        strategy, kind, price, strike, premium, cost_basis, shares, t_rem, rate,
+                        div_yield, s,
+                    ),
+                    _ => pnl_at(strategy, price, strike, premium, cost_basis, shares),
+                },
+            })
+            .collect(),
+    };
+    let mut curves = vec![curve("expiry", 0.0)];
+    if sigma.is_some() && t > 0.0 {
+        curves.push(curve("halfway", t / 2.0));
+        curves.push(curve("today", t));
+    }
+
     Analysis {
         strategy,
         spot,
@@ -239,7 +286,34 @@ pub fn analyze(input: &Input) -> Analysis {
         expected_move: expected,
         greeks: position_greeks,
         scenarios,
+        curves,
     }
+}
+
+/// Dollar P&L before expiry with the option marked at its model price:
+/// what the position would show if closed at `price` with `t_rem` years
+/// left. At `t_rem == 0` this equals [`pnl_at`].
+#[allow(clippy::too_many_arguments)]
+fn mark_to_model(
+    strategy: Strategy,
+    kind: OptionKind,
+    price: f64,
+    strike: f64,
+    premium: f64,
+    cost_basis: f64,
+    shares: f64,
+    t_rem: f64,
+    rate: f64,
+    div_yield: f64,
+    sigma: f64,
+) -> f64 {
+    let value = model_price(kind, price, strike, t_rem, rate, div_yield, sigma);
+    let per_share = match strategy {
+        Strategy::CashSecuredPut => premium - value,
+        Strategy::CoveredCall => premium - value + price - cost_basis,
+        Strategy::LongCall | Strategy::LongPut => value - premium,
+    };
+    per_share * shares
 }
 
 fn outcome_at(strategy: Strategy, price: f64, strike: f64) -> Outcome {
@@ -401,6 +475,56 @@ mod tests {
         let a = analyze(&i);
         assert!(a.sigma.is_none() && a.probability_itm.is_none() && a.greeks.is_none());
         assert!(a.scenarios.iter().any(|s| s.outcome == Outcome::Assigned));
+    }
+
+    #[test]
+    fn curves_start_near_zero_today_and_meet_the_expiry_payoff() {
+        // Premium at the model's own price, so today's curve is flat at spot.
+        let mut i = input(OptionKind::Call, Side::Buy);
+        i.premium = model_price(
+            OptionKind::Call,
+            i.spot,
+            i.strike,
+            i.t,
+            i.rate,
+            i.div_yield,
+            0.18,
+        );
+        let a = analyze(&i);
+
+        assert_eq!(
+            a.curves
+                .iter()
+                .map(|c| c.label.as_str())
+                .collect::<Vec<_>>(),
+            ["expiry", "halfway", "today"]
+        );
+        let today = a.curves.iter().find(|c| c.label == "today").unwrap();
+        let at_spot = today
+            .points
+            .iter()
+            .find(|p| (p.price - i.spot).abs() < 1e-9)
+            .unwrap();
+        assert!(at_spot.pnl.abs() < 0.01, "today at spot: {}", at_spot.pnl);
+        assert!((today.days_to_expiry - 30.0).abs() < 1e-9);
+
+        // Expiry curve is the hockey stick: zero time value, so a deep ITM
+        // point equals intrinsic minus premium, per share times 100.
+        let expiry = &a.curves[0];
+        let deep = expiry.points.last().unwrap();
+        let expected = ((deep.price - i.strike).max(0.0) - i.premium) * 100.0;
+        assert!((deep.pnl - expected).abs() < 1e-6);
+        assert_eq!(expiry.points.len(), 51);
+        assert!(expiry.points.windows(2).all(|w| w[0].price < w[1].price));
+
+        // Without a volatility only the expiry curve can be drawn.
+        let mut blind = input(OptionKind::Put, Side::Sell);
+        blind.sigma = None;
+        blind.premium = 0.0001; // too cheap for the solver → no sigma
+        let b = analyze(&blind);
+        if b.sigma.is_none() {
+            assert_eq!(b.curves.len(), 1);
+        }
     }
 
     #[test]

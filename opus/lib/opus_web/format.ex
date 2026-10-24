@@ -39,6 +39,61 @@ defmodule OpusWeb.Format do
   @spec clock(DateTime.t()) :: String.t()
   def clock(%DateTime{} = at), do: Calendar.strftime(at, "%H:%M")
 
+  @doc "Day and clock time, e.g. `Oct 23 17:31`; `nil` renders as an em dash."
+  @spec stamp(DateTime.t() | NaiveDateTime.t() | nil) :: String.t()
+  def stamp(nil), do: "—"
+  def stamp(at), do: Calendar.strftime(at, "%b %-d %H:%M")
+
+  @doc """
+  A traded price with the decimals its size suggests and grouped thousands:
+  `price(29206.7)` → `"29,206.7"`, `price(1.08543)` → `"1.08543"`.
+  """
+  @spec price(number() | nil) :: String.t()
+  def price(nil), do: "—"
+
+  def price(value) when is_number(value) do
+    decimals =
+      cond do
+        abs(value) >= 1000 -> 1
+        abs(value) >= 10 -> 2
+        true -> 5
+      end
+
+    sign = if value < 0, do: "−", else: ""
+    text = value |> abs() |> :erlang.float_to_binary(decimals: decimals)
+    [whole, fraction] = String.split(text, ".")
+    sign <> group_thousands(String.to_integer(whole)) <> "." <> fraction
+  end
+
+  @doc "A signed percentage from a share of one: `signed_pct(0.0069)` → `\"+0.7%\"`."
+  @spec signed_pct(number() | nil) :: String.t()
+  def signed_pct(nil), do: "—"
+  def signed_pct(share) when share < 0, do: "−" <> pct(abs(share))
+  def signed_pct(share), do: "+" <> pct(share)
+
+  @doc "How long between two instants, e.g. `5h 30m`; the end defaults to now."
+  @spec held(DateTime.t() | nil, DateTime.t() | nil) :: String.t()
+  def held(nil, _to), do: "—"
+
+  def held(from, to) do
+    minutes = DateTime.diff(to || DateTime.utc_now(), from, :minute)
+
+    cond do
+      minutes >= 2880 -> "#{div(minutes, 1440)}d"
+      minutes >= 60 -> "#{div(minutes, 60)}h #{rem(minutes, 60)}m"
+      true -> "#{minutes}m"
+    end
+  end
+
+  @doc "A ratio such as a Sharpe: `num(1.0345)` → `\"1.03\"`; `nil` renders as an em dash."
+  @spec num(number() | nil, non_neg_integer()) :: String.t()
+  def num(value, decimals \\ 2)
+  def num(nil, _decimals), do: "—"
+  def num(value, _decimals) when is_integer(value), do: Integer.to_string(value)
+
+  def num(value, decimals) when is_float(value),
+    do: :erlang.float_to_binary(value, decimals: decimals)
+
   defp group_thousands(whole) when is_integer(whole) do
     whole
     |> Integer.to_string()

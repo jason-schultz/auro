@@ -9,6 +9,8 @@ defmodule OpusWeb.OptionsLiveTest do
     {:ok, _view, html} = live(conn, ~p"/options")
 
     assert html =~ "Options"
+    # The WallStreetBets wording is rendered beside the serious wording; the theme picks one.
+    assert html =~ "The Casino"
     assert html =~ "Sell a put (cash-secured)"
     assert html =~ "Show me what happens"
   end

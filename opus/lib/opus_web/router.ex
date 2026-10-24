@@ -17,6 +17,8 @@ defmodule OpusWeb.Router do
   scope "/", OpusWeb do
     pipe_through(:browser)
 
+    live("/strategies", StrategiesLive)
+    live("/strategies/:id", StrategyLive)
     live("/accounts", AccountsLive)
     live("/journal", JournalLive)
     live("/options", OptionsLive)

@@ -18,15 +18,33 @@ defmodule Opus.Instruments do
   @type feed :: :questrade_bars | :massive_daily | :options_chain
 
   @canadian_suffixes %{"TO" => "TSX", "VN" => "TSXV", "CN" => "CNSX"}
+  @canadian_exchanges Map.values(@canadian_suffixes)
 
-  @doc "Every listing, exchange then symbol, narrowed by `:search` when given."
+  @doc """
+  Every listing, exchange then symbol. Options narrow it: `:search` matches
+  any spelling, `:group` is `"oanda"`, `"canada"` or `"us"`, and
+  `active_only: true` hides retired listings.
+  """
   @spec list(keyword()) :: [Instrument.t()]
   def list(opts \\ []) do
     Instrument
     |> search(opts[:search])
+    |> group(opts[:group])
+    |> active(opts[:active_only])
     |> order_by([i], asc: i.exchange, asc: i.symbol)
     |> Repo.all()
   end
+
+  defp group(query, "oanda"), do: where(query, [i], i.exchange == "OANDA")
+  defp group(query, "canada"), do: where(query, [i], i.exchange in ^@canadian_exchanges)
+
+  defp group(query, "us"),
+    do: where(query, [i], i.exchange != "OANDA" and i.exchange not in ^@canadian_exchanges)
+
+  defp group(query, _), do: query
+
+  defp active(query, true), do: where(query, [i], i.active)
+  defp active(query, _), do: query
 
   defp search(query, nil), do: query
   defp search(query, ""), do: query

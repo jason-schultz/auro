@@ -11,6 +11,7 @@ defmodule OpusWeb.AccountsLive do
   import OpusWeb.Format
 
   alias Opus.Accounts
+  alias Opus.Auro.Client
 
   @impl true
   def mount(_params, _session, socket) do
@@ -48,9 +49,7 @@ defmodule OpusWeb.AccountsLive do
     end
   end
 
-  defp describe({:http_error, status, _body}), do: "Auro answered with status #{status}."
-  defp describe(%{reason: :econnrefused}), do: "Auro is not running."
-  defp describe(_), do: "Could not reach Auro."
+  defp describe(reason), do: Client.describe_error(reason)
 
   @impl true
   def render(assigns) do
@@ -58,7 +57,7 @@ defmodule OpusWeb.AccountsLive do
     <Layouts.app flash={@flash}>
       <div class="flex flex-col gap-10">
         <header class="flex flex-wrap items-baseline justify-between gap-3">
-          <h1 class="text-[22px] font-semibold tracking-tight">Accounts</h1>
+          <h1 class="text-[22px] font-semibold tracking-tight"><.t s="Accounts" wsb="The bag" /></h1>
           <div class="flex items-baseline gap-4 text-[13px] text-muted">
             <span :if={@as_of}>Updated {clock(@as_of)}</span>
             <button
@@ -88,7 +87,9 @@ defmodule OpusWeb.AccountsLive do
             {broker.broker} is offline{if broker.error, do: ": #{broker.error}", else: "."}
           </p>
         <% else %>
-          <p :if={!@error} class="text-[13px] text-muted">Loading balances…</p>
+          <p :if={!@error} class="text-[13px] text-muted">
+            <.t s="Loading balances…" wsb="Counting tendies…" />
+          </p>
         <% end %>
       </div>
     </Layouts.app>
@@ -101,7 +102,10 @@ defmodule OpusWeb.AccountsLive do
     ~H"""
     <section class="flex flex-col gap-[18px]">
       <div class="flex flex-col gap-1">
-        <span class="text-[13px] text-muted">Everything, in CAD</span>
+        <span class="text-[13px] text-muted"><.t
+          s="Everything, in CAD"
+          wsb="Net worth in maple tendies (CAD)"
+        /></span>
         <span class="text-5xl font-semibold leading-[1.05] tracking-tight">
           {money(@overview.total_cad)}
         </span>
@@ -128,10 +132,10 @@ defmodule OpusWeb.AccountsLive do
     ~H"""
     <section class="flex flex-col">
       <div class="grid grid-cols-[minmax(0,2.2fr)_minmax(0,1.2fr)_repeat(2,minmax(0,1fr))] gap-4 border-b border-base-300 pb-2.5 text-xs text-muted">
-        <span>Account</span>
-        <span>Source</span>
-        <span class="text-right">Cash</span>
-        <span class="text-right">Value</span>
+        <span><.t s="Account" wsb="Bag" /></span>
+        <span><.t s="Source" wsb="Source" /></span>
+        <span class="text-right"><.t s="Cash" wsb="Dry powder" /></span>
+        <span class="text-right"><.t s="Value" wsb="Worth" /></span>
       </div>
       <div
         :for={account <- @accounts}
@@ -168,17 +172,29 @@ defmodule OpusWeb.AccountsLive do
   defp positions(assigns) do
     ~H"""
     <section class="flex flex-col gap-3">
-      <span class="text-[15px] font-semibold">{@table.account} positions</span>
+      <span class="text-[15px] font-semibold">{@table.account} <.t s="positions" wsb="bags" /></span>
       <div class="overflow-x-auto rounded-box border border-base-300 bg-base-200 px-4 py-1.5">
         <table class="w-full min-w-[560px] border-collapse text-sm">
           <thead>
             <tr class="text-left text-xs text-muted">
-              <th class="border-b border-base-300 py-2.5 font-medium">Symbol</th>
-              <th class="border-b border-base-300 py-2.5 text-right font-medium">Shares</th>
-              <th class="border-b border-base-300 py-2.5 text-right font-medium">Avg cost</th>
-              <th class="border-b border-base-300 py-2.5 text-right font-medium">Price</th>
-              <th class="border-b border-base-300 py-2.5 text-right font-medium">Value</th>
-              <th class="border-b border-base-300 py-2.5 text-right font-medium">Gain</th>
+              <th class="border-b border-base-300 py-2.5 font-medium">
+                <.t s="Symbol" wsb="Ticker" />
+              </th>
+              <th class="border-b border-base-300 py-2.5 text-right font-medium">
+                <.t s="Shares" wsb="Shares" />
+              </th>
+              <th class="border-b border-base-300 py-2.5 text-right font-medium">
+                <.t s="Avg cost" wsb="Cost basis" />
+              </th>
+              <th class="border-b border-base-300 py-2.5 text-right font-medium">
+                <.t s="Price" wsb="Price" />
+              </th>
+              <th class="border-b border-base-300 py-2.5 text-right font-medium">
+                <.t s="Value" wsb="Worth" />
+              </th>
+              <th class="border-b border-base-300 py-2.5 text-right font-medium">
+                <.t s="Gain" wsb="Tendies" />
+              </th>
             </tr>
           </thead>
           <tbody>

@@ -11,6 +11,18 @@ defmodule Opus.Auro.Client do
   def base_url, do: Application.get_env(:opus, :auro_base_url, @default_base_url)
 
   @doc """
+  One sentence a page can show for a failed call: the engine's own message
+  when it sent one, otherwise its status, otherwise that it is unreachable.
+  """
+  @spec describe_error(term()) :: String.t()
+  def describe_error({:http_error, _status, %{"error" => message}}) when is_binary(message),
+    do: message
+
+  def describe_error({:http_error, status, _body}), do: "Auro answered with status #{status}."
+  def describe_error(%{reason: :econnrefused}), do: "Auro is not running."
+  def describe_error(_), do: "Could not reach Auro."
+
+  @doc """
   Remove a trade from Rust's in-memory open_positions map.
 
   Called by the reconciler after detecting an OANDA-side close, to keep
@@ -71,7 +83,9 @@ defmodule Opus.Auro.Client do
         :bollinger_std,
         :atr_period,
         :ma_period,
-        :roc_period
+        :roc_period,
+        :rsi_period,
+        :rv_period
       ])
       |> Enum.into(%{})
 
@@ -174,6 +188,44 @@ defmodule Opus.Auro.Client do
     client()
     |> Req.put(url: "/api/live/strategies/#{id}", json: attrs)
     |> handle_response()
+  end
+
+  @doc """
+  Every live strategy with the statistics Rust aggregates for it: backtest,
+  out-of-sample, k-fold and live. `%{"strategies" => [...], "count" => n}`.
+  """
+  @spec list_live_strategies() :: {:ok, map()} | {:error, any()}
+  def list_live_strategies do
+    # A page read: when the engine is down the page says so at once rather
+    # than after the retry budget.
+    client() |> Req.get(url: "/api/live/strategies", retry: false) |> handle_response()
+  end
+
+  @doc """
+  Flip a live strategy's enabled switch. Rust owns the switch because it
+  loads or unloads the instrument's candle buffers as a side effect.
+  Returns `%{"id" => id, "enabled" => bool, "curator_mode" => mode}`.
+  """
+  @spec toggle_live_strategy(String.t()) :: {:ok, map()} | {:error, any()}
+  def toggle_live_strategy(id) when is_binary(id) do
+    client() |> Req.post(url: "/api/live/strategies/#{id}/toggle", json: %{}) |> handle_response()
+  end
+
+  @doc "Hand a pinned strategy back to the curator (`curator_mode` → auto)."
+  @spec set_live_strategy_curator_auto(String.t()) :: {:ok, map()} | {:error, any()}
+  def set_live_strategy_curator_auto(id) when is_binary(id) do
+    client()
+    |> Req.post(url: "/api/live/strategies/#{id}/curator/auto", json: %{})
+    |> handle_response()
+  end
+
+  @doc """
+  Delete a live strategy. Rust refuses with 400 while the strategy has
+  open trades, and unloads the instrument's buffers if nothing else needs them.
+  """
+  @spec delete_live_strategy(String.t()) :: {:ok, map()} | {:error, any()}
+  def delete_live_strategy(id) when is_binary(id) do
+    client() |> Req.delete(url: "/api/live/strategies/#{id}") |> handle_response()
   end
 
   @doc """

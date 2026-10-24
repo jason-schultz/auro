@@ -2,26 +2,21 @@ defmodule OpusWeb.CircuitBreakerController do
   use OpusWeb, :controller
 
   alias Opus.Repo
-  alias Opus.Trading.RulesEngine
+  alias Opus.Trading.Strategies
   alias Opus.Trading.Suspension
 
   import Ecto.Query
 
   def reset(conn, %{"id" => strategy_id}) do
-    with {:ok, strategy_uuid} <- cast_uuid(strategy_id),
-         {cleared_count, _} when cleared_count > 0 <- clear_open_suspensions(strategy_uuid) do
-      RulesEngine.recompute()
-      json(conn, %{strategy_id: strategy_uuid, cleared_count: cleared_count})
-    else
-      :error ->
-        conn
-        |> put_status(400)
-        |> json(%{error: "Invalid strategy id"})
+    case Strategies.reset_suspension(strategy_id) do
+      {:ok, cleared_count} ->
+        json(conn, %{strategy_id: strategy_id, cleared_count: cleared_count})
 
-      {0, _} ->
-        conn
-        |> put_status(404)
-        |> json(%{error: "No active suspension found"})
+      {:error, :invalid_id} ->
+        conn |> put_status(400) |> json(%{error: "Invalid strategy id"})
+
+      {:error, :none_open} ->
+        conn |> put_status(404) |> json(%{error: "No active suspension found"})
     end
   end
 
@@ -47,27 +42,5 @@ defmodule OpusWeb.CircuitBreakerController do
       end)
 
     json(conn, %{suspensions: suspensions})
-  end
-
-  defp clear_open_suspensions(strategy_id) do
-    now = DateTime.utc_now()
-
-    from(s in Suspension,
-      where: s.live_strategy_id == ^strategy_id and is_nil(s.cleared_at)
-    )
-    |> Repo.update_all(
-      set: [
-        cleared_at: now,
-        cleared_by: "manual",
-        updated_at: now
-      ]
-    )
-  end
-
-  defp cast_uuid(strategy_id) do
-    case Ecto.UUID.cast(strategy_id) do
-      {:ok, uuid} -> {:ok, uuid}
-      :error -> :error
-    end
   end
 end

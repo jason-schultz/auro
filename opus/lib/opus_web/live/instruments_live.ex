@@ -1,15 +1,19 @@
 defmodule OpusWeb.InstrumentsLive do
   @moduledoc """
-  Instruments page: the security master as a table. Search it, add a
-  listing by its vendor spelling, and tick which feeds store data for it.
-  The feed workers read these flags on their next run.
+  Instruments page: the security master. Search it, narrow it to one market
+  or to the live listings, add a listing by its vendor spelling, and tick
+  which feeds store data for it. The feed workers read these flags on their
+  next run.
   """
   use OpusWeb, :live_view
 
+  alias Opus.Auro.Client
   alias Opus.Instruments
   alias Opus.Instruments.Instrument
 
   @add_defaults %{"spelling" => "", "asset_class" => "equity"}
+
+  @groups [{"all", "All"}, {"oanda", "OANDA"}, {"canada", "Canada"}, {"us", "US"}]
 
   @feeds [
     {:feed_questrade_bars, "Questrade bars"},
@@ -24,6 +28,9 @@ defmodule OpusWeb.InstrumentsLive do
      |> assign(
        page_title: "Instruments",
        search: "",
+       group: "all",
+       show_inactive: false,
+       groups: @groups,
        add_form: to_form(@add_defaults, as: :listing),
        feeds: @feeds,
        asset_classes: Instrument.asset_classes(),
@@ -35,6 +42,14 @@ defmodule OpusWeb.InstrumentsLive do
   @impl true
   def handle_event("search", %{"search" => term}, socket) do
     {:noreply, socket |> assign(search: term) |> reload()}
+  end
+
+  def handle_event("group", %{"group" => group}, socket) do
+    {:noreply, socket |> assign(group: group) |> reload()}
+  end
+
+  def handle_event("inactive", _params, socket) do
+    {:noreply, socket |> assign(show_inactive: !socket.assigns.show_inactive) |> reload()}
   end
 
   def handle_event("toggle", %{"id" => id, "flag" => flag}, socket) do
@@ -79,12 +94,17 @@ defmodule OpusWeb.InstrumentsLive do
          |> reload()}
 
       {:error, reason} ->
-        {:noreply, socket |> put_flash(:error, describe(reason)) |> assign(busy: false)}
+        {:noreply,
+         socket |> put_flash(:error, Client.describe_error(reason)) |> assign(busy: false)}
     end
   end
 
   defp reload(socket) do
-    assign(socket, instruments: Instruments.list(search: socket.assigns.search))
+    %{search: search, group: group, show_inactive: show_inactive} = socket.assigns
+
+    assign(socket,
+      instruments: Instruments.list(search: search, group: group, active_only: !show_inactive)
+    )
   end
 
   defp describe(%Ecto.Changeset{} = changeset) do
@@ -93,88 +113,147 @@ defmodule OpusWeb.InstrumentsLive do
     |> Enum.map_join("; ", fn {field, messages} -> "#{field} #{Enum.join(messages, ", ")}" end)
   end
 
-  defp describe({:http_error, _status, %{"error" => message}}), do: message
-  defp describe({:http_error, status, _body}), do: "Auro answered with status #{status}."
-  defp describe(%{reason: :econnrefused}), do: "Auro is not running."
-  defp describe(_), do: "Could not reach Auro."
-
   @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash}>
-      <div class="flex flex-col gap-8">
-        <header class="flex flex-col gap-1">
-          <h1 class="text-[22px] font-semibold tracking-tight">Instruments</h1>
+      <div class="flex flex-col gap-6">
+        <header class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
+          <div class="flex items-baseline gap-3">
+            <h1 class="text-[22px] font-semibold tracking-tight">
+              <.t s="Instruments" wsb="Tickers" />
+            </h1>
+            <span class="text-[13px] text-muted">{length(@instruments)}
+            <.t s="listings shown" wsb="tickers in the book" /></span>
+          </div>
           <p class="text-[13px] text-muted">
-            Every listing Auro knows, and which feeds store data for it. Changes apply on the next run.
+            <.t
+              s="Every listing Auro knows and which feeds store data for it. Changes apply on the next run."
+              wsb="Every ticker Auro knows and which feeds hoard data for it. Changes land on the next run."
+            />
           </p>
         </header>
 
-        <div class="flex flex-wrap items-end gap-4">
-          <form id="search-form" phx-change="search" phx-submit="search" class="grow">
+        <div class="flex flex-wrap items-center gap-x-5 gap-y-3">
+          <form id="search-form" phx-change="search" phx-submit="search">
             <input
               type="search"
               name="search"
               value={@search}
-              placeholder="Search symbol or vendor name"
-              class="input input-sm w-full max-w-xs"
+              placeholder="Search any spelling"
+              aria-label="Search instruments"
+              class="input w-56"
               phx-debounce="200"
             />
           </form>
+          <div role="group" aria-label="Market" class="flex flex-wrap gap-1.5">
+            <button
+              :for={{group, label} <- @groups}
+              type="button"
+              phx-click="group"
+              phx-value-group={group}
+              aria-pressed={to_string(group == @group)}
+              class={[
+                "rounded-field border px-3 py-1.5 text-[13px] font-medium",
+                if(group == @group,
+                  do: "border-primary text-primary",
+                  else: "border-base-300 text-muted hover:text-base-content"
+                )
+              ]}
+            >
+              {label}
+            </button>
+          </div>
+          <label class="flex cursor-pointer items-center gap-2 text-[13px] text-muted">
+            <input
+              type="checkbox"
+              class="checkbox checkbox-sm"
+              checked={@show_inactive}
+              phx-click="inactive"
+            /> <.t s="Show retired" wsb="Show the dead ones" />
+          </label>
+        </div>
 
-          <.form for={@add_form} id="add-form" phx-submit="add" class="flex items-end gap-2">
+        <div class="flex flex-wrap items-end justify-between gap-x-6 gap-y-3 rounded-box border border-base-300 bg-base-200 px-5 py-4">
+          <.form for={@add_form} id="add-form" phx-submit="add" class="flex flex-wrap items-end gap-3">
             <.input
               field={@add_form[:spelling]}
-              label="Add listing"
+              label="Add a listing"
               placeholder="RY.TO, SPY, EUR_USD"
-              class="input input-sm"
+              class="input w-48"
             />
             <.input
               field={@add_form[:asset_class]}
               type="select"
               label="Class"
               options={@asset_classes}
-              class="select select-sm"
+              class="select w-36"
             />
-            <button type="submit" class="btn btn-sm">Add</button>
+            <.button class="mb-2">Add</.button>
           </.form>
-
-          <button type="button" class="btn btn-sm" phx-click="enrich" disabled={@busy}>
-            {if @busy, do: "Asking Questrade…", else: "Identify via Questrade"}
-          </button>
+          <div class="mb-2 flex flex-col items-end gap-1">
+            <button
+              type="button"
+              phx-click="enrich"
+              disabled={@busy}
+              class="text-[14px] font-medium text-primary hover:brightness-110 disabled:opacity-60"
+            >
+              <span :if={@busy}>Asking Questrade…</span>
+              <.t :if={!@busy} s="Identify via Questrade" wsb="Ask Questrade who dis" />
+            </button>
+            <span class="text-[12px] text-muted">fills the symbol id, exchange and currency for new listings</span>
+          </div>
         </div>
 
-        <p class="text-[12px] text-muted">{length(@instruments)} listings</p>
+        <p :if={@instruments == []} class="text-[13px] text-muted">
+          <.t s="Nothing matches." wsb="Sir, this is a Wendy's." />
+        </p>
 
-        <div class="overflow-x-auto">
-          <table class="table table-sm">
+        <div
+          :if={@instruments != []}
+          class="overflow-x-auto rounded-box border border-base-300 bg-base-200 px-4 py-1.5"
+        >
+          <table class="w-full min-w-[760px] border-collapse text-sm">
             <thead>
-              <tr>
-                <th>Symbol</th>
-                <th>Exchange</th>
-                <th>Ccy</th>
-                <th>Class</th>
-                <th>OANDA</th>
-                <th>Questrade</th>
-                <th>Massive</th>
-                <th>Active</th>
-                <th :for={{_flag, label} <- @feeds}>{label}</th>
+              <tr class="text-left text-xs text-muted">
+                <th class="border-b border-base-300 py-2.5 font-medium">
+                  <.t s="Listing" wsb="Ticker" />
+                </th>
+                <th class="border-b border-base-300 py-2.5 font-medium">
+                  <.t s="Vendor names" wsb="Aliases" />
+                </th>
+                <th class="border-b border-base-300 py-2.5 text-center font-medium">
+                  <.t s="Active" wsb="Alive" />
+                </th>
+                <th
+                  :for={{_flag, label} <- @feeds}
+                  class="border-b border-base-300 py-2.5 text-center font-medium"
+                >
+                  {label}
+                </th>
               </tr>
             </thead>
             <tbody>
-              <tr :for={i <- @instruments} id={"instrument-#{i.id}"}>
-                <td class="font-medium">{i.symbol}</td>
-                <td>{i.exchange}</td>
-                <td>{i.currency}</td>
-                <td>{i.asset_class}</td>
-                <td class="text-muted">{i.oanda_symbol}</td>
-                <td class="text-muted">
-                  {i.questrade_symbol}
-                  <span :if={i.questrade_symbol_id} class="text-[11px]">#{i.questrade_symbol_id}</span>
+              <tr
+                :for={i <- @instruments}
+                id={"instrument-#{i.id}"}
+                class={["border-b border-neutral last:border-b-0", !i.active && "opacity-60"]}
+              >
+                <td class="py-2.5 pr-4">
+                  <span class="font-medium">{i.symbol}</span>
+                  <span class="block text-[13px] text-muted">{i.exchange} · {i.currency} · {i.asset_class}</span>
                 </td>
-                <td class="text-muted">{i.massive_ticker}</td>
-                <td><.flag_box instrument={i} flag={:active} /></td>
-                <td :for={{flag, _label} <- @feeds}><.flag_box instrument={i} flag={flag} /></td>
+                <td class="py-2.5 pr-4 text-[13px] text-muted">
+                  <span :if={i.oanda_symbol} class="block">OANDA {i.oanda_symbol}</span>
+                  <span :if={i.questrade_symbol} class="block">
+                    Questrade {i.questrade_symbol}<span :if={i.questrade_symbol_id}> · #{i.questrade_symbol_id}</span>
+                  </span>
+                  <span :if={i.massive_ticker} class="block">Massive {i.massive_ticker}</span>
+                </td>
+                <td class="py-2.5 text-center"><.flag_box instrument={i} flag={:active} /></td>
+                <td :for={{flag, _label} <- @feeds} class="py-2.5 text-center">
+                  <.flag_box instrument={i} flag={flag} />
+                </td>
               </tr>
             </tbody>
           </table>
@@ -192,6 +271,7 @@ defmodule OpusWeb.InstrumentsLive do
     <input
       type="checkbox"
       class="checkbox checkbox-sm"
+      aria-label={"#{@flag} for #{@instrument.symbol}"}
       checked={Map.fetch!(@instrument, @flag)}
       phx-click="toggle"
       phx-value-id={@instrument.id}

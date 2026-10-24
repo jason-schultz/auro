@@ -10,8 +10,11 @@ defmodule OpusWeb.OptionsLive do
   use OpusWeb, :live_view
 
   import OpusWeb.Format
+  import OpusWeb.PayoffChart
 
+  alias Opus.Auro.Client
   alias Opus.Options
+  alias Opus.Options.Idea
 
   @defaults %{
     "underlying" => "SPY",
@@ -28,20 +31,153 @@ defmodule OpusWeb.OptionsLive do
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
-     assign(socket,
+     socket
+     |> assign(
        page_title: "Options",
        form: to_form(@defaults, as: :position),
        params: @defaults,
        analysis: nil,
        error: nil,
-       busy: false
-     )}
+       busy: false,
+       pane: "position",
+       filter: "all"
+     )
+     |> assign_chain(nil, nil)
+     |> assign_ideas()}
+  end
+
+  defp assign_ideas(socket) do
+    {scanned_on, ideas} = Options.latest_ideas()
+    assign(socket, ideas: ideas, ideas_scanned_on: scanned_on)
+  end
+
+  # The stored chain to pick from: the chosen underlying's expiries and the
+  # strikes of the current strategy's kind at the chosen expiry.
+  defp assign_chain(socket, underlying, expiration) do
+    underlyings = Options.underlyings()
+    underlying = underlying || List.first(Enum.map(underlyings, & &1.symbol))
+    expiries = if underlying, do: Options.expiries(underlying), else: []
+    expiration = if expiration in expiries, do: expiration, else: List.first(expiries)
+    kind = Options.kind(socket.assigns.params["strategy"])
+    rows = if underlying && expiration, do: Options.chain(underlying, expiration, kind), else: []
+
+    assign(socket,
+      chain: %{
+        underlyings: underlyings,
+        underlying: underlying,
+        expiries: expiries,
+        expiration: expiration,
+        kind: kind,
+        rows: rows,
+        spot: rows |> List.first() |> then(&(&1 && &1.spot)),
+        captured_at: rows |> List.first() |> then(&(&1 && &1.captured_at))
+      }
+    )
   end
 
   @impl true
   def handle_event("change", %{"position" => params}, socket) do
     params = Map.merge(socket.assigns.params, params)
-    {:noreply, assign(socket, params: params, form: to_form(params, as: :position))}
+    socket = assign(socket, params: params, form: to_form(params, as: :position))
+
+    # A new strategy may trade the other kind, so the picker follows it.
+    {:noreply,
+     assign_chain(socket, socket.assigns.chain.underlying, socket.assigns.chain.expiration)}
+  end
+
+  def handle_event("chain", %{"chain" => %{"underlying" => underlying} = chain}, socket) do
+    expiration =
+      if underlying == socket.assigns.chain.underlying,
+        do: parse_date(chain["expiration"]),
+        else: nil
+
+    # The kind picker changes the strategy's kind and keeps its side.
+    socket =
+      case chain["kind"] do
+        kind when kind in ["call", "put"] ->
+          put_strategy(
+            socket,
+            Options.strategy_for(Options.side(socket.assigns.params["strategy"]), kind)
+          )
+
+        _ ->
+          socket
+      end
+
+    {:noreply, assign_chain(socket, underlying, expiration)}
+  end
+
+  def handle_event("pane", %{"pane" => pane}, socket) when pane in ["ideas", "chain", "position"],
+    do: {:noreply, assign(socket, pane: pane)}
+
+  def handle_event("filter", %{"filter" => filter}, socket),
+    do: {:noreply, assign(socket, filter: filter)}
+
+  # Flip buy ↔ sell for the same kind and re-run with the matching side of the quote.
+  def handle_event("side", _params, socket) do
+    %{params: params, chain: chain} = socket.assigns
+    side = if Options.side(params["strategy"]) == :buy, do: :sell, else: :buy
+    strategy = Options.strategy_for(side, Options.kind(params["strategy"]))
+
+    same_chain = chain.underlying == params["underlying"]
+
+    premium =
+      case Enum.find(chain.rows, &(plain(&1.strike) == params["strike"])) do
+        %{bid: bid, ask: ask} when same_chain -> plain(if side == :sell, do: bid, else: ask)
+        _ -> params["premium"]
+      end
+
+    params = Map.merge(params, %{"strategy" => strategy, "premium" => premium})
+    socket = assign(socket, params: params, form: to_form(params, as: :position))
+    handle_event("analyze", %{"position" => params}, socket)
+  end
+
+  def handle_event("idea", %{"id" => id}, socket) do
+    %Idea{} = idea = Enum.find(socket.assigns.ideas, &(to_string(&1.id) == id))
+
+    params =
+      Map.merge(socket.assigns.params, %{
+        "underlying" => idea.symbol,
+        "strategy" => if(idea.kind == "put", do: "long_put", else: "long_call"),
+        "strike" => plain(idea.strike),
+        "expiration" => Date.to_iso8601(idea.expiration),
+        "premium" => plain(idea.ask),
+        "spot" => plain(idea.spot),
+        "sigma" => plain(idea.iv_pct)
+      })
+
+    socket =
+      assign(socket, params: params, form: to_form(params, as: :position), pane: "position")
+
+    handle_event("analyze", %{"position" => params}, socket)
+  end
+
+  def handle_event("dismiss", %{"id" => id}, socket) do
+    case Options.set_idea_status(id, "dismissed") do
+      {:ok, _} -> {:noreply, assign_ideas(socket)}
+      {:error, _} -> {:noreply, put_flash(socket, :error, "Could not update that idea.")}
+    end
+  end
+
+  def handle_event("use", %{"strike" => strike}, socket) do
+    %{chain: chain, params: params} = socket.assigns
+    row = Enum.find(chain.rows, &(plain(&1.strike) == strike))
+    premium = if Options.side(params["strategy"]) == :sell, do: row.bid, else: row.ask
+
+    params =
+      Map.merge(params, %{
+        "underlying" => chain.underlying,
+        "strike" => plain(row.strike),
+        "expiration" => Date.to_iso8601(chain.expiration),
+        "premium" => plain(premium),
+        "spot" => plain(row.spot),
+        "sigma" => plain(row.volatility)
+      })
+
+    socket =
+      assign(socket, params: params, form: to_form(params, as: :position), pane: "position")
+
+    handle_event("analyze", %{"position" => params}, socket)
   end
 
   def handle_event("analyze", %{"position" => params}, socket) do
@@ -54,25 +190,58 @@ defmodule OpusWeb.OptionsLive do
     end
   end
 
+  defp put_strategy(socket, strategy) do
+    params = Map.put(socket.assigns.params, "strategy", strategy)
+    assign(socket, params: params, form: to_form(params, as: :position))
+  end
+
   defp describe(message) when is_binary(message), do: message
-  defp describe({:http_error, _status, %{"error" => message}}), do: message
-  defp describe({:http_error, status, _body}), do: "Auro answered with status #{status}."
-  defp describe(%{reason: :econnrefused}), do: "Auro is not running."
-  defp describe(_), do: "Could not reach Auro."
+  defp describe(reason), do: Client.describe_error(reason)
+
+  defp parse_date(value) when is_binary(value) do
+    case Date.from_iso8601(value) do
+      {:ok, date} -> date
+      _ -> nil
+    end
+  end
+
+  defp parse_date(_), do: nil
+
+  # A number the way a person would type it into the form.
+  defp plain(nil), do: ""
+
+  defp plain(value) when is_float(value) and value == trunc(value),
+    do: Integer.to_string(trunc(value))
+
+  defp plain(value) when is_float(value), do: value |> Float.round(2) |> Float.to_string()
+  defp plain(value), do: to_string(value)
 
   @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash}>
-      <div class="flex flex-col gap-10">
-        <header class="flex flex-col gap-1">
-          <h1 class="text-[22px] font-semibold tracking-tight">Options</h1>
-          <p class="text-[13px] text-muted">
-            Describe one position and see what happens at expiry. Nothing here places a trade.
-          </p>
+      <div class="flex flex-col gap-5">
+        <header class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+          <div class="flex flex-wrap items-baseline gap-3">
+            <h1 class="text-[22px] font-semibold tracking-tight">
+              <.t s="Options" wsb="The Casino" />
+            </h1>
+            <span class="text-[13px] text-muted">
+              <.t
+                s={scan_line(@ideas_scanned_on, @ideas, @chain, "ideas")}
+                wsb={
+                  scan_line(@ideas_scanned_on, @ideas, @chain, "plays · the regards have assembled")
+                }
+              />
+            </span>
+          </div>
+          <span class="text-[13px] text-muted">
+            <.t
+              s="Nothing here places a trade."
+              wsb="Not financial advice. This page places nothing. It eats crayons."
+            />
+          </span>
         </header>
-
-        <.position_form form={@form} params={@params} busy={@busy} />
 
         <p
           :if={@error}
@@ -82,16 +251,499 @@ defmodule OpusWeb.OptionsLive do
           {@error}
         </p>
 
-        <%= if @analysis do %>
-          <.headline analysis={@analysis} />
-          <.outcomes analysis={@analysis} />
-          <.numbers analysis={@analysis} />
-          <.scenario_table analysis={@analysis} />
-        <% end %>
+        <div
+          role="group"
+          aria-label="Section"
+          class="grid grid-cols-3 gap-1 rounded-field border border-base-300 bg-base-200 p-1 sm:hidden"
+        >
+          <button
+            :for={
+              {pane, label, meme} <- [
+                {"ideas", "Ideas", "Plays"},
+                {"chain", "Chain", "The menu"},
+                {"position", "Position", "The play"}
+              ]
+            }
+            type="button"
+            phx-click="pane"
+            phx-value-pane={pane}
+            aria-pressed={to_string(pane == @pane)}
+            class={[
+              "min-h-10 rounded-field text-[14px]",
+              if(pane == @pane, do: "bg-base-300 font-medium", else: "text-muted")
+            ]}
+          >
+            <.t s={label} wsb={meme} />
+          </button>
+        </div>
+
+        <div class="flex flex-wrap items-start gap-5">
+          <aside
+            aria-label="Pick a contract"
+            class="flex w-full min-w-0 flex-col gap-4 sm:w-[420px] sm:flex-none"
+          >
+            <.ideas_box
+              ideas={@ideas}
+              scanned_on={@ideas_scanned_on}
+              filter={@filter}
+              params={@params}
+              class={pane_class(@pane, "ideas")}
+            />
+            <.chain_box chain={@chain} params={@params} class={pane_class(@pane, "chain")} />
+          </aside>
+
+          <section
+            aria-label="Position"
+            class={["min-w-0 flex-[999_1_520px] flex-col gap-4", pane_class(@pane, "position")]}
+          >
+            <%= if @analysis do %>
+              <.position analysis={@analysis} params={@params} form={@form} busy={@busy} />
+            <% else %>
+              <div class="flex flex-col gap-2 rounded-box border border-base-300 bg-base-200 px-5 py-4">
+                <span class="text-[15px] font-semibold"><.t
+                  s="Pick a contract"
+                  wsb="Pick a play, regard"
+                /></span>
+                <p class="text-[13px] text-muted">
+                  Choose an idea or a strike from the chain and the position shows up here: what you pay,
+                  the payoff by price, and what happens at expiry.
+                </p>
+              </div>
+            <% end %>
+            <details class="rounded-box border border-base-300 bg-base-200">
+              <summary class="cursor-pointer px-5 py-3 text-[14px] font-medium">
+                <.t s="Type a contract instead" wsb="Type your own degen contract" />
+              </summary>
+              <div class="px-5 pb-4">
+                <.position_form form={@form} params={@params} busy={@busy} />
+              </div>
+            </details>
+          </section>
+        </div>
       </div>
     </Layouts.app>
     """
   end
+
+  defp pane_class(pane, pane), do: "flex"
+  defp pane_class(_pane, _name), do: "hidden sm:flex"
+
+  defp scan_line(nil, _ideas, _chain, _noun), do: "no scan yet"
+
+  defp scan_line(scanned_on, ideas, chain, noun) do
+    captured =
+      if chain.captured_at, do: " · chains captured #{stamp(chain.captured_at)} UTC", else: ""
+
+    "#{Calendar.strftime(scanned_on, "%b %-d")} scan · #{length(ideas)} #{noun}#{captured}"
+  end
+
+  attr :ideas, :list, required: true
+  attr :scanned_on, :any, default: nil
+  attr :filter, :string, required: true
+  attr :params, :map, required: true
+  attr :class, :string, default: ""
+
+  defp ideas_box(assigns) do
+    live = Enum.filter(assigns.ideas, &(&1.status == "new"))
+    dip_buy = Enum.count(live, &(&1.list == "dip_buy"))
+
+    shown =
+      case assigns.filter do
+        "dip_buy" -> Enum.filter(live, &(&1.list == "dip_buy"))
+        "calls" -> Enum.filter(live, &(&1.kind == "call"))
+        "puts" -> Enum.filter(live, &(&1.kind == "put"))
+        _ -> live
+      end
+      |> Enum.sort_by(&{&1.list != "dip_buy", &1.iv_rv || 99.0})
+
+    assigns = assign(assigns, shown: shown, live: live, dip_buy: dip_buy)
+
+    ~H"""
+    <section class={[
+      "flex-col overflow-hidden rounded-box border border-base-300 bg-base-200",
+      @class
+    ]}>
+      <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-4 pt-3.5 pb-2.5">
+        <span class="text-[15px] font-semibold"><.t s="Ideas" wsb="Tonight's plays" /></span>
+        <span :if={@scanned_on} class="text-[12px] text-muted">
+          <.t
+            s="implied vs realized, at the money · cheapest first"
+            wsb="vol tax at the money · cheapest first"
+          />
+        </span>
+        <span :if={!@scanned_on} class="text-[12px] text-muted">no scan yet</span>
+      </div>
+      <div :if={@scanned_on} class="flex flex-wrap gap-1.5 px-4 pb-2.5">
+        <button
+          :for={
+            {filter, label, meme} <- [
+              {"all", "All #{length(@live)}", "All #{length(@live)}"},
+              {"dip_buy", "Dip-buy #{@dip_buy}", "Buy the dip #{@dip_buy}"},
+              {"calls", "Calls", "Calls 🚀"},
+              {"puts", "Puts", "Puts 🌈🐻"}
+            ]
+          }
+          type="button"
+          phx-click="filter"
+          phx-value-filter={filter}
+          aria-pressed={to_string(filter == @filter)}
+          class={[
+            "min-h-8 rounded-field border px-3 text-[13px]",
+            if(filter == @filter,
+              do: "border-primary font-medium text-primary",
+              else: "border-base-300 text-muted hover:text-base-content"
+            )
+          ]}
+        >
+          <.t s={label} wsb={meme} />
+        </button>
+      </div>
+      <p :if={!@scanned_on} class="border-t border-base-300 px-4 py-3 text-[13px] text-muted">
+        The scan runs nightly after the chain snapshot. It lists calls worth a look when an index ETF closes
+        oversold above its 100-day average, and each chain's at-the-money implied volatility against what the
+        stock has actually been doing.
+      </p>
+      <p
+        :if={@scanned_on && @shown == []}
+        class="border-t border-base-300 px-4 py-3 text-[13px] text-muted"
+      >
+        {if @filter == "dip_buy",
+          do:
+            "No index ETF closed with RSI(2) under 10 above its 100-day average, so no calls to suggest.",
+          else: "Nothing left in this list."}
+      </p>
+      <div :if={@shown != []} class="max-h-[300px] overflow-y-auto border-t border-base-300">
+        <table class="w-full border-collapse text-[13px]">
+          <thead>
+            <tr class="text-left text-[11px] text-muted">
+              <th class="border-b border-base-300 px-4 py-2 font-medium">Contract</th>
+              <th class="border-b border-base-300 px-2 py-2 text-right font-medium">Ask</th>
+              <th class="border-b border-base-300 px-2 py-2 text-right font-medium">
+                <.t s="IV / RV" wsb="Vol tax" />
+              </th>
+              <th class="border-b border-base-300 py-2 pr-2 pl-2 text-right font-medium">
+                <.t s="Needs · gets" wsb="Needs · wiggle" />
+              </th>
+              <th class="border-b border-base-300 py-2 pr-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              :for={idea <- @shown}
+              id={"idea-#{idea.id}"}
+              class={[
+                "border-b border-neutral last:border-b-0",
+                selected_idea?(idea, @params) &&
+                  "bg-primary/10 shadow-[inset_3px_0_0_var(--color-primary)]"
+              ]}
+            >
+              <td class="px-4 py-2">
+                <button
+                  type="button"
+                  phx-click="idea"
+                  phx-value-id={idea.id}
+                  class="text-left hover:text-primary"
+                >
+                  <span class="font-medium">{idea.symbol} {money(idea.strike)} {idea.kind}</span>
+                  <span class="block text-[12px] text-muted">
+                    {Calendar.strftime(idea.expiration, "%b %-d")} · {idea.dte}d · Δ {num(idea.delta)}
+                    <span
+                      :if={idea.list == "dip_buy"}
+                      class="ml-1 rounded-full bg-success/15 px-2 py-0.5 text-[11px] font-medium text-success"
+                    >dip-buy</span>
+                    <span
+                      :if={idea.lottery}
+                      class="ml-1 rounded-full bg-error px-2 py-0.5 text-[11px] font-semibold text-error-content"
+                    ><.t s="Lottery" wsb="YOLO" /></span>
+                  </span>
+                  <span :if={idea.list == "dip_buy"} class="block text-[12px] text-muted">{idea.setup}</span>
+                </button>
+              </td>
+              <td class="px-2 py-2 text-right">{num(idea.ask)}</td>
+              <td class={["px-2 py-2 text-right", iv_rv_class(idea.iv_rv)]}>{num(idea.iv_rv)}</td>
+              <td class="py-2 pr-2 pl-2 text-right whitespace-nowrap">
+                {signed_pct(idea.breakeven_move_pct && idea.breakeven_move_pct * direction(idea.kind))} · ±{pct(
+                  idea.expected_move_pct
+                )}
+              </td>
+              <td class="py-2 pr-2 text-right">
+                <button
+                  type="button"
+                  phx-click="dismiss"
+                  phx-value-id={idea.id}
+                  aria-label="Dismiss"
+                  title="Dismiss"
+                  class="px-1 text-muted hover:text-base-content"
+                >×</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p :if={@scanned_on} class="border-t border-base-300 px-4 py-2.5 text-[12px] text-muted">
+        <.t
+          s="IV / RV over 1 means the market prices more movement than the stock has delivered. Lottery tickets are deltas under 0.15."
+          wsb="Vol tax over 1 means you pay theta gang for the privilege. YOLO is a delta under 0.15: a scratch-off with extra steps."
+        />
+      </p>
+    </section>
+    """
+  end
+
+  defp selected_idea?(idea, params) do
+    params["underlying"] == idea.symbol and params["strike"] == plain(idea.strike) and
+      params["expiration"] == Date.to_iso8601(idea.expiration) and
+      Options.kind(params["strategy"]) == idea.kind
+  end
+
+  attr :chain, :map, required: true
+  attr :params, :map, required: true
+  attr :class, :string, default: ""
+
+  defp chain_box(%{chain: %{underlyings: []}} = assigns) do
+    ~H"""
+    <section class={[
+      "flex-col gap-1 rounded-box border border-base-300 bg-base-200 px-4 py-3.5",
+      @class
+    ]}>
+      <span class="text-[15px] font-semibold">Chain</span>
+      <p class="text-[13px] text-muted">
+        No stored option chains yet. Tick "Option chains" for a listing on the Instruments page and the nightly
+        snapshot fills this in.
+      </p>
+    </section>
+    """
+  end
+
+  defp chain_box(assigns) do
+    ~H"""
+    <section class={[
+      "flex-col overflow-hidden rounded-box border border-base-300 bg-base-200",
+      @class
+    ]}>
+      <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-4 pt-3.5 pb-2.5">
+        <span class="text-[15px] font-semibold"><.t s="Chain" wsb="The menu" />
+        · {@chain.underlying} {@chain.kind}s</span>
+        <span :if={@chain.captured_at} class="text-[12px] text-muted">
+          spot {money(@chain.spot)} · {if @chain.expiration,
+            do: Calendar.strftime(@chain.expiration, "%b %-d")}
+        </span>
+      </div>
+      <form id="chain-form" phx-change="chain" class="flex flex-wrap gap-2.5 px-4 pb-2.5">
+        <label class="flex flex-col gap-0.5 text-[12px] text-muted">
+          Underlying
+          <select name="chain[underlying]" class="select select-sm w-28">
+            <option
+              :for={u <- @chain.underlyings}
+              value={u.symbol}
+              selected={u.symbol == @chain.underlying}
+            >
+              {u.symbol}
+            </option>
+          </select>
+        </label>
+        <label class="flex flex-col gap-0.5 text-[12px] text-muted">
+          Expiry
+          <select name="chain[expiration]" class="select select-sm w-36">
+            <option
+              :for={e <- @chain.expiries}
+              value={Date.to_iso8601(e)}
+              selected={e == @chain.expiration}
+            >
+              {Calendar.strftime(e, "%b %-d")} · {Date.diff(e, Date.utc_today())}d
+            </option>
+          </select>
+        </label>
+        <label class="flex flex-col gap-0.5 text-[12px] text-muted">
+          Kind
+          <select name="chain[kind]" class="select select-sm w-24">
+            <option value="call" selected={@chain.kind == "call"}>Calls</option>
+            <option value="put" selected={@chain.kind == "put"}>Puts</option>
+          </select>
+        </label>
+      </form>
+      <div :if={@chain.rows != []} class="max-h-[290px] overflow-y-auto border-t border-base-300">
+        <table class="w-full border-collapse text-[13px]">
+          <thead>
+            <tr class="text-left text-[11px] text-muted">
+              <th class="border-b border-base-300 px-4 py-2 font-medium">Strike</th>
+              <th class="border-b border-base-300 px-2 py-2 text-right font-medium">Bid</th>
+              <th class="border-b border-base-300 px-2 py-2 text-right font-medium">Ask</th>
+              <th class="border-b border-base-300 px-2 py-2 text-right font-medium">IV</th>
+              <th class="border-b border-base-300 px-2 py-2 text-right font-medium">Δ</th>
+              <th class="border-b border-base-300 py-2 pr-4 pl-2 text-right font-medium">OI</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              :for={row <- @chain.rows}
+              class={[
+                "border-b border-neutral last:border-b-0",
+                selected_strike?(row, @chain, @params) &&
+                  "bg-primary/10 shadow-[inset_3px_0_0_var(--color-primary)]",
+                row.at_the_money && !selected_strike?(row, @chain, @params) && "bg-base-300/40"
+              ]}
+            >
+              <td class="px-4 py-1.5">
+                <button
+                  type="button"
+                  phx-click="use"
+                  phx-value-strike={plain(row.strike)}
+                  class="font-medium hover:text-primary"
+                >
+                  {money(row.strike)}<span :if={row.at_the_money} class="ml-1 font-normal text-muted"><.t
+                    s="at the money"
+                    wsb="ATM"
+                  /></span>
+                </button>
+              </td>
+              <td class="px-2 py-1.5 text-right">{num(row.bid)}</td>
+              <td class="px-2 py-1.5 text-right">{num(row.ask)}</td>
+              <td class="px-2 py-1.5 text-right">
+                {if row.volatility, do: "#{num(row.volatility, 1)}%", else: "—"}
+              </td>
+              <td class="px-2 py-1.5 text-right">{num(row.delta)}</td>
+              <td class="py-1.5 pr-4 pl-2 text-right">{row.open_interest}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="border-t border-base-300 px-4 py-2.5 text-[12px] text-muted">
+        <.t
+          s="Click a strike and the position follows: the ask if you are buying, the bid if you are selling."
+          wsb="Tap a strike and the play follows: the ask when you go long, the bid when you join theta gang."
+        />
+      </p>
+    </section>
+    """
+  end
+
+  defp selected_strike?(row, chain, params) do
+    (params["underlying"] == chain.underlying and params["strike"] == plain(row.strike) and
+       chain.expiration) && params["expiration"] == Date.to_iso8601(chain.expiration)
+  end
+
+  attr :analysis, :map, required: true
+  attr :params, :map, required: true
+  attr :form, :map, required: true
+  attr :busy, :boolean, required: true
+
+  defp position(assigns) do
+    ~H"""
+    <div class="flex flex-col gap-3.5 rounded-box border border-base-300 bg-base-200 px-5 py-4">
+      <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+        <div class="flex min-w-0 flex-col gap-0.5">
+          <span class="text-[13px] text-muted">
+            <.t
+              s={strategy_name(@analysis["strategy"])}
+              wsb={wsb_strategy_name(@analysis["strategy"])}
+            />
+          </span>
+          <span class="text-[22px] font-semibold leading-tight tracking-tight">
+            {@params["underlying"]} {money(@analysis["strike"])} {Options.kind(@params["strategy"])}, {expiry_label(
+              @params["expiration"]
+            )}
+          </span>
+          <span class="text-[13px] text-muted">
+            {headline_text(@analysis)} Stock at {money(@analysis["spot"])}, {days(
+              @analysis["years_to_expiry"]
+            )} days to expiry{sigma_note(@analysis)}.
+          </span>
+        </div>
+        <.form
+          for={@form}
+          id="position-tune"
+          phx-change="change"
+          phx-submit="analyze"
+          class="flex flex-wrap items-end gap-2.5"
+        >
+          <.input
+            field={@form[:contracts]}
+            type="text"
+            inputmode="numeric"
+            label="Contracts"
+            class="input input-sm w-20"
+          />
+          <.input
+            field={@form[:premium]}
+            type="text"
+            inputmode="decimal"
+            label="Premium"
+            class="input input-sm w-24"
+          />
+          <.input
+            field={@form[:sigma]}
+            type="text"
+            inputmode="decimal"
+            label="Vol %"
+            class="input input-sm w-24"
+          />
+          <.input
+            :if={@params["strategy"] == "covered_call"}
+            field={@form[:cost_basis]}
+            type="text"
+            inputmode="decimal"
+            label="Shares cost"
+            class="input input-sm w-24"
+          />
+          <button type="submit" disabled={@busy} class="btn btn-sm mb-2">
+            <span :if={@busy}>…</span>
+            <.t :if={!@busy} s="Update" wsb="Send it" />
+          </button>
+          <button
+            type="button"
+            phx-click="side"
+            class="btn btn-sm btn-ghost mb-2 min-w-36 whitespace-nowrap"
+          >
+            <.t
+              :if={Options.side(@params["strategy"]) == :buy}
+              s="Sell it instead"
+              wsb="🌈🐻 Bear it instead"
+            />
+            <.t
+              :if={Options.side(@params["strategy"]) != :buy}
+              s="Buy it instead"
+              wsb="🚀 Long it instead"
+            />
+          </button>
+        </.form>
+      </div>
+
+      <.payoff_chart analysis={@analysis} class="hidden sm:block" />
+      <.payoff_chart analysis={@analysis} compact class="sm:hidden" />
+    </div>
+
+    <div class="grid grid-cols-2 gap-x-5 gap-y-3.5 rounded-box border border-base-300 bg-base-200 px-5 py-4 sm:grid-cols-3 lg:grid-cols-6">
+      <.stat
+        :for={stat <- stats(@analysis)}
+        label={stat.label}
+        wsb_label={stat.wsb_label}
+        value={stat.value}
+        hint={stat.hint}
+        tone={stat.tone}
+      />
+    </div>
+
+    <.outcomes analysis={@analysis} />
+
+    <details class="rounded-box border border-base-300 bg-base-200">
+      <summary class="flex cursor-pointer items-center justify-between px-5 py-3 text-[14px] font-medium">
+        <.t s="Price by price, at expiry" wsb="Price by price, for the DD post" />
+        <span class="text-[12px] font-normal text-muted">{length(@analysis["scenarios"])} rows</span>
+      </summary>
+      <div class="px-5 pb-4"><.scenario_table analysis={@analysis} /></div>
+    </details>
+    """
+  end
+
+  defp expiry_label(iso) when is_binary(iso) do
+    case Date.from_iso8601(iso) do
+      {:ok, date} -> Calendar.strftime(date, "%b %-d")
+      _ -> iso
+    end
+  end
+
+  defp expiry_label(_), do: ""
 
   attr :form, :map, required: true
   attr :params, :map, required: true
@@ -156,32 +808,16 @@ defmodule OpusWeb.OptionsLive do
 
   attr :analysis, :map, required: true
 
-  defp headline(assigns) do
-    ~H"""
-    <section class="flex flex-col gap-1">
-      <span class="text-[13px] text-muted">{strategy_name(@analysis["strategy"])}</span>
-      <span class="text-2xl font-semibold leading-tight tracking-tight">
-        {headline_text(@analysis)}
-      </span>
-      <span class="text-[13px] text-muted">
-        Stock at {money(@analysis["spot"])}, strike {money(@analysis["strike"])}, {days(
-          @analysis["years_to_expiry"]
-        )} days to expiry{sigma_note(@analysis)}.
-      </span>
-    </section>
-    """
-  end
-
-  attr :analysis, :map, required: true
-
   defp outcomes(assigns) do
     ~H"""
-    <section class="grid gap-4 sm:grid-cols-2">
+    <section class="grid gap-3.5 sm:grid-cols-2">
       <.outcome_card
         :for={card <- outcome_cards(@analysis)}
         title={card.title}
+        wsb_title={card.wsb_title}
         body={card.body}
         amount={card.amount}
+        wsb_amount={card.wsb_amount}
         tone={card.tone}
       />
     </section>
@@ -193,35 +829,33 @@ defmodule OpusWeb.OptionsLive do
   attr :amount, :any, required: true
   attr :tone, :atom, required: true
 
+  attr :wsb_title, :string, required: true
+  attr :wsb_amount, :string, required: true
+
   defp outcome_card(assigns) do
     ~H"""
-    <div class="flex flex-col gap-2 rounded-box border border-base-300 bg-base-200 px-5 py-4">
-      <span class="text-[15px] font-semibold">{@title}</span>
-      <p class="text-sm leading-relaxed">{@body}</p>
-      <span class={["text-xl font-semibold", tone_class(@tone)]}>{@amount}</span>
+    <div class="flex flex-col gap-1.5 rounded-box border border-base-300 bg-base-200 px-5 py-4">
+      <span class="text-[14px] font-semibold"><.t s={@title} wsb={@wsb_title} /></span>
+      <p class="text-[13px] leading-relaxed text-muted">{@body}</p>
+      <span class={["text-[18px] font-semibold", tone_class(@tone)]}><.t
+        s={@amount}
+        wsb={@wsb_amount}
+      /></span>
     </div>
     """
   end
 
-  attr :analysis, :map, required: true
-
-  defp numbers(assigns) do
-    ~H"""
-    <section class="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3 lg:grid-cols-4">
-      <.stat :for={stat <- stats(@analysis)} label={stat.label} value={stat.value} hint={stat.hint} />
-    </section>
-    """
-  end
-
   attr :label, :string, required: true
+  attr :wsb_label, :string, default: nil
   attr :value, :string, required: true
   attr :hint, :string, required: true
+  attr :tone, :atom, default: :neutral
 
   defp stat(assigns) do
     ~H"""
     <div class="flex flex-col gap-0.5">
-      <span class="text-xs text-muted">{@label}</span>
-      <span class="text-lg font-semibold">{@value}</span>
+      <span class="text-xs text-muted"><.t s={@label} wsb={@wsb_label || @label} /></span>
+      <span class={["text-[19px] font-semibold", tone_class(@tone)]}>{@value}</span>
       <span class="text-xs leading-snug text-muted">{@hint}</span>
     </div>
     """
@@ -231,33 +865,37 @@ defmodule OpusWeb.OptionsLive do
 
   defp scenario_table(assigns) do
     ~H"""
-    <section class="flex flex-col gap-3">
-      <span class="text-[15px] font-semibold">Price by price, at expiry</span>
-      <div class="overflow-x-auto rounded-box border border-base-300 bg-base-200 px-4 py-1.5">
-        <table class="w-full min-w-[520px] border-collapse text-sm">
-          <thead>
-            <tr class="text-left text-xs text-muted">
-              <th class="border-b border-base-300 py-2.5 font-medium">Stock at expiry</th>
-              <th class="border-b border-base-300 py-2.5 text-right font-medium">Change</th>
-              <th class="border-b border-base-300 py-2.5 font-medium">What happens</th>
-              <th class="border-b border-base-300 py-2.5 text-right font-medium">Your result</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr :for={row <- @analysis["scenarios"]} class={row_class(row, @analysis)}>
-              <td class="py-2.5 font-medium">{money(row["price"])}{marker(row, @analysis)}</td>
-              <td class="py-2.5 text-right">{signed_pct(row["change"])}</td>
-              <td class="py-2.5">{outcome_text(row["outcome"])}</td>
-              <td class={["py-2.5 text-right font-medium", tone_class(pnl_tone(row["pnl"]))]}>
-                {signed_money(row["pnl"])}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <div class="overflow-x-auto">
+      <table class="w-full min-w-[520px] border-collapse text-sm">
+        <thead>
+          <tr class="text-left text-xs text-muted">
+            <th class="border-b border-base-300 py-2.5 font-medium">Stock at expiry</th>
+            <th class="border-b border-base-300 py-2.5 text-right font-medium">Change</th>
+            <th class="border-b border-base-300 py-2.5 font-medium">What happens</th>
+            <th class="border-b border-base-300 py-2.5 text-right font-medium">Your result</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr :for={row <- @analysis["scenarios"]} class={row_class(row, @analysis)}>
+            <td class="py-2.5 font-medium">{money(row["price"])}{marker(row, @analysis)}</td>
+            <td class="py-2.5 text-right">{signed_pct(row["change"])}</td>
+            <td class="py-2.5">{outcome_text(row["outcome"])}</td>
+            <td class={["py-2.5 text-right font-medium", tone_class(pnl_tone(row["pnl"]))]}>
+              {signed_money(row["pnl"])}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
     """
   end
+
+  defp direction("put"), do: -1
+  defp direction(_), do: 1
+
+  defp iv_rv_class(ratio) when is_number(ratio) and ratio < 1.0, do: "text-success"
+  defp iv_rv_class(ratio) when is_number(ratio) and ratio > 1.3, do: "text-warning"
+  defp iv_rv_class(_), do: ""
 
   # --- copy ---
 
@@ -266,6 +904,12 @@ defmodule OpusWeb.OptionsLive do
   defp strategy_name("long_call"), do: "Long call"
   defp strategy_name("long_put"), do: "Long put"
   defp strategy_name(other), do: other
+
+  defp wsb_strategy_name("cash_secured_put"), do: "Theta gang · cash-secured put"
+  defp wsb_strategy_name("covered_call"), do: "Theta gang · covered call"
+  defp wsb_strategy_name("long_call"), do: "Degen long call 🚀"
+  defp wsb_strategy_name("long_put"), do: "Gay bear long put 🌈🐻"
+  defp wsb_strategy_name(other), do: other
 
   defp headline_text(%{"strategy" => "cash_secured_put"} = a) do
     "You collect #{money(a["premium_total"])} now and promise to buy #{shares(a["shares"])} shares at #{money(a["strike"])} if asked."
@@ -287,16 +931,20 @@ defmodule OpusWeb.OptionsLive do
     [
       %{
         title: "If the stock stays above #{money(a["strike"])}",
+        wsb_title: "Theta gang wins: stock stays above #{money(a["strike"])}",
         body:
           "The put expires worthless. Nobody makes you buy anything. You keep the premium and your #{money(a["capital_required"])} is free again.",
         amount: "+#{money(a["premium_total"])} kept",
+        wsb_amount: "+#{money(a["premium_total"])} tendies",
         tone: :good
       },
       %{
         title: "If the stock closes below #{money(a["strike"])}",
+        wsb_title: "Bagholder: stock closes below #{money(a["strike"])}",
         body:
           "You are assigned: you buy #{shares(a["shares"])} shares at #{money(a["strike"])}, paying #{money(a["capital_required"])}. With the premium, your real cost is #{money(a["breakeven"])} a share. You lose money only if the stock is below that.",
         amount: "Own shares at #{money(a["breakeven"])} effective",
+        wsb_amount: "Bags at #{money(a["breakeven"])}, hold the line 💎🙌",
         tone: :neutral
       }
     ]
@@ -306,16 +954,20 @@ defmodule OpusWeb.OptionsLive do
     [
       %{
         title: "If the stock stays below #{money(a["strike"])}",
+        wsb_title: "Theta gang wins: stock stays below #{money(a["strike"])}",
         body:
           "The call expires worthless. You keep your shares and the premium, and can sell another call next cycle.",
         amount: "+#{money(a["premium_total"])} kept",
+        wsb_amount: "+#{money(a["premium_total"])} tendies",
         tone: :good
       },
       %{
         title: "If the stock closes above #{money(a["strike"])}",
+        wsb_title: "Shares yoinked above #{money(a["strike"])}",
         body:
           "You are assigned: your #{shares(a["shares"])} shares are sold at #{money(a["strike"])} no matter how high the stock went. You keep the premium too. That is the most this position can make.",
         amount: "#{signed_money(a["max_gain"])} best case",
+        wsb_amount: "#{signed_money(a["max_gain"])} max tendies, no moon for you",
         tone: :good
       }
     ]
@@ -325,16 +977,20 @@ defmodule OpusWeb.OptionsLive do
     [
       %{
         title: "If the stock stays below #{money(a["strike"])}",
+        wsb_title: "GUH: stock stays below #{money(a["strike"])}",
         body:
           "The call expires worthless and the premium is gone. That is the most you can lose.",
         amount: "-#{money(a["max_loss"])} lost",
+        wsb_amount: "−#{money(a["max_loss"])} · GUH",
         tone: :bad
       },
       %{
         title: "If the stock closes above #{money(a["breakeven"])}",
+        wsb_title: "Tendies: stock closes above #{money(a["breakeven"])}",
         body:
           "You make money. Between #{money(a["strike"])} and #{money(a["breakeven"])} the call has value but less than you paid. Above #{money(a["breakeven"])} every dollar of stock is #{money(a["shares"])} to you.",
         amount: "Unlimited upside",
+        wsb_amount: "To the moon 🚀",
         tone: :good
       }
     ]
@@ -344,15 +1000,19 @@ defmodule OpusWeb.OptionsLive do
     [
       %{
         title: "If the stock stays above #{money(a["strike"])}",
+        wsb_title: "GUH: stock stays above #{money(a["strike"])}",
         body: "The put expires worthless and the premium is gone. That is the most you can lose.",
         amount: "-#{money(a["max_loss"])} lost",
+        wsb_amount: "−#{money(a["max_loss"])} · GUH",
         tone: :bad
       },
       %{
         title: "If the stock closes below #{money(a["breakeven"])}",
+        wsb_title: "🌈🐻 tendies: stock closes below #{money(a["breakeven"])}",
         body:
           "You make money. The put is worth the distance from #{money(a["strike"])} down to the stock price, less what you paid. Best case the stock goes to zero.",
         amount: "#{signed_money(a["max_gain"])} best case",
+        wsb_amount: "#{signed_money(a["max_gain"])} if it goes to zero, hedgies r fuk",
         tone: :good
       }
     ]
@@ -364,7 +1024,10 @@ defmodule OpusWeb.OptionsLive do
     [
       %{
         label: if(seller?, do: "Money set aside", else: "Money at risk"),
+        wsb_label:
+          if(seller?, do: "Cash parked, wife's boyfriend approved", else: "Loss porn, max"),
         value: money(a["capital_required"]),
+        tone: if(seller?, do: :warn, else: :bad),
         hint:
           if(seller?,
             do: "Cash (or shares) you must hold so you can honour the contract.",
@@ -373,38 +1036,52 @@ defmodule OpusWeb.OptionsLive do
       },
       %{
         label: "Premium",
+        wsb_label: "Premium",
         value:
           if(seller?, do: "+#{money(a["premium_total"])}", else: "-#{money(a["premium_total"])}"),
+        tone: if(seller?, do: :good, else: :bad),
         hint: if(seller?, do: "Paid to you today, yours to keep.", else: "Paid by you today.")
       },
       %{
         label: "Yield",
+        wsb_label: "Theta gang pay",
         value: "#{pct(a["yield_on_capital"])} · #{pct(a["annualized_yield"])}/yr",
+        tone: :good,
         hint: "Premium over money set aside, then scaled to a year for comparing expiries."
       },
       %{
         label: "Breakeven",
+        wsb_label: "Breakeven, where you stop being poor",
         value: money(a["breakeven"]),
+        tone: :warn,
         hint: "Stock price at expiry where you neither make nor lose money."
       },
       %{
         label: if(seller?, do: "Chance of assignment", else: "Chance it pays"),
+        wsb_label: if(seller?, do: "Bagholder odds", else: "Prints?"),
         value: maybe_pct(a["probability_itm"]),
+        tone: :warn,
         hint: "Model estimate from the option's own volatility. Not a promise."
       },
       %{
         label: "Chance of a profit",
+        wsb_label: "Tendies odds",
         value: maybe_pct(a["probability_profit"]),
+        tone: odds_tone(a["probability_profit"]),
         hint: "Chance the stock ends on the right side of breakeven."
       },
       %{
         label: "Expected move",
+        wsb_label: "The wiggle",
         value: if(a["expected_move"], do: "±#{money(a["expected_move"])}", else: "—"),
+        tone: :warn,
         hint: "A typical one-standard-deviation move by expiry, from the volatility."
       },
       %{
         label: "Worst case",
+        wsb_label: "Worst case · GUH",
         value: "-#{money(a["max_loss"])}",
+        tone: :bad,
         hint: "If the stock goes to zero (or, for a long call, the premium)."
       }
     ]
@@ -446,9 +1123,6 @@ defmodule OpusWeb.OptionsLive do
   defp maybe_pct(nil), do: "—"
   defp maybe_pct(value), do: pct(value)
 
-  defp signed_pct(value) when is_number(value) and value > 0, do: "+#{pct(value)}"
-  defp signed_pct(value), do: pct(value)
-
   defp signed_money(nil), do: "unlimited"
   defp signed_money(value) when is_number(value) and value > 0, do: "+#{money(value)}"
   defp signed_money(value) when is_number(value) and value < 0, do: "-#{money(abs(value))}"
@@ -460,5 +1134,10 @@ defmodule OpusWeb.OptionsLive do
 
   defp tone_class(:good), do: "text-success"
   defp tone_class(:bad), do: "text-error"
+  defp tone_class(:warn), do: "text-warning"
   defp tone_class(:neutral), do: ""
+
+  defp odds_tone(p) when is_number(p) and p >= 0.5, do: :good
+  defp odds_tone(p) when is_number(p), do: :bad
+  defp odds_tone(_), do: :neutral
 end
