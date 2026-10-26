@@ -15,6 +15,8 @@ defmodule OpusWeb.OptionsLive do
   alias Opus.Auro.Client
   alias Opus.Options
   alias Opus.Options.Idea
+  alias Opus.Options.Paper
+  alias OpusWeb.Components.PaperBook
 
   @defaults %{
     "underlying" => "SPY",
@@ -40,11 +42,101 @@ defmodule OpusWeb.OptionsLive do
        error: nil,
        busy: false,
        pane: "position",
-       filter: "all"
+       filter: "all",
+       view: "workbench",
+       trade: nil,
+       leg: nil,
+       paper_analysis: nil,
+       paper_underlyings: []
      )
      |> assign_chain(nil, nil)
-     |> assign_ideas()}
+     |> assign_ideas()
+     |> assign(paper: Paper.book(), paper_counts: Paper.open_counts())}
   end
+
+  # Two views behind tabs, each with its own URL so the paper books can be
+  # bookmarked: `/options` is the workbench, `/options?view=paper` the books.
+  # `&book=` picks a book (the wheel by default), `&trade=` one of its trades
+  # (the wheel's by underlying, the others' by id) and `&leg=` one of its legs.
+  @impl true
+  def handle_params(%{"view" => "paper"} = params, _uri, socket) do
+    book = if params["book"] in Paper.books(), do: params["book"], else: "wheel"
+    paper = Paper.book(book)
+    {trade, leg, analysis} = paper_selection(book, paper, params)
+
+    {:noreply,
+     assign(socket,
+       view: "paper",
+       paper: paper,
+       paper_counts: Paper.open_counts(),
+       paper_underlyings: paper_underlyings(book, paper),
+       trade: trade,
+       leg: leg,
+       paper_analysis: analysis
+     )}
+  end
+
+  def handle_params(_params, _uri, socket), do: {:noreply, assign(socket, view: "workbench")}
+
+  defp paper_selection("wheel", paper, params) do
+    trade = Enum.find(paper.trades, &(&1.symbol == params["trade"]))
+    leg = trade && trade_leg(trade, params["leg"])
+    {trade, leg, leg && payoff(leg, trade)}
+  end
+
+  defp paper_selection(_book, paper, params) do
+    trade = Enum.find(paper.trades, &(to_string(&1.id) == params["trade"]))
+    leg = trade && Enum.find(trade.legs, &(to_string(&1.id) == params["leg"]))
+    {trade, leg && Paper.leg(leg.id), trade && structure_payoff(trade)}
+  end
+
+  # The book's underlyings for its buy-and-hold comparison: those it has
+  # traded, or those it is configured for before its first trade.
+  defp paper_underlyings(book, %{trades: []}), do: Paper.underlyings(book)
+
+  defp paper_underlyings(_book, %{trades: trades}),
+    do: trades |> Enum.map(& &1.symbol) |> Enum.uniq() |> Enum.sort()
+
+  # The leg asked for if it belongs to the trade, else the trade's current
+  # one: its open short leg, its shares, or its latest leg.
+  defp trade_leg(trade, id) do
+    chosen =
+      with id when is_binary(id) <- id,
+           {id, ""} <- Integer.parse(id) do
+        Enum.find(trade.legs, &(&1.id == id))
+      else
+        _ -> nil
+      end
+
+    case chosen || trade.short || trade.shares || List.last(trade.legs) do
+      nil -> nil
+      position -> Paper.leg(position.id)
+    end
+  end
+
+  # The workbench's payoff curves for an open wheel leg; nil when the leg is
+  # closed or the engine can't be reached.
+  defp payoff(%{position: %{status: "open", kind: kind}} = leg, trade)
+       when kind in ~w(put call) do
+    cost_basis = trade.shares && trade.shares.open_price
+
+    case Options.scenarios(Paper.scenario_params(leg, cost_basis)) do
+      {:ok, analysis} -> analysis
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp payoff(_leg, _trade), do: nil
+
+  # The engine's curves for a whole open trade, its legs added together.
+  defp structure_payoff(%{status: "open"} = trade) do
+    case Options.structure_scenarios(Paper.structure_request(trade)) do
+      {:ok, analysis} -> analysis
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp structure_payoff(_trade), do: nil
 
   defp assign_ideas(socket) do
     {scanned_on, ideas} = Options.latest_ideas()
@@ -243,8 +335,23 @@ defmodule OpusWeb.OptionsLive do
           </span>
         </header>
 
+        <nav aria-label="Options views" class="flex gap-1 border-b border-base-300">
+          <.view_tab view="workbench" current={@view} path={~p"/options"}>
+            <.t s="Workbench" wsb="The casino floor" />
+          </.view_tab>
+          <.view_tab view="paper" current={@view} path={~p"/options?view=paper"}>
+            <.t s="Paper book" wsb="Theta gang" />
+            <span
+              :if={@paper_counts != %{}}
+              class="rounded-full bg-base-300 px-1.5 text-[11px] font-medium text-base-content"
+            >
+              {@paper_counts |> Map.values() |> Enum.sum()} open
+            </span>
+          </.view_tab>
+        </nav>
+
         <p
-          :if={@error}
+          :if={@error && @view == "workbench"}
           role="alert"
           class="rounded-box border border-error/40 bg-base-200 px-4 py-3 text-sm"
         >
@@ -252,6 +359,7 @@ defmodule OpusWeb.OptionsLive do
         </p>
 
         <div
+          :if={@view == "workbench"}
           role="group"
           aria-label="Section"
           class="grid grid-cols-3 gap-1 rounded-field border border-base-300 bg-base-200 p-1 sm:hidden"
@@ -277,7 +385,7 @@ defmodule OpusWeb.OptionsLive do
           </button>
         </div>
 
-        <div class="flex flex-wrap items-start gap-5">
+        <div :if={@view == "workbench"} class="flex flex-wrap items-start gap-5">
           <aside
             aria-label="Pick a contract"
             class="flex w-full min-w-0 flex-col gap-4 sm:w-[420px] sm:flex-none"
@@ -320,8 +428,41 @@ defmodule OpusWeb.OptionsLive do
             </details>
           </section>
         </div>
+
+        <PaperBook.paper_book
+          :if={@view == "paper"}
+          counts={@paper_counts}
+          underlyings={@paper_underlyings}
+          book={@paper}
+          trade={@trade}
+          leg={@leg}
+          analysis={@paper_analysis}
+        />
       </div>
     </Layouts.app>
+    """
+  end
+
+  attr :view, :string, required: true
+  attr :current, :string, required: true
+  attr :path, :string, required: true
+  slot :inner_block, required: true
+
+  defp view_tab(assigns) do
+    ~H"""
+    <.link
+      patch={@path}
+      aria-current={if @view == @current, do: "page"}
+      class={[
+        "-mb-px inline-flex min-h-10 items-center gap-2 border-b-2 px-3 text-[14px]",
+        if(@view == @current,
+          do: "border-primary font-medium text-base-content",
+          else: "border-transparent text-muted hover:text-base-content"
+        )
+      ]}
+    >
+      {render_slot(@inner_block)}
+    </.link>
     """
   end
 

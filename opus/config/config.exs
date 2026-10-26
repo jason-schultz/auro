@@ -41,6 +41,8 @@ config :opus, Oban,
        # Half an hour after the snapshot: which of tonight's contracts are
        # worth a look (Options page ideas).
        {"30 2 * * 2-6", Opus.Options.ScanWorker},
+       # After the ideas: the options paper book's nightly wheel.
+       {"45 2 * * 2-6", Opus.Options.PaperWorker},
        # 20:30 UTC is before the 17:00 New York rollover (21:00/22:00 UTC) the
        # day's financing rates apply to.
        {"30 20 * * 1-5", Opus.MarketData.FinancingSnapshotWorker},
@@ -67,10 +69,29 @@ config :opus, Opus.MarketData.QuestradeBarsWorker,
 # being assigned.
 config :opus, Opus.Options.ScanWorker, enabled: true
 
+# The options paper book (research/options_paper_engine.md): the wheel on
+# these underlyings, in USD, one position each. Commission per contract:
+# Wealthsimple charges none; ~$0.07 of exchange fees rounded up.
+config :opus, Opus.Options.PaperWorker, enabled: true
+
+# Each paper book is its own US$100,000 (research/options_paper_engine.md).
+# Ideas trades whatever the nightly scan flags, on any stored chain.
+config :opus, Opus.Options.Paper,
+  books: %{
+    "wheel" => ~w(SPY IWM),
+    "put_spread" => ~w(SPY IWM QQQ),
+    "iron_condor" => ~w(SPY IWM QQQ),
+    "crash_puts" => ~w(SPY)
+  },
+  starting_cash: 100_000.0,
+  commission: 0.10
+
+# 20% either side of spot: the iron condor's −0.05 delta put wings sit
+# further out than 10% (research/options_paper_engine.md, v2).
 config :opus, Opus.MarketData.OptionsChainWorker,
   enabled: true,
   max_days_to_expiry: 45,
-  strike_band_pct: 0.10
+  strike_band_pct: 0.20
 
 # US equity daily bars from Massive via Rust for the listings flagged
 # `feed_massive_daily`. US intraday stays with the Questrade worker.

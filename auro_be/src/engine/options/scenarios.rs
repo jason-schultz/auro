@@ -348,6 +348,175 @@ fn pnl_at(
     per_share * shares
 }
 
+/// One leg of a multi-leg structure (a spread, an iron condor).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Leg {
+    pub kind: OptionKind,
+    pub side: Side,
+    pub strike: f64,
+    /// Premium per share.
+    pub premium: f64,
+    pub contracts: f64,
+    /// Annual volatility; None = solve it from the premium.
+    pub sigma: Option<f64>,
+}
+
+/// Several legs on one underlying and expiry, analysed as one position:
+/// the payoff curves are the legs' curves added together.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Structure {
+    /// Always "structure": tells the page this isn't a single-leg analysis.
+    pub strategy: &'static str,
+    pub spot: f64,
+    pub years_to_expiry: f64,
+    pub legs: usize,
+    /// Net premium in dollars: positive for a credit, negative for a debit.
+    pub net_premium: f64,
+    /// Every price where the expiry payoff crosses zero, ascending.
+    pub breakevens: Vec<f64>,
+    /// The lowest breakeven, for a chart that marks one.
+    pub breakeven: Option<f64>,
+    /// Best case in dollars; None = unlimited.
+    pub max_gain: Option<f64>,
+    /// Worst case in dollars as a positive number; None = unlimited.
+    pub max_loss: Option<f64>,
+    /// One-standard-deviation move to expiry at the legs' average
+    /// volatility. Needs every leg's sigma.
+    pub expected_move: Option<f64>,
+    pub curves: Vec<Curve>,
+}
+
+/// Dollar P&L of the structure with `t_rem` years left: every leg marked at
+/// its model price (its intrinsic value at expiry).
+fn structure_pnl(
+    legs: &[(Leg, Option<f64>)],
+    price: f64,
+    t_rem: f64,
+    rate: f64,
+    div_yield: f64,
+) -> f64 {
+    legs.iter()
+        .map(|(leg, sigma)| {
+            let value = model_price(
+                leg.kind,
+                price,
+                leg.strike,
+                t_rem,
+                rate,
+                div_yield,
+                sigma.unwrap_or(0.0),
+            );
+            let per_share = match leg.side {
+                Side::Buy => value - leg.premium,
+                Side::Sell => leg.premium - value,
+            };
+            per_share * leg.contracts * CONTRACT_MULTIPLIER
+        })
+        .sum()
+}
+
+pub fn analyze_structure(legs: &[Leg], spot: f64, t: f64, rate: f64, div_yield: f64) -> Structure {
+    let priced: Vec<(Leg, Option<f64>)> = legs
+        .iter()
+        .map(|leg| {
+            let sigma = match leg.sigma {
+                Some(s) if s > 0.0 => Some(s),
+                _ => implied_vol(leg.kind, leg.premium, spot, leg.strike, t, rate, div_yield),
+            };
+            (leg.clone(), sigma)
+        })
+        .collect();
+    let all_sigmas: Option<Vec<f64>> = priced.iter().map(|(_, s)| *s).collect();
+
+    let net_premium = legs
+        .iter()
+        .map(|l| {
+            let sign = match l.side {
+                Side::Sell => 1.0,
+                Side::Buy => -1.0,
+            };
+            sign * l.premium * l.contracts * CONTRACT_MULTIPLIER
+        })
+        .sum();
+
+    // The expiry payoff is linear between strikes, so its extremes and zero
+    // crossings are found exactly from its values at 0 and at each strike
+    // plus its slope above the highest strike (net calls held).
+    let at_expiry = |price: f64| structure_pnl(&priced, price, 0.0, rate, div_yield);
+    let mut kinks: Vec<f64> = std::iter::once(0.0)
+        .chain(legs.iter().map(|l| l.strike))
+        .collect();
+    kinks.sort_by(|a, b| a.partial_cmp(b).expect("finite strikes"));
+    kinks.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    let values: Vec<f64> = kinks.iter().map(|&p| at_expiry(p)).collect();
+    let slope_above: f64 = legs
+        .iter()
+        .filter(|l| l.kind == OptionKind::Call)
+        .map(|l| match l.side {
+            Side::Buy => l.contracts * CONTRACT_MULTIPLIER,
+            Side::Sell => -l.contracts * CONTRACT_MULTIPLIER,
+        })
+        .sum();
+
+    let mut breakevens = Vec::new();
+    for (w, v) in kinks.windows(2).zip(values.windows(2)) {
+        if v[1] == 0.0 {
+            breakevens.push(w[1]);
+        } else if v[0] * v[1] < 0.0 {
+            breakevens.push(w[0] + (w[1] - w[0]) * v[0] / (v[0] - v[1]));
+        }
+    }
+    let (top, top_value) = (kinks[kinks.len() - 1], values[values.len() - 1]);
+    if slope_above != 0.0 && top_value * slope_above < 0.0 {
+        breakevens.push(top - top_value / slope_above);
+    }
+
+    let best = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let worst = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_gain = (slope_above <= 0.0).then_some(best);
+    let max_loss = (slope_above >= 0.0).then_some((-worst).max(0.0));
+
+    let expected = all_sigmas
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .map(|s| expected_move(spot, s.iter().sum::<f64>() / s.len() as f64, t));
+
+    let curve_prices: Vec<f64> = (-CURVE_STEPS..=CURVE_STEPS)
+        .map(|i| spot * (1.0 + f64::from(i) * CURVE_STEP))
+        .filter(|p| *p > 0.0)
+        .collect();
+    let curve = |label: &str, t_rem: f64| Curve {
+        label: label.to_string(),
+        days_to_expiry: t_rem * 365.0,
+        points: curve_prices
+            .iter()
+            .map(|&price| CurvePoint {
+                price,
+                pnl: structure_pnl(&priced, price, t_rem, rate, div_yield),
+            })
+            .collect(),
+    };
+    let mut curves = vec![curve("expiry", 0.0)];
+    if all_sigmas.is_some() && t > 0.0 {
+        curves.push(curve("halfway", t / 2.0));
+        curves.push(curve("today", t));
+    }
+
+    Structure {
+        strategy: "structure",
+        spot,
+        years_to_expiry: t,
+        legs: legs.len(),
+        net_premium,
+        breakeven: breakevens.first().copied(),
+        breakevens,
+        max_gain,
+        max_loss,
+        expected_move: expected,
+        curves,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +693,79 @@ mod tests {
         let b = analyze(&blind);
         if b.sigma.is_none() {
             assert_eq!(b.curves.len(), 1);
+        }
+    }
+
+    fn leg(kind: OptionKind, side: Side, strike: f64, premium: f64) -> Leg {
+        Leg {
+            kind,
+            side,
+            strike,
+            premium,
+            contracts: 1.0,
+            sigma: Some(0.18),
+        }
+    }
+
+    #[test]
+    fn put_credit_spread_caps_the_loss_at_the_width_less_the_credit() {
+        // Sell the 640 put for 6.40, buy the 620 put for 2.40: credit 4.00.
+        let legs = [
+            leg(OptionKind::Put, Side::Sell, 640.0, 6.40),
+            leg(OptionKind::Put, Side::Buy, 620.0, 2.40),
+        ];
+        let s = analyze_structure(&legs, 650.0, 30.0 / 365.0, 0.04, 0.012);
+        assert_eq!(s.strategy, "structure");
+        assert!((s.net_premium - 400.0).abs() < 1e-9);
+        assert!((s.max_gain.unwrap() - 400.0).abs() < 1e-9);
+        assert!((s.max_loss.unwrap() - 1_600.0).abs() < 1e-9);
+        assert_eq!(s.breakevens.len(), 1);
+        assert!((s.breakevens[0] - 636.0).abs() < 1e-9);
+        assert_eq!(s.breakeven, Some(s.breakevens[0]));
+        assert_eq!(s.curves.len(), 3);
+        // Far below both strikes the loss stays capped.
+        let expiry = &s.curves[0];
+        assert!((expiry.points[0].pnl + 1_600.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn iron_condor_has_two_breakevens_and_capped_risk_both_ways() {
+        // Puts 600/610, calls 690/700; credits 2 + 2, debits 1 + 1: net 2.00.
+        let legs = [
+            leg(OptionKind::Put, Side::Buy, 600.0, 1.0),
+            leg(OptionKind::Put, Side::Sell, 610.0, 2.0),
+            leg(OptionKind::Call, Side::Sell, 690.0, 2.0),
+            leg(OptionKind::Call, Side::Buy, 700.0, 1.0),
+        ];
+        let s = analyze_structure(&legs, 650.0, 30.0 / 365.0, 0.04, 0.012);
+        assert!((s.net_premium - 200.0).abs() < 1e-9);
+        assert!((s.max_gain.unwrap() - 200.0).abs() < 1e-9);
+        assert!((s.max_loss.unwrap() - 800.0).abs() < 1e-9);
+        assert_eq!(s.breakevens.len(), 2);
+        assert!((s.breakevens[0] - 608.0).abs() < 1e-9);
+        assert!((s.breakevens[1] - 692.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_single_long_call_in_a_structure_has_unlimited_gain() {
+        let s = analyze_structure(
+            &[leg(OptionKind::Call, Side::Buy, 660.0, 5.0)],
+            650.0,
+            30.0 / 365.0,
+            0.04,
+            0.012,
+        );
+        assert_eq!(s.max_gain, None);
+        assert!((s.max_loss.unwrap() - 500.0).abs() < 1e-9);
+        assert!((s.net_premium + 500.0).abs() < 1e-9);
+        assert_eq!(s.breakevens, vec![665.0]);
+        // Same expiry payoff as the single-leg analysis.
+        let mut i = input(OptionKind::Call, Side::Buy);
+        i.strike = 660.0;
+        i.premium = 5.0;
+        let a = analyze(&i);
+        for (x, y) in a.curves[0].points.iter().zip(&s.curves[0].points) {
+            assert!((x.pnl - y.pnl).abs() < 1e-6);
         }
     }
 

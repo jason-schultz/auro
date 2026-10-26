@@ -194,6 +194,29 @@ defmodule Opus.Options do
     end
   end
 
+  @doc """
+  Every contract in an underlying's latest snapshot, any expiry, with its
+  quote and the spot and capture time: what the paper book reads each night.
+  """
+  @spec snapshot(String.t()) :: [map()]
+  def snapshot(symbol) do
+    symbol
+    |> latest_quotes()
+    |> select([q, c, i], %{
+      contract_id: c.id,
+      instrument_id: i.id,
+      kind: c.contract_type,
+      strike: c.strike,
+      expiration: c.expiration_date,
+      bid: q.bid,
+      ask: q.ask,
+      delta: q.delta,
+      spot: q.spot,
+      captured_at: type(q.captured_at, :naive_datetime_usec)
+    })
+    |> Repo.all()
+  end
+
   # Quotes from the latest capture of an underlying's chain: the snapshot
   # worker writes one capture time per underlying per night.
   defp latest_quotes(symbol) do
@@ -227,6 +250,15 @@ defmodule Opus.Options do
       Client.option_scenarios(request)
     end
   end
+
+  @doc """
+  The engine's analysis of several legs as one structure (a spread, an iron
+  condor): `request` has `underlying`, `expiration`, `legs` (each `kind`,
+  `side` buy/sell, `strike`, `premium`, `contracts`, `sigma`) and optionally
+  `spot`. The legs' payoff curves come back added together.
+  """
+  @spec structure_scenarios(map()) :: {:ok, map()} | {:error, term()}
+  def structure_scenarios(request), do: Client.option_scenarios(request)
 
   @doc false
   @spec build_request(map()) :: {:ok, map()} | {:error, String.t()}

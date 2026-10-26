@@ -19,7 +19,7 @@
 //!     earn it, shorts pay it). The cash-rate leg of financing is left out,
 //!     which understates shorts in high-rate years (2000, 2007).
 //!
-//! Yahoo responses are cached under target/research_cache/yahoo. Results are
+//! Results are
 //! printed and written to research/results/round2_trend_book.json.
 //!
 //!   cargo run --release --example trend_book
@@ -28,9 +28,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::str::FromStr;
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use chrono::{Datelike, Duration, NaiveDate, Utc};
 use chrono_tz::America::New_York;
 use serde_json::{json, Value};
+
+mod common;
+use common::{mean_std, yahoo_closes};
 
 use auro::db::repositories::{candles as candles_repo, financing as financing_repo};
 use auro::engine::financing::{apply_financing, FinancingModel};
@@ -244,13 +247,6 @@ fn simulate(markets: &[&Market], financing: &FinancingModel) -> Book {
     book
 }
 
-fn mean_std(xs: &[f64]) -> (f64, f64) {
-    let n = xs.len() as f64;
-    let mean = xs.iter().sum::<f64>() / n;
-    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-    (mean, var.sqrt())
-}
-
 /// Leverage that puts the book at 10% annual volatility.
 fn scale(book: &Book) -> f64 {
     let (_, sd) = mean_std(&book.returns);
@@ -376,47 +372,6 @@ fn sharpe(book: &Book) -> f64 {
 
 fn pct(x: f64) -> String {
     format!("{:+.1}%", x * 100.0)
-}
-
-async fn yahoo_closes(
-    symbol: &str,
-) -> Result<BTreeMap<NaiveDate, f64>, Box<dyn std::error::Error>> {
-    let cache = Path::new("target/research_cache/yahoo").join(format!("{symbol}.json"));
-    let body = match std::fs::read_to_string(&cache) {
-        Ok(body) => body,
-        Err(_) => {
-            let url = format!(
-                "https://query2.finance.yahoo.com/v8/finance/chart/%5E{symbol}?period1=473385600&period2={}&interval=1d",
-                Utc::now().timestamp()
-            );
-            let body = reqwest::Client::new()
-                .get(url)
-                .header("User-Agent", "Mozilla/5.0")
-                .send()
-                .await?
-                .error_for_status()?
-                .text()
-                .await?;
-            std::fs::create_dir_all(cache.parent().expect("cache dir"))?;
-            std::fs::write(&cache, &body)?;
-            body
-        }
-    };
-    let v: Value = serde_json::from_str(&body)?;
-    let result = &v["chart"]["result"][0];
-    let offset = result["meta"]["gmtoffset"].as_i64().unwrap_or(0);
-    let stamps = result["timestamp"].as_array().ok_or("no timestamps")?;
-    let closes = result["indicators"]["quote"][0]["close"]
-        .as_array()
-        .ok_or("no closes")?;
-    Ok(stamps
-        .iter()
-        .zip(closes)
-        .filter_map(|(t, c)| {
-            let date = DateTime::from_timestamp(t.as_i64()? + offset, 0)?.date_naive();
-            Some((date, c.as_f64().filter(|c| *c > 0.0)?))
-        })
-        .collect())
 }
 
 fn median(mut xs: Vec<f64>) -> f64 {

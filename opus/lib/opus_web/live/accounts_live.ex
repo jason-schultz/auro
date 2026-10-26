@@ -1,7 +1,8 @@
 defmodule OpusWeb.AccountsLive do
   @moduledoc """
   Accounts page: every broker account in one CAD total, an allocation bar,
-  a flat account table, and the hand-entered Wealthsimple positions.
+  a flat account table, the hand-entered Wealthsimple positions, and this
+  month's index exposure under the volatility rule.
 
   Balances are read from the Rust engine on mount and on Refresh; nothing
   here is pushed by price events.
@@ -11,6 +12,7 @@ defmodule OpusWeb.AccountsLive do
   import OpusWeb.Format
 
   alias Opus.Accounts
+  alias Opus.Accounts.IndexExposure
   alias Opus.Auro.Client
 
   @impl true
@@ -23,10 +25,15 @@ defmodule OpusWeb.AccountsLive do
         refreshing: false,
         overview: nil,
         error: nil,
-        as_of: nil
+        as_of: nil,
+        exposure: nil
       )
 
-    {:ok, if(connected?(socket), do: load(socket, &Accounts.overview/0), else: socket)}
+    {:ok,
+     if(connected?(socket),
+       do: socket |> assign(exposure: IndexExposure.current()) |> load(&Accounts.overview/0),
+       else: socket
+     )}
   end
 
   @impl true
@@ -81,6 +88,7 @@ defmodule OpusWeb.AccountsLive do
 
         <%= if @overview do %>
           <.summary overview={@overview} />
+          <.exposure :if={@exposure} exposure={@exposure} />
           <.account_table accounts={@overview.accounts} />
           <.positions :for={table <- @overview.positions} table={table} />
           <p :for={broker <- @overview.offline} class="text-[13px] text-muted">
@@ -93,6 +101,30 @@ defmodule OpusWeb.AccountsLive do
         <% end %>
       </div>
     </Layouts.app>
+    """
+  end
+
+  attr :exposure, :map, required: true
+
+  defp exposure(assigns) do
+    ~H"""
+    <section class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 rounded-box border border-base-300 bg-base-200 px-5 py-4">
+      <div class="flex flex-col gap-0.5">
+        <span class="text-[13px] text-muted">
+          <.t
+            s={"Index exposure for #{Calendar.strftime(Date.shift(@exposure.month, month: 1), "%B")}"}
+            wsb={"How much to YOLO into the index in #{Calendar.strftime(Date.shift(@exposure.month, month: 1), "%B")}"}
+          />
+        </span>
+        <span class="text-[15px]">
+          {@exposure.label}: <span class="font-semibold">{pct(@exposure.exposure)}</span>
+          <.t s="invested, the rest in cash" wsb="sent, the rest on the sidelines" />
+        </span>
+      </div>
+      <span class="text-[13px] text-muted">
+        {Calendar.strftime(@exposure.month, "%B")} volatility {pct(@exposure.realized_vol)} against a 16% target
+      </span>
+    </section>
     """
   end
 

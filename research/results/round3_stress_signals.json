@@ -1,0 +1,739 @@
+{
+  "results": [
+    {
+      "index": "S&P 500",
+      "result": {
+        "crashes": [
+          {
+            "derisk": -0.4381400733593819,
+            "first_on": "2000-04-17",
+            "hold": -0.46506900925897454,
+            "short": -0.02050000179301914,
+            "window": "dot-com"
+          },
+          {
+            "derisk": 0.0,
+            "first_on": "2007-04-12",
+            "hold": -0.5553695942351332,
+            "short": 0.832682411409182,
+            "window": "housing"
+          },
+          {
+            "derisk": -0.11257784972635876,
+            "first_on": "2020-03-03",
+            "hold": -0.3380189183781984,
+            "short": 0.268710455393387,
+            "window": "covid"
+          },
+          {
+            "derisk": -0.21491614944288873,
+            "first_on": "2022-02-25",
+            "hold": -0.24260130384593193,
+            "short": 0.010202822067451711,
+            "window": "2022 bear"
+          }
+        ],
+        "crit1_avoids_crashes": false,
+        "crit2_worth_it": false,
+        "episodes": 18,
+        "max_dd_derisk": -0.47149211685958226,
+        "max_dd_hold": -0.5553695942351337,
+        "scares": [
+          {
+            "first_on": null,
+            "hold": -0.041017124441568686,
+            "scare": "Asia 1997",
+            "share_on": 0.0
+          },
+          {
+            "first_on": "1998-08-03",
+            "hold": -0.06135454492679304,
+            "scare": "LTCM/Russia 1998",
+            "share_on": 1.0
+          },
+          {
+            "first_on": "2011-09-14",
+            "hold": -0.058207334905329366,
+            "scare": "euro debt 2011",
+            "share_on": 0.4
+          },
+          {
+            "first_on": "2015-08-03",
+            "hold": -0.07093297738786752,
+            "scare": "China 2015-16",
+            "share_on": 1.0
+          },
+          {
+            "first_on": null,
+            "hold": 0.045299874526673056,
+            "scare": "Brexit 2016",
+            "share_on": 0.0
+          },
+          {
+            "first_on": "2018-10-31",
+            "hold": -0.1385980734905743,
+            "scare": "late 2018",
+            "share_on": 0.6507936507936508
+          },
+          {
+            "first_on": null,
+            "hold": 0.04177993168041971,
+            "scare": "SVB 2023",
+            "share_on": 0.0
+          }
+        ],
+        "sharpe_derisk": 0.7016843865450717,
+        "sharpe_hold": 0.6903047893481217,
+        "short_total": -0.828192466566433,
+        "signal": "credit",
+        "time_on": 0.31847416278554
+      }
+    },
+    {
+      "index": "S&P 500",
+      "result": {
+        "crashes": [
+          {
+            "derisk": -0.40635074078137956,
+            "first_on": "2000-04-14",
+            "hold": -0.46506900925897454,
+            "short": 0.003789992552569954,
+            "window": "dot-com"
+          },
+          {
+            "derisk": -0.30025373252871135,
+            "first_on": "2007-08-15",
+            "hold": -0.5553695942351332,
+            "short": 0.31482663487863904,
+            "window": "housing"
+          },
+          {
+            "derisk": -0.12005858494211874,
+            "first_on": "2020-02-27",
+            "hold": -0.3380189183781984,
+            "short": 0.25428326936279366,
+            "window": "covid"
+          },
+          {
+            "derisk": -0.3341406831524655,
+            "first_on": "2021-12-01",
+            "hold": -0.24260130384593193,
+            "short": -0.1482412857601343,
+            "window": "2022 bear"
+          }
+        ],
+        "crit1_avoids_crashes": false,
+        "crit2_worth_it": false,
+        "episodes": 25,
+        "max_dd_derisk": -0.4148410652249842,
+        "max_dd_hold": -0.5553695942351337,
+        "scares": [
+          {
+            "first_on": "1997-10-27",
+            "hold": -0.041017124441568686,
+            "scare": "Asia 1997",
+            "share_on": 0.21739130434782608
+          },
+          {
+            "first_on": "1998-08-04",
+            "hold": -0.06135454492679304,
+            "scare": "LTCM/Russia 1998",
+            "share_on": 0.9811320754716981
+          },
+          {
+            "first_on": "2011-08-04",
+            "hold": -0.058207334905329366,
+            "scare": "euro debt 2011",
+            "share_on": 0.7294117647058823
+          },
+          {
+            "first_on": "2015-08-24",
+            "hold": -0.07093297738786752,
+            "scare": "China 2015-16",
+            "share_on": 0.2
+          },
+          {
+            "first_on": null,
+            "hold": 0.045299874526673056,
+            "scare": "Brexit 2016",
+            "share_on": 0.0
+          },
+          {
+            "first_on": "2018-12-21",
+            "hold": -0.1385980734905743,
+            "scare": "late 2018",
+            "share_on": 0.09523809523809523
+          },
+          {
+            "first_on": null,
+            "hold": 0.04177993168041971,
+            "scare": "SVB 2023",
+            "share_on": 0.0
+          }
+        ],
+        "sharpe_derisk": 0.5284218611509618,
+        "sharpe_hold": 0.6903047893481217,
+        "short_total": -0.925796691150363,
+        "signal": "fear (VIX)",
+        "time_on": 0.2245508982035928
+      }
+    },
+    {
+      "index": "S&P 500",
+      "result": {
+        "crashes": [
+          {
+            "derisk": -0.20641053358214778,
+            "first_on": "2001-07-10",
+            "hold": -0.46506900925897454,
+            "short": 0.3809847282413117,
+            "window": "dot-com"
+          },
+          {
+            "derisk": -0.09280722912185713,
+            "first_on": "2008-05-12",
+            "hold": -0.5553695942351332,
+            "short": 0.7089227862948158,
+            "window": "housing"
+          },
+          {
+            "derisk": -0.3380189183781984,
+            "first_on": null,
+            "hold": -0.3380189183781984,
+            "short": 0.0,
+            "window": "covid"
+          },
+          {
+            "derisk": -0.24260130384593193,
+            "first_on": null,
+            "hold": -0.24260130384593193,
+            "short": 0.0,
+            "window": "2022 bear"
+          }
+        ],
+        "crit1_avoids_crashes": false,
+        "crit2_worth_it": true,
+        "episodes": 4,
+        "max_dd_derisk": -0.3380189183781983,
+        "max_dd_hold": -0.5553695942351337,
+        "scares": [
+          {
+            "first_on": null,
+            "hold": -0.041017124441568686,
+            "scare": "Asia 1997",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": -0.06135454492679304,
+            "scare": "LTCM/Russia 1998",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": -0.058207334905329366,
+            "scare": "euro debt 2011",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": -0.07093297738786752,
+            "scare": "China 2015-16",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": 0.045299874526673056,
+            "scare": "Brexit 2016",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": -0.1385980734905743,
+            "scare": "late 2018",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": 0.04177993168041971,
+            "scare": "SVB 2023",
+            "share_on": 0.0
+          }
+        ],
+        "sharpe_derisk": 0.7441326278193653,
+        "sharpe_hold": 0.6903047893481217,
+        "short_total": -0.5308650189882615,
+        "signal": "recession (Sahm)",
+        "time_on": 0.19150587713461964
+      }
+    },
+    {
+      "index": "S&P 500",
+      "result": {
+        "crashes": [
+          {
+            "derisk": -0.3901108230856777,
+            "first_on": "2000-04-17",
+            "hold": -0.46506900925897454,
+            "short": 0.03363270470465518,
+            "window": "dot-com"
+          },
+          {
+            "derisk": -0.18220951066317137,
+            "first_on": "2007-08-15",
+            "hold": -0.5553695942351332,
+            "short": 0.5106648446659958,
+            "window": "housing"
+          },
+          {
+            "derisk": -0.11257784972635876,
+            "first_on": "2020-03-03",
+            "hold": -0.3380189183781984,
+            "short": 0.268710455393387,
+            "window": "covid"
+          },
+          {
+            "derisk": -0.3128441712212022,
+            "first_on": "2022-02-25",
+            "hold": -0.24260130384593193,
+            "short": -0.10994031876487631,
+            "window": "2022 bear"
+          }
+        ],
+        "crit1_avoids_crashes": false,
+        "crit2_worth_it": false,
+        "episodes": 22,
+        "max_dd_derisk": -0.42066792815455456,
+        "max_dd_hold": -0.5553695942351337,
+        "scares": [
+          {
+            "first_on": null,
+            "hold": -0.041017124441568686,
+            "scare": "Asia 1997",
+            "share_on": 0.0
+          },
+          {
+            "first_on": "1998-08-04",
+            "hold": -0.06135454492679304,
+            "scare": "LTCM/Russia 1998",
+            "share_on": 0.9811320754716981
+          },
+          {
+            "first_on": "2011-09-14",
+            "hold": -0.058207334905329366,
+            "scare": "euro debt 2011",
+            "share_on": 0.4
+          },
+          {
+            "first_on": "2015-08-24",
+            "hold": -0.07093297738786752,
+            "scare": "China 2015-16",
+            "share_on": 0.2
+          },
+          {
+            "first_on": null,
+            "hold": 0.045299874526673056,
+            "scare": "Brexit 2016",
+            "share_on": 0.0
+          },
+          {
+            "first_on": "2018-12-21",
+            "hold": -0.1385980734905743,
+            "scare": "late 2018",
+            "share_on": 0.09523809523809523
+          },
+          {
+            "first_on": null,
+            "hold": 0.04177993168041971,
+            "scare": "SVB 2023",
+            "share_on": 0.0
+          }
+        ],
+        "sharpe_derisk": 0.6893699345417829,
+        "sharpe_hold": 0.6903047893481217,
+        "short_total": -0.8214830539423927,
+        "signal": "two of three",
+        "time_on": 0.2085828343313373
+      }
+    },
+    {
+      "index": "TSX",
+      "result": {
+        "crashes": [
+          {
+            "derisk": -0.382037890827426,
+            "first_on": "2000-04-17",
+            "hold": -0.3932705943990257,
+            "short": -0.05997928466628766,
+            "window": "dot-com"
+          },
+          {
+            "derisk": 0.0,
+            "first_on": "2007-04-12",
+            "hold": -0.4488331970082754,
+            "short": 0.5137690938614061,
+            "window": "housing"
+          },
+          {
+            "derisk": -0.08307143273335682,
+            "first_on": "2020-03-03",
+            "hold": -0.3720191412548979,
+            "short": 0.37412263752899255,
+            "window": "covid"
+          },
+          {
+            "derisk": -0.08770444600500471,
+            "first_on": "2022-02-25",
+            "hold": -0.12400866077535211,
+            "short": 0.02936376325142942,
+            "window": "2022 bear"
+          }
+        ],
+        "crit1_avoids_crashes": false,
+        "crit2_worth_it": false,
+        "episodes": 18,
+        "max_dd_derisk": -0.4103130200032462,
+        "max_dd_hold": -0.48816919345414056,
+        "scares": [
+          {
+            "first_on": null,
+            "hold": -0.02651176512911735,
+            "scare": "Asia 1997",
+            "share_on": 0.0
+          },
+          {
+            "first_on": "1998-08-04",
+            "hold": -0.14934332823376184,
+            "scare": "LTCM/Russia 1998",
+            "share_on": 1.0
+          },
+          {
+            "first_on": "2011-09-14",
+            "hold": -0.07061498404190714,
+            "scare": "euro debt 2011",
+            "share_on": 0.39759036144578314
+          },
+          {
+            "first_on": "2015-08-04",
+            "hold": -0.09730690812098974,
+            "scare": "China 2015-16",
+            "share_on": 1.0
+          },
+          {
+            "first_on": null,
+            "hold": 0.04247930777581277,
+            "scare": "Brexit 2016",
+            "share_on": 0.0
+          },
+          {
+            "first_on": "2018-10-31",
+            "hold": -0.1046830726631226,
+            "scare": "late 2018",
+            "share_on": 0.6666666666666666
+          },
+          {
+            "first_on": null,
+            "hold": -0.005550394233308276,
+            "scare": "SVB 2023",
+            "share_on": 0.0
+          }
+        ],
+        "sharpe_derisk": 0.7873380155534586,
+        "sharpe_hold": 0.6749996321623258,
+        "short_total": -0.7322470745778575,
+        "signal": "credit",
+        "time_on": 0.31904021328593646
+      }
+    },
+    {
+      "index": "TSX",
+      "result": {
+        "crashes": [
+          {
+            "derisk": -0.3027892893198748,
+            "first_on": "2000-04-14",
+            "hold": -0.3932705943990257,
+            "short": 0.05522882209086233,
+            "window": "dot-com"
+          },
+          {
+            "derisk": -0.21853888288194523,
+            "first_on": "2007-08-15",
+            "hold": -0.4488331970082754,
+            "short": 0.21594733079336037,
+            "window": "housing"
+          },
+          {
+            "derisk": -0.06697031734758552,
+            "first_on": "2020-02-27",
+            "hold": -0.3720191412548979,
+            "short": 0.39670743076260884,
+            "window": "covid"
+          },
+          {
+            "derisk": -0.18612489144624822,
+            "first_on": "2021-12-01",
+            "hold": -0.12400866077535211,
+            "short": -0.08486647970199024,
+            "window": "2022 bear"
+          }
+        ],
+        "crit1_avoids_crashes": false,
+        "crit2_worth_it": true,
+        "episodes": 24,
+        "max_dd_derisk": -0.3201256873689666,
+        "max_dd_hold": -0.48816919345414056,
+        "scares": [
+          {
+            "first_on": "1997-10-27",
+            "hold": -0.02651176512911735,
+            "scare": "Asia 1997",
+            "share_on": 0.22727272727272727
+          },
+          {
+            "first_on": "1998-08-04",
+            "hold": -0.14934332823376184,
+            "scare": "LTCM/Russia 1998",
+            "share_on": 1.0
+          },
+          {
+            "first_on": "2011-08-04",
+            "hold": -0.07061498404190714,
+            "scare": "euro debt 2011",
+            "share_on": 0.7349397590361446
+          },
+          {
+            "first_on": "2015-08-24",
+            "hold": -0.09730690812098974,
+            "scare": "China 2015-16",
+            "share_on": 0.2013888888888889
+          },
+          {
+            "first_on": null,
+            "hold": 0.04247930777581277,
+            "scare": "Brexit 2016",
+            "share_on": 0.0
+          },
+          {
+            "first_on": "2018-12-21",
+            "hold": -0.1046830726631226,
+            "scare": "late 2018",
+            "share_on": 0.07936507936507936
+          },
+          {
+            "first_on": null,
+            "hold": -0.005550394233308276,
+            "scare": "SVB 2023",
+            "share_on": 0.0
+          }
+        ],
+        "sharpe_derisk": 0.6754383245169697,
+        "sharpe_hold": 0.6749996321623258,
+        "short_total": -0.802806713022014,
+        "signal": "fear (VIX)",
+        "time_on": 0.2248389246834037
+      }
+    },
+    {
+      "index": "TSX",
+      "result": {
+        "crashes": [
+          {
+            "derisk": -0.22157877052986086,
+            "first_on": "2001-07-10",
+            "hold": -0.3932705943990257,
+            "short": 0.24314132259625598,
+            "window": "dot-com"
+          },
+          {
+            "derisk": 0.04465596452801823,
+            "first_on": "2008-05-12",
+            "hold": -0.4488331970082754,
+            "short": 0.61707211858261,
+            "window": "housing"
+          },
+          {
+            "derisk": -0.3720191412548979,
+            "first_on": null,
+            "hold": -0.3720191412548979,
+            "short": 0.0,
+            "window": "covid"
+          },
+          {
+            "derisk": -0.12400866077535211,
+            "first_on": null,
+            "hold": -0.12400866077535211,
+            "short": 0.0,
+            "window": "2022 bear"
+          }
+        ],
+        "crit1_avoids_crashes": false,
+        "crit2_worth_it": false,
+        "episodes": 4,
+        "max_dd_derisk": -0.3727406849687518,
+        "max_dd_hold": -0.48816919345414056,
+        "scares": [
+          {
+            "first_on": null,
+            "hold": -0.02651176512911735,
+            "scare": "Asia 1997",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": -0.14934332823376184,
+            "scare": "LTCM/Russia 1998",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": -0.07061498404190714,
+            "scare": "euro debt 2011",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": -0.09730690812098974,
+            "scare": "China 2015-16",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": 0.04247930777581277,
+            "scare": "Brexit 2016",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": -0.1046830726631226,
+            "scare": "late 2018",
+            "share_on": 0.0
+          },
+          {
+            "first_on": null,
+            "hold": -0.005550394233308276,
+            "scare": "SVB 2023",
+            "share_on": 0.0
+          }
+        ],
+        "sharpe_derisk": 0.7485410056328556,
+        "sharpe_hold": 0.6749996321623258,
+        "short_total": -0.37627387212764474,
+        "signal": "recession (Sahm)",
+        "time_on": 0.1914019106865141
+      }
+    },
+    {
+      "index": "TSX",
+      "result": {
+        "crashes": [
+          {
+            "derisk": -0.278527533416948,
+            "first_on": "2000-04-17",
+            "hold": -0.3932705943990257,
+            "short": 0.0942646743363289,
+            "window": "dot-com"
+          },
+          {
+            "derisk": -0.0733113100108348,
+            "first_on": "2007-08-15",
+            "hold": -0.4488331970082754,
+            "short": 0.41740957599692785,
+            "window": "housing"
+          },
+          {
+            "derisk": -0.08307143273335682,
+            "first_on": "2020-03-03",
+            "hold": -0.3720191412548979,
+            "short": 0.37412263752899255,
+            "window": "covid"
+          },
+          {
+            "derisk": -0.15271134198508696,
+            "first_on": "2022-02-25",
+            "hold": -0.12400866077535211,
+            "short": -0.04073137161020135,
+            "window": "2022 bear"
+          }
+        ],
+        "crit1_avoids_crashes": false,
+        "crit2_worth_it": true,
+        "episodes": 21,
+        "max_dd_derisk": -0.3115388247026679,
+        "max_dd_hold": -0.48816919345414056,
+        "scares": [
+          {
+            "first_on": null,
+            "hold": -0.02651176512911735,
+            "scare": "Asia 1997",
+            "share_on": 0.0
+          },
+          {
+            "first_on": "1998-08-04",
+            "hold": -0.14934332823376184,
+            "scare": "LTCM/Russia 1998",
+            "share_on": 1.0
+          },
+          {
+            "first_on": "2011-09-14",
+            "hold": -0.07061498404190714,
+            "scare": "euro debt 2011",
+            "share_on": 0.39759036144578314
+          },
+          {
+            "first_on": "2015-08-24",
+            "hold": -0.09730690812098974,
+            "scare": "China 2015-16",
+            "share_on": 0.2013888888888889
+          },
+          {
+            "first_on": null,
+            "hold": 0.04247930777581277,
+            "scare": "Brexit 2016",
+            "share_on": 0.0
+          },
+          {
+            "first_on": "2018-12-21",
+            "hold": -0.1046830726631226,
+            "scare": "late 2018",
+            "share_on": 0.07936507936507936
+          },
+          {
+            "first_on": null,
+            "hold": -0.005550394233308276,
+            "scare": "SVB 2023",
+            "share_on": 0.0
+          }
+        ],
+        "sharpe_derisk": 0.8070629198690857,
+        "sharpe_hold": 0.6749996321623258,
+        "short_total": -0.6567353148743031,
+        "signal": "two of three",
+        "time_on": 0.2092868251499667
+      }
+    }
+  ],
+  "run_at": "2026-10-26T06:51:29.795251+00:00",
+  "verdicts": [
+    {
+      "derisk_pass": false,
+      "short_allowed": false,
+      "signal": "credit"
+    },
+    {
+      "derisk_pass": false,
+      "short_allowed": false,
+      "signal": "fear (VIX)"
+    },
+    {
+      "derisk_pass": false,
+      "short_allowed": false,
+      "signal": "recession (Sahm)"
+    },
+    {
+      "derisk_pass": false,
+      "short_allowed": false,
+      "signal": "two of three"
+    }
+  ]
+}

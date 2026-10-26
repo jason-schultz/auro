@@ -226,5 +226,6 @@ defmodule OpusWeb.PayoffChart do
   defp strategy_label("covered_call"), do: "a covered call"
   defp strategy_label("long_call"), do: "a long call"
   defp strategy_label("long_put"), do: "a long put"
+  defp strategy_label("structure"), do: "the whole multi-leg trade"
   defp strategy_label(other), do: to_string(other)
 end
