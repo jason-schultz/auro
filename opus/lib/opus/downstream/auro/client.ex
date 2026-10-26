@@ -58,8 +58,10 @@ defmodule Opus.Auro.Client do
   @doc "Fetch live engine subsystem freshness from Rust health endpoint."
   @spec get_live_health() :: {:ok, map()} | {:error, any()}
   def get_live_health do
+    # A page read (the dashboard): when the engine is down, say so at once
+    # rather than after the retry budget.
     client()
-    |> Req.get(url: "/api/health/live")
+    |> Req.get(url: "/api/health/live", retry: false)
     |> handle_response()
   end
 

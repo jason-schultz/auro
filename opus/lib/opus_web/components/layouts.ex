@@ -37,8 +37,12 @@ defmodule OpusWeb.Layouts do
            page, so the bar's own content starts below that strip; the hit areas
            are tall enough that a link stays clickable even half-covered. --%>
       <div class="mx-auto flex w-full max-w-7xl items-center justify-between gap-6 px-4 pt-[max(2.5rem,env(safe-area-inset-top))] pb-3 sm:px-6">
-        <a href={~p"/strategies"} class="py-2 text-base font-semibold tracking-tight">Auro</a>
+        <a href={~p"/"} class="py-2 text-base font-semibold tracking-tight">Auro</a>
         <nav class="flex min-w-0 items-center gap-5 overflow-x-auto whitespace-nowrap text-sm">
+          <a href={~p"/"} class="py-2 text-muted hover:text-base-content"><.t
+            s="Dashboard"
+            wsb="War room"
+          /></a>
           <a href={~p"/strategies"} class="py-2 text-muted hover:text-base-content"><.t
             s="Strategies"
             wsb="Plays"
