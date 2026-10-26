@@ -93,7 +93,7 @@ defmodule Opus.Accounts.OverviewTest do
            ]
 
     assert_in_delta Enum.sum(Enum.map(overview.accounts, & &1.share)), 1.0, 1.0e-9
-    assert overview.accounts |> Enum.map(& &1.color) |> Enum.uniq() |> length() == 4
+    assert Enum.map(overview.accounts, & &1.rank) == [0, 1, 2, 3]
     assert overview.offline == []
   end
 

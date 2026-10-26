@@ -1,6 +1,9 @@
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder, Response};
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use super::models::*;
 use crate::brokers::client::BrokerClient;
@@ -11,6 +14,10 @@ use crate::error::{AppError, AppResult};
 #[derive(Debug, Clone)]
 pub struct OandaClient {
     http_client: Client,
+    /// The earliest moment the next REST request may leave. Shared by every
+    /// clone, so the candle feed, trade management and the API handlers
+    /// draw from one budget.
+    next_slot: Arc<Mutex<Instant>>,
     base_url: String,
     stream_url: String,
     api_key: String,
@@ -19,6 +26,10 @@ pub struct OandaClient {
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Spacing between REST requests: 50 a second, well under OANDA's
+/// per-second limit. The streaming connection is not paced.
+const REQUEST_SPACING: Duration = Duration::from_millis(20);
 
 impl OandaClient {
     pub fn new(base_url: &str, stream_url: &str, api_key: &str, account_id: &str) -> Self {
@@ -29,6 +40,7 @@ impl OandaClient {
 
         Self {
             http_client,
+            next_slot: Arc::new(Mutex::new(Instant::now())),
             base_url: base_url.trim_end_matches('/').to_string(),
             stream_url: stream_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
@@ -40,17 +52,32 @@ impl OandaClient {
         &self.account_id
     }
 
+    /// Wait for this request's slot in the shared pacing budget, then send.
+    /// Slots are handed out in arrival order, so a burst of feed polls
+    /// queues instead of tripping OANDA's rate limit.
+    async fn send(&self, request: RequestBuilder) -> reqwest::Result<Response> {
+        let slot = {
+            let mut next = self.next_slot.lock().await;
+            let slot = (*next).max(Instant::now());
+            *next = slot + REQUEST_SPACING;
+            slot
+        };
+        tokio::time::sleep_until(slot).await;
+        request.send().await
+    }
+
     // --- Account ---
 
     pub async fn get_account(&self) -> AppResult<Account> {
         let url = format!("{}/v3/accounts/{}", self.base_url, self.account_id);
 
         let resp = self
-            .http_client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+            .send(
+                self.http_client
+                    .get(&url)
+                    .bearer_auth(&self.api_key)
+                    .timeout(REQUEST_TIMEOUT),
+            )
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
 
@@ -85,11 +112,12 @@ impl OandaClient {
         );
 
         let resp = self
-            .http_client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+            .send(
+                self.http_client
+                    .get(&url)
+                    .bearer_auth(&self.api_key)
+                    .timeout(REQUEST_TIMEOUT),
+            )
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
 
@@ -115,12 +143,13 @@ impl OandaClient {
         let instruments_param = instruments.join(",");
 
         let resp = self
-            .http_client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .query(&[("instruments", &instruments_param)])
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+            .send(
+                self.http_client
+                    .get(&url)
+                    .bearer_auth(&self.api_key)
+                    .query(&[("instruments", &instruments_param)])
+                    .timeout(REQUEST_TIMEOUT),
+            )
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
 
@@ -153,12 +182,13 @@ impl OandaClient {
         let query = candle_query(instrument, granularity, count, from, to);
 
         let resp = self
-            .http_client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .query(&query)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+            .send(
+                self.http_client
+                    .get(&url)
+                    .bearer_auth(&self.api_key)
+                    .query(&query)
+                    .timeout(REQUEST_TIMEOUT),
+            )
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
 
@@ -230,12 +260,13 @@ impl OandaClient {
         });
 
         let resp = self
-            .http_client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+            .send(
+                self.http_client
+                    .post(&url)
+                    .bearer_auth(&self.api_key)
+                    .json(&body)
+                    .timeout(REQUEST_TIMEOUT),
+            )
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
 
@@ -265,11 +296,12 @@ impl OandaClient {
         );
 
         let resp = self
-            .http_client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+            .send(
+                self.http_client
+                    .get(&url)
+                    .bearer_auth(&self.api_key)
+                    .timeout(REQUEST_TIMEOUT),
+            )
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
 
@@ -303,12 +335,13 @@ impl OandaClient {
         };
 
         let resp = self
-            .http_client
-            .put(&url)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+            .send(
+                self.http_client
+                    .put(&url)
+                    .bearer_auth(&self.api_key)
+                    .json(&body)
+                    .timeout(REQUEST_TIMEOUT),
+            )
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
 
@@ -340,11 +373,12 @@ impl OandaClient {
         );
 
         let resp = self
-            .http_client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+            .send(
+                self.http_client
+                    .get(&url)
+                    .bearer_auth(&self.api_key)
+                    .timeout(REQUEST_TIMEOUT),
+            )
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
 
@@ -370,11 +404,12 @@ impl OandaClient {
         );
 
         let resp = self
-            .http_client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+            .send(
+                self.http_client
+                    .get(&url)
+                    .bearer_auth(&self.api_key)
+                    .timeout(REQUEST_TIMEOUT),
+            )
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
 
@@ -400,12 +435,13 @@ impl OandaClient {
         );
 
         let resp = self
-            .http_client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .query(&[("id", since_id), ("type", "ORDER_FILL")])
-            .timeout(REQUEST_TIMEOUT)
-            .send()
+            .send(
+                self.http_client
+                    .get(&url)
+                    .bearer_auth(&self.api_key)
+                    .query(&[("id", since_id), ("type", "ORDER_FILL")])
+                    .timeout(REQUEST_TIMEOUT),
+            )
             .await
             .map_err(|e| AppError::Oanda(e.to_string()))?;
 

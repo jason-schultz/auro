@@ -59,6 +59,10 @@ defmodule OpusWeb.Layouts do
             s="Instruments"
             wsb="Tickers"
           /></a>
+          <a href={~p"/research"} class="py-2 text-muted hover:text-base-content"><.t
+            s="Research"
+            wsb="DD"
+          /></a>
           <.theme_toggle />
         </nav>
       </div>

@@ -114,12 +114,12 @@ defmodule OpusWeb.AccountsLive do
         <div
           :for={account <- @overview.accounts}
           :if={account.share}
-          style={"flex: #{account.share * 100} 0 0; background: #{account.color}"}
+          style={"flex: #{account.share * 100} 0 0; background: #{color(account.rank)}"}
         />
       </div>
       <div class="flex flex-wrap gap-x-7 gap-y-2.5 text-[13px] text-muted">
         <span :for={account <- @overview.accounts} class="inline-flex items-center gap-2">
-          <.swatch color={account.color} /> {account.label} {pct(account.share)}
+          <.swatch color={color(account.rank)} /> {account.label} {pct(account.share)}
         </span>
       </div>
     </section>
@@ -142,7 +142,7 @@ defmodule OpusWeb.AccountsLive do
         class="grid grid-cols-[minmax(0,2.2fr)_minmax(0,1.2fr)_repeat(2,minmax(0,1fr))] items-center gap-4 border-b border-neutral py-3.5 text-[15px] last:border-b-0"
       >
         <span class="flex items-center gap-3">
-          <.swatch color={account.color} /> {account.label}
+          <.swatch color={color(account.rank)} /> {account.label}
           <span :if={account.number} class="text-[13px] text-muted">{account.number}</span>
         </span>
         <span class="inline-flex items-center gap-1.5 text-[13px] text-muted">
@@ -212,6 +212,21 @@ defmodule OpusWeb.AccountsLive do
     </section>
     """
   end
+
+  # Allocation colours by value rank (largest first), taken from the active
+  # theme so they follow it; the mixes fill in hues the theme doesn't name.
+  @palette [
+    "var(--color-primary)",
+    "var(--color-secondary)",
+    "var(--color-accent)",
+    "color-mix(in oklab, var(--color-secondary) 50%, var(--color-error))",
+    "var(--color-neutral-content)",
+    "var(--color-error)",
+    "color-mix(in oklab, var(--color-secondary) 60%, var(--color-base-content))",
+    "color-mix(in oklab, var(--color-primary) 50%, var(--color-accent))"
+  ]
+
+  defp color(rank), do: Enum.at(@palette, rem(rank, length(@palette)))
 
   attr :color, :string, required: true
 

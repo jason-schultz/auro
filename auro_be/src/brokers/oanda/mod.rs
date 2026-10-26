@@ -1,4 +1,4 @@
-use chrono::{Datelike, Timelike, Utc, Weekday};
+use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
 
 pub mod backfill;
 pub mod client;
@@ -64,7 +64,12 @@ pub const INSTRUMENTS: &[&str] = &[
 ];
 
 pub fn is_forex_market_open() -> bool {
-    let now = Utc::now();
+    is_forex_market_open_at(Utc::now())
+}
+
+/// Whether OANDA's weekly session is open at `now`: Sunday 17:00 to Friday
+/// 17:00 New York time, daylight saving included.
+pub fn is_forex_market_open_at(now: DateTime<Utc>) -> bool {
     let eastern = now.with_timezone(&chrono_tz::US::Eastern);
     let weekday = eastern.weekday();
     let hour = eastern.hour();

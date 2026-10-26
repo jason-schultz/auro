@@ -22,7 +22,7 @@ defmodule Opus.Accounts.Overview do
           cash: float() | nil,
           value: float(),
           share: float() | nil,
-          color: String.t()
+          rank: non_neg_integer()
         }
 
   @type t :: %{
@@ -31,9 +31,6 @@ defmodule Opus.Accounts.Overview do
           positions: [%{account: String.t(), rows: [map()]}],
           offline: [%{broker: String.t(), error: String.t() | nil}]
         }
-
-  # Allocation-bar palette, assigned by value rank (largest first).
-  @palette ~w(#7FC4AC #5B9EDB #D9A857 #C98BD9 #9AA3AE #E39A96 #8FA9C9 #B8C5A6)
 
   @spec build([map()], [map()]) :: t()
   def build(brokers, wealthsimple_accounts) do
@@ -56,7 +53,7 @@ defmodule Opus.Accounts.Overview do
       |> Enum.map(fn {account, index} ->
         account
         |> Map.put(:share, share(account, total_cad))
-        |> Map.put(:color, Enum.at(@palette, rem(index, length(@palette))))
+        |> Map.put(:rank, index)
       end)
 
     %{

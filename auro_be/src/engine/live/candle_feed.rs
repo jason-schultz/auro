@@ -17,6 +17,13 @@
 //!   Its cycle can overrun a minute when OANDA is slow; that no longer delays
 //!   trading.
 //!
+//! Neither lane asks for a key until its next bar can have closed: the newest
+//! stored bar opened at T, so the one after it closes at T + two bar lengths.
+//! A daily bar is requested around its close, not every minute of the day.
+//! When a due key comes back empty (a session break, the weekend gap, a bar
+//! OANDA hasn't marked complete yet) the fast lane asks again next minute and
+//! the sweep backs off one bar length, at most five minutes.
+//!
 //! The fast lane re-reads the enabled set each minute and publishes it; the
 //! sweep skips those keys. When a key changes lane its new owner starts from
 //! the newest stored bar, and `CandleBuffer::push` drops any bar it already
@@ -33,7 +40,7 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 use crate::brokers::oanda::backfill::fetch_complete_since;
-use crate::brokers::oanda::INSTRUMENTS;
+use crate::brokers::oanda::{is_forex_market_open_at, INSTRUMENTS};
 use crate::db::repositories::{candles as candles_repo, live_queries, signal_events};
 use crate::engine::types::{Candle, CandleBuffer, CandleRow, Granularity};
 use crate::state::AppState;
@@ -53,10 +60,66 @@ const POLL_OFFSET_SECS: i64 = 2;
 const FAST_LANE_RETRIES: u32 = 3;
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long after the weekly close the feed keeps polling, so the final
+/// bars (and Friday's daily bar) land before it goes quiet.
+const CLOSE_GRACE: Duration = Duration::minutes(15);
+
+/// Longest the sweep waits before asking again after a due key came back empty.
+const EMPTY_BACKOFF_CAP: Duration = Duration::minutes(5);
+
+/// Margin on a backoff, so a cycle that starts a moment early still counts.
+const CYCLE_SLACK: Duration = Duration::seconds(30);
+
 type FeedKey = (&'static str, Granularity);
 
 /// The keys the fast lane currently owns, published for the sweep to skip.
 type LiveKeys = Arc<RwLock<HashSet<FeedKey>>>;
+
+/// Which lane is polling: they differ only in how they handle a miss.
+#[derive(Clone, Copy)]
+enum Lane {
+    Fast,
+    Sweep,
+}
+
+impl Lane {
+    /// Extra attempts after a failed fetch.
+    fn retries(self) -> u32 {
+        match self {
+            Lane::Fast => FAST_LANE_RETRIES,
+            Lane::Sweep => 0,
+        }
+    }
+
+    /// When to ask again after a due key came back with nothing new.
+    fn quiet_until(self, granularity: Granularity, cycle: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        match self {
+            Lane::Fast => None,
+            Lane::Sweep => {
+                let bar = Duration::minutes(granularity.minutes());
+                Some(cycle + bar.min(EMPTY_BACKOFF_CAP) - CYCLE_SLACK)
+            }
+        }
+    }
+}
+
+/// What a lane knows about one key between cycles.
+#[derive(Clone, Copy)]
+struct Cursor {
+    /// Open time of the newest bar stored.
+    newest: DateTime<Utc>,
+    /// Set after an empty answer: don't ask again before this.
+    quiet_until: Option<DateTime<Utc>>,
+}
+
+impl Cursor {
+    fn at(newest: DateTime<Utc>) -> Self {
+        Cursor {
+            newest,
+            quiet_until: None,
+        }
+    }
+}
 
 pub fn spawn_candle_feed(state: AppState) {
     tokio::spawn(async move {
@@ -78,11 +141,14 @@ pub fn spawn_candle_feed(state: AppState) {
 
 /// Poll the enabled-strategy keys two seconds past every minute.
 async fn fast_lane(state: AppState, live_keys: LiveKeys) {
-    let mut last_seen: HashMap<FeedKey, DateTime<Utc>> = HashMap::new();
+    let mut cursors: HashMap<FeedKey, Cursor> = HashMap::new();
     let mut owned: HashSet<FeedKey> = HashSet::new();
 
     loop {
         sleep(until_next_poll(Utc::now())).await;
+        if !should_poll(Utc::now()) {
+            continue;
+        }
 
         match live_queries::enabled_strategy_keys(&state.db).await {
             Ok(rows) => {
@@ -97,7 +163,7 @@ async fn fast_lane(state: AppState, live_keys: LiveKeys) {
                     );
                     owned = keys;
                     *live_keys.write().await = owned.clone();
-                    last_seen.retain(|key, _| owned.contains(key));
+                    cursors.retain(|key, _| owned.contains(key));
                 }
             }
             // Keep polling the last known set rather than go dark.
@@ -105,18 +171,22 @@ async fn fast_lane(state: AppState, live_keys: LiveKeys) {
         }
 
         let keys: Vec<FeedKey> = owned.iter().copied().collect();
-        run_keys(&state, keys, &mut last_seen, FAST_LANE_RETRIES).await;
+        run_keys(&state, keys, &mut cursors, Lane::Fast).await;
     }
 }
 
 /// Poll everything the fast lane does not own, one full pass per cycle.
 async fn sweep(state: AppState, live_keys: LiveKeys) {
-    let mut last_seen: HashMap<FeedKey, DateTime<Utc>> = HashMap::new();
+    let mut cursors: HashMap<FeedKey, Cursor> = HashMap::new();
 
     loop {
+        if !should_poll(Utc::now()) {
+            sleep(until_next_poll(Utc::now())).await;
+            continue;
+        }
         let skip = live_keys.read().await.clone();
-        last_seen.retain(|key, _| !skip.contains(key));
-        run_keys(&state, sweep_keys(&skip), &mut last_seen, 0).await;
+        cursors.retain(|key, _| !skip.contains(key));
+        run_keys(&state, sweep_keys(&skip), &mut cursors, Lane::Sweep).await;
         sleep(until_next_poll(Utc::now())).await;
     }
 }
@@ -145,37 +215,51 @@ fn sweep_keys(skip: &HashSet<FeedKey>) -> Vec<FeedKey> {
 async fn run_keys(
     state: &AppState,
     keys: Vec<FeedKey>,
-    last_seen: &mut HashMap<FeedKey, DateTime<Utc>>,
-    retries: u32,
+    cursors: &mut HashMap<FeedKey, Cursor>,
+    lane: Lane,
 ) {
+    let cycle = Utc::now();
     let polls: Vec<_> = keys
         .into_iter()
+        .filter(|key| is_due(cursors.get(key), key.1, cycle))
         .map(|key| {
-            let after = last_seen.get(&key).copied();
-            poll_key(state, key, after, retries).map(move |newest| (key, newest))
+            let after = cursors.get(&key).map(|c| c.newest);
+            poll_key(state, key, after, lane, cycle).map(move |cursor| (key, cursor))
         })
         .collect();
 
-    let updates: Vec<(FeedKey, Option<DateTime<Utc>>)> = stream::iter(polls)
+    let updates: Vec<(FeedKey, Option<Cursor>)> = stream::iter(polls)
         .buffer_unordered(CONCURRENCY)
         .collect()
         .await;
 
-    for (key, newest) in updates {
-        if let Some(newest) = newest {
-            last_seen.insert(key, newest);
+    for (key, cursor) in updates {
+        if let Some(cursor) = cursor {
+            cursors.insert(key, cursor);
         }
     }
 }
 
+/// Whether a key is worth asking about this cycle. A key the lane hasn't
+/// seen yet always is; otherwise its next bar must be able to have closed,
+/// and any backoff from an empty answer must have run out.
+fn is_due(cursor: Option<&Cursor>, granularity: Granularity, now: DateTime<Utc>) -> bool {
+    let Some(cursor) = cursor else {
+        return true;
+    };
+    let bar = Duration::minutes(granularity.minutes());
+    now >= cursor.newest + bar + bar && cursor.quiet_until.is_none_or(|t| now >= t)
+}
+
 /// Fetch, persist and ingest new bars for one instrument/granularity.
-/// Returns the newest bar time now known, or None if the lookup failed.
+/// Returns the key's cursor for the next cycle, or None if the lookup failed.
 async fn poll_key(
     state: &AppState,
     (instrument, granularity): FeedKey,
     after: Option<DateTime<Utc>>,
-    retries: u32,
-) -> Option<DateTime<Utc>> {
+    lane: Lane,
+    cycle: DateTime<Utc>,
+) -> Option<Cursor> {
     let after = match after {
         Some(t) => t,
         None => match starting_point(state, instrument, granularity).await {
@@ -184,7 +268,7 @@ async fn poll_key(
         },
     };
 
-    let mut attempts_left = retries;
+    let mut attempts_left = lane.retries();
     let candles = loop {
         match fetch_complete_since(&state.oanda, instrument, granularity, after).await {
             Ok(c) => break c,
@@ -197,22 +281,25 @@ async fn poll_key(
             }
             Err(e) => {
                 tracing::warn!("Candle feed fetch failed for {instrument} {granularity}: {e}");
-                return Some(after);
+                return Some(Cursor::at(after));
             }
         }
     };
 
     let Some(newest) = candles.last().map(|c| c.time) else {
-        return Some(after);
+        return Some(Cursor {
+            newest: after,
+            quiet_until: lane.quiet_until(granularity, cycle),
+        });
     };
 
     if let Err(e) = ingest_closed_candles(state, instrument, granularity, candles).await {
         tracing::error!("Candle feed persist failed for {instrument} {granularity}: {e}");
         // Leave the cursor unchanged so the next cycle refetches these bars.
-        return Some(after);
+        return Some(Cursor::at(after));
     }
 
-    Some(newest)
+    Some(Cursor::at(newest))
 }
 
 /// Where to start fetching for a key the feed hasn't seen this run: the newest
@@ -362,6 +449,13 @@ fn just_closed(candle: &Candle, granularity: Granularity, now: DateTime<Utc>) ->
     now - close_time <= bar
 }
 
+/// Poll while OANDA's weekly session is open and for a short grace after
+/// it closes. Over the weekend every answer is empty, so the feed sleeps;
+/// on Sunday's open it fetches everything since the last stored bar.
+fn should_poll(now: DateTime<Utc>) -> bool {
+    is_forex_market_open_at(now) || is_forex_market_open_at(now - CLOSE_GRACE)
+}
+
 fn until_next_poll(now: DateTime<Utc>) -> std::time::Duration {
     let into_minute = now.timestamp().rem_euclid(60);
     let mut wait = 60 - into_minute + POLL_OFFSET_SECS;
@@ -451,6 +545,75 @@ mod tests {
         assert!(!keys.contains(&("NAS100_USD", Granularity::M5)));
         assert!(keys.contains(&("NAS100_USD", Granularity::M1)));
         assert!(sweep_keys(&HashSet::new()).len() == INSTRUMENTS.len() * Granularity::ALL.len());
+    }
+
+    #[test]
+    fn feed_sleeps_through_the_weekend_with_a_grace_after_the_close() {
+        // Friday 2026-10-23: 17:00 New York is 21:00 UTC (daylight time).
+        let at = |d, h, m| Utc.with_ymd_and_hms(2026, 10, d, h, m, 0).unwrap();
+        assert!(should_poll(at(23, 20, 59)), "Friday before the close");
+        assert!(should_poll(at(23, 21, 10)), "within the grace");
+        assert!(!should_poll(at(23, 21, 16)), "after the grace");
+        assert!(!should_poll(at(24, 15, 0)), "Saturday");
+        assert!(!should_poll(at(25, 20, 59)), "Sunday before the open");
+        assert!(should_poll(at(25, 21, 0)), "Sunday open");
+        assert!(should_poll(at(21, 3, 0)), "midweek");
+        // Standard time: 17:00 New York is 22:00 UTC (Friday 2026-11-06).
+        let nov = Utc.with_ymd_and_hms(2026, 11, 6, 21, 30, 0).unwrap();
+        assert!(should_poll(nov), "still open at 16:30 New York");
+    }
+
+    #[test]
+    fn a_key_is_due_once_its_next_bar_can_have_closed() {
+        let at = |h, m, s| Utc.with_ymd_and_hms(2026, 10, 27, h, m, s).unwrap();
+        // Newest M5 bar opened 14:00; the 14:05 bar closes at 14:10.
+        let m5 = Cursor::at(at(14, 0, 0));
+        assert!(!is_due(Some(&m5), Granularity::M5, at(14, 9, 2)));
+        assert!(is_due(Some(&m5), Granularity::M5, at(14, 10, 2)));
+
+        // Newest daily bar opened Monday 21:00 UTC: next due Wednesday 21:00.
+        let d = Cursor::at(at(21, 0, 0) - Duration::days(1));
+        assert!(!is_due(
+            Some(&d),
+            Granularity::D,
+            at(21, 0, 2) + Duration::hours(23)
+        ));
+        assert!(is_due(
+            Some(&d),
+            Granularity::D,
+            at(21, 0, 2) + Duration::days(1)
+        ));
+
+        assert!(
+            is_due(None, Granularity::D, at(3, 0, 2)),
+            "unseen keys are always due"
+        );
+    }
+
+    #[test]
+    fn the_sweep_backs_off_after_an_empty_answer_and_the_fast_lane_does_not() {
+        let cycle = Utc.with_ymd_and_hms(2026, 10, 27, 14, 0, 2).unwrap();
+        let stale = cycle - Duration::days(3);
+        let next_cycle = |minutes| cycle + Duration::minutes(minutes);
+
+        let quiet = |lane: Lane, g| Cursor {
+            newest: stale,
+            quiet_until: lane.quiet_until(g, cycle),
+        };
+
+        // One bar length, capped at five minutes.
+        let h1 = quiet(Lane::Sweep, Granularity::H1);
+        assert!(!is_due(Some(&h1), Granularity::H1, next_cycle(4)));
+        assert!(is_due(Some(&h1), Granularity::H1, next_cycle(5)));
+        let m1 = quiet(Lane::Sweep, Granularity::M1);
+        assert!(is_due(Some(&m1), Granularity::M1, next_cycle(1)));
+
+        // A cycle that starts a moment early still counts.
+        let early = next_cycle(5) - Duration::milliseconds(5);
+        assert!(is_due(Some(&h1), Granularity::H1, early));
+
+        let fast = quiet(Lane::Fast, Granularity::D);
+        assert!(is_due(Some(&fast), Granularity::D, next_cycle(1)));
     }
 
     #[test]

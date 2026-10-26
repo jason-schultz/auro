@@ -1,0 +1,120 @@
+{
+  "calm_year_mean": -0.07622358267245248,
+  "calm_year_mean_without_top3": -0.08798214122966254,
+  "class_contribution": {
+    "bond": -0.3359001007815218,
+    "commodity": -0.031780191885050164,
+    "fx_cross": -0.24358130583734763,
+    "fx_major": -0.1505441733340776,
+    "index": -0.28379811191283794,
+    "metal": -0.06883955906119268
+  },
+  "crisis_returns_index": [
+    {
+      "return": 0.07844438669348497,
+      "window": "dot-com 2000-09..2002-10"
+    },
+    {
+      "return": 0.09004769152281833,
+      "window": "housing 2007-10..2009-03"
+    },
+    {
+      "return": -0.03437223807571321,
+      "window": "covid 2020-02..2020-04"
+    },
+    {
+      "return": -0.13297255623955506,
+      "window": "2022 bear 2022-01..2022-10"
+    }
+  ],
+  "crisis_returns_index_without_top3": [
+    {
+      "return": 0.009514532162300027,
+      "window": "dot-com 2000-09..2002-10"
+    },
+    {
+      "return": 0.054911359925666536,
+      "window": "housing 2007-10..2009-03"
+    },
+    {
+      "return": -0.04008454703533981,
+      "window": "covid 2020-02..2020-04"
+    },
+    {
+      "return": -0.127195165905731,
+      "window": "2022 bear 2022-01..2022-10"
+    }
+  ],
+  "crisis_returns_oanda": [
+    {
+      "return": null,
+      "window": "dot-com 2000-09..2002-10"
+    },
+    {
+      "return": null,
+      "window": "housing 2007-10..2009-03"
+    },
+    {
+      "return": 0.07646298993930967,
+      "window": "covid 2020-02..2020-04"
+    },
+    {
+      "return": 0.06750727204762685,
+      "window": "2022 bear 2022-01..2022-10"
+    }
+  ],
+  "criteria": [
+    {
+      "criterion": "1 pays in crashes",
+      "pass": false
+    },
+    {
+      "criterion": "2 cheap in calm years",
+      "pass": false
+    },
+    {
+      "criterion": "3 hedges the long sleeves",
+      "pass": true
+    },
+    {
+      "criterion": "4 survives dropping top 3",
+      "pass": false
+    }
+  ],
+  "dropped_index": [
+    "N225",
+    "STOXX50E",
+    "GDAXI"
+  ],
+  "dropped_oanda": [
+    "BCO_USD",
+    "NAS100_USD",
+    "CHF_JPY"
+  ],
+  "gross_sharpe_index": 0.450432142574435,
+  "gross_sharpe_oanda": -0.06671107858766984,
+  "losing_month_correlation": -0.36753162509150056,
+  "losing_month_correlation_without_top3": -0.36827308265321596,
+  "losing_month_mean": -0.0009233652332167268,
+  "losing_months": 63,
+  "oanda_years": {
+    "2012": -0.12773868733017268,
+    "2013": 0.06617489186435765,
+    "2014": -0.02084000035173872,
+    "2015": -0.1263870825480342,
+    "2016": -0.15001703794354515,
+    "2017": -0.03540968978721448,
+    "2018": -0.15525957619994968,
+    "2019": -0.13779052986678075,
+    "2020": -0.025416309654946012,
+    "2021": -0.05327764852585193,
+    "2022": -0.007413867789857864,
+    "2023": -0.10054791510057304,
+    "2024": -0.12843915541653705,
+    "2025": 0.054849439136610334
+  },
+  "run_at": "2026-10-26T05:55:55.702220+00:00",
+  "sharpe_index": 0.3337329319322607,
+  "sharpe_oanda": -0.5914390780275293,
+  "verdict": "FAIL"
+}

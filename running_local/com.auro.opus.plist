@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Opus as a per-user launchd agent, running the prod release.
+
+  bin/opus-start loads running_local/opus.env (secrets, not in git) and execs
+  the release in the foreground so launchd supervises the BEAM directly.
+  The release bundles its own Erlang, so asdf is not needed on launchd's PATH.
+
+  Restarts after a crash, at most once a minute.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.auro.opus</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jschultz/source/repos/projects/carbon_and_fire/auro/running_local/bin/opus-start</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/jschultz/source/repos/projects/carbon_and_fire/auro/opus</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/jschultz/Library/Logs/auro/opus.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/jschultz/Library/Logs/auro/opus.log</string>
+</dict>
+</plist>

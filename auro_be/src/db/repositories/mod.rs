@@ -1,6 +1,6 @@
 pub(crate) mod account_snapshots;
 pub mod candles;
-pub(crate) mod financing;
+pub mod financing;
 pub(crate) mod instruments;
 pub(crate) mod live_queries;
 pub(crate) mod live_strategies;

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Auro Rust engine (auro_be) as a per-user launchd agent.
+
+  Runs the release binary from auro_be/, so dotenvy picks up auro_be/.env and
+  the engine keeps writing its rolling logs to auro_be/logs/ as it does today.
+  stdout duplicates those logs, so it is discarded; stderr keeps panics.
+
+  Restarts only after a crash (non-zero exit), at most once every 10 minutes:
+  every start spends a Questrade refresh-token exchange, so a crash loop must
+  stay slow. A clean stop (launchctl bootout / kill -TERM) stays stopped.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.auro.engine</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jschultz/source/repos/projects/carbon_and_fire/auro/auro_be/target/release/auro</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/jschultz/source/repos/projects/carbon_and_fire/auro/auro_be</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>600</integer>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/jschultz/Library/Logs/auro/engine.stderr.log</string>
+</dict>
+</plist>
