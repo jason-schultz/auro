@@ -2,7 +2,8 @@ defmodule OpusWeb.Components.PaperTrades do
   @moduledoc """
   The paper books that trade whole structures rather than the wheel's one
   leg at a time (research/options_paper_engine.md, v2): put credit spreads,
-  iron condors, the ideas calls and the crash puts. The left column lists
+  iron condors, the ideas calls and the crash puts (each also "half at
+  double"). The left column lists
   the book's trades and, for the chosen one, its legs; the right shows the
   book overview, or the chosen trade: its structure, what it can make and
   lose, what the rules do next, what to expect if it goes well or wrong,
@@ -22,6 +23,7 @@ defmodule OpusWeb.Components.PaperTrades do
   alias Opus.Options.Paper.{Legs, Pick}
 
   @manage_dte 21
+  @half_books ~w(ideas_half crash_puts_half)
 
   attr :book, :map, required: true
   attr :trade, :map, default: nil
@@ -46,7 +48,11 @@ defmodule OpusWeb.Components.PaperTrades do
         </.link>
         <div :for={trade <- @book.trades} class="flex flex-col">
           <.link
-            patch={~p"/options?view=paper&book=#{@book.strategy}&trade=#{trade.id}"}
+            patch={
+              if @trade && @trade.id == trade.id,
+                do: ~p"/options?view=paper&book=#{@book.strategy}",
+                else: ~p"/options?view=paper&book=#{@book.strategy}&trade=#{trade.id}"
+            }
             class={[
               "flex flex-col gap-0.5 rounded-field border px-3 py-2",
               if(@trade && @trade.id == trade.id,
@@ -70,7 +76,12 @@ defmodule OpusWeb.Components.PaperTrades do
           >
             <li :for={leg <- trade.legs}>
               <.link
-                patch={~p"/options?view=paper&book=#{@book.strategy}&trade=#{trade.id}&leg=#{leg.id}"}
+                patch={
+                  if @leg && @leg.position.id == leg.id,
+                    do: ~p"/options?view=paper&book=#{@book.strategy}&trade=#{trade.id}",
+                    else:
+                      ~p"/options?view=paper&book=#{@book.strategy}&trade=#{trade.id}&leg=#{leg.id}"
+                }
                 class={[
                   "flex justify-between gap-3 px-3 py-1.5 text-[13px]",
                   if(@leg && @leg.position.id == leg.id,
@@ -224,11 +235,16 @@ defmodule OpusWeb.Components.PaperTrades do
           <.t s="What happens next" wsb="The plan, regard" />
         </span>
         <ol class="m-0 flex list-decimal flex-col gap-1.5 pl-4 text-[13px]">
-          <.plan trade={@trade} manage_on={@manage_on} />
+          <.plan trade={@trade} manage_on={@manage_on} book={@book.strategy} />
         </ol>
       </div>
 
-      <.playbook :if={@trade.status == "open"} trade={@trade} open_legs={@open_legs} />
+      <.playbook
+        :if={@trade.status == "open"}
+        trade={@trade}
+        open_legs={@open_legs}
+        book={@book.strategy}
+      />
 
       <div :if={@trade.status == "open"} class="flex flex-col gap-1">
         <span class="text-[12px] text-muted">
@@ -284,6 +300,35 @@ defmodule OpusWeb.Components.PaperTrades do
 
   attr :trade, :map, required: true
   attr :manage_on, :any, required: true
+  attr :book, :string, required: true
+
+  defp plan(%{book: book} = assigns) when book in @half_books do
+    [leg] = Enum.filter(assigns.trade.legs, &(&1.status == "open"))
+    assigns = assign(assigns, leg: leg, paid: leg.open_price, roll?: book == "crash_puts_half")
+
+    ~H"""
+    <li :if={@leg.quantity > 1}>
+      <span class="font-medium">Any day:</span>
+      if its bid reaches {money(@paid * 2)} (double), {div(@leg.quantity, 2)} of the {@leg.quantity} contracts are sold,
+      which pays back what all of them cost. The rest ride for free.
+    </li>
+    <li :if={@leg.quantity > 1 and not @roll?}>
+      <span class="font-medium">Any day:</span>
+      all of it is sold if the bid falls to {money(@paid / 2)} (half).
+    </li>
+    <li :if={@leg.quantity == 1}>
+      <span class="font-medium">Any day:</span>
+      half was sold at double. The rest is sold if its bid falls back to {money(@paid)}, the
+      price paid, so the trade still ends up ahead.
+    </li>
+    <li>
+      <span class="font-medium">{day(@manage_on)} (21 days left):</span>
+      sold at the bid, whatever it's worth{if @roll?,
+        do: ", and next month's two −0.10 delta puts are bought: the roll",
+        else: ""}.
+    </li>
+    """
+  end
 
   defp plan(%{trade: %{structure: structure}} = assigns)
        when structure in ~w(put_spread iron_condor) do
@@ -291,7 +336,7 @@ defmodule OpusWeb.Components.PaperTrades do
 
     ~H"""
     <li>
-      <span class="font-medium">Any night:</span>
+      <span class="font-medium">Any day:</span>
       the whole trade is bought back if it can be closed for {money(@half / 100)} a share or less
       (half the credit), keeping about {money(@half)}.
     </li>
@@ -312,7 +357,7 @@ defmodule OpusWeb.Components.PaperTrades do
 
     ~H"""
     <li>
-      <span class="font-medium">Any night:</span>
+      <span class="font-medium">Any day:</span>
       sold if its bid reaches {money(@paid * 2)} (double) or falls to {money(@paid / 2)} (half).
     </li>
     <li>
@@ -337,6 +382,7 @@ defmodule OpusWeb.Components.PaperTrades do
 
   attr :trade, :map, required: true
   attr :open_legs, :list, required: true
+  attr :book, :string, required: true
 
   defp playbook(%{trade: %{structure: "put_spread"}} = assigns) do
     [long, short] = Enum.sort_by(assigns.open_legs, & &1.strike)
@@ -353,12 +399,12 @@ defmodule OpusWeb.Components.PaperTrades do
           {@trade.symbol} stays above {money(@short.strike)}, and the spread loses value every day.
         </li>
         <li>
-          The first night it can be bought back for half the credit, it is: about {money(
+          At the first daily check it can be bought back for half the credit, it is: about {money(
             @trade.summary.net / 2
           )} kept. Otherwise it's closed at 21 days for whatever has
           decayed.
         </li>
-        <li>The next night a new spread is sold the same way.</li>
+        <li>At the same check a new spread is sold the same way.</li>
       </.play_card>
       <.play_card tone="error">
         <:title><.t s="If it goes wrong" wsb="If it goes GUH" /></:title>
@@ -403,11 +449,11 @@ defmodule OpusWeb.Components.PaperTrades do
           both spreads lose value every day.
         </li>
         <li>
-          The first night the whole condor can be bought back for half the credit, it is: about {money(
+          At the first daily check the whole condor can be bought back for half the credit, it is: about {money(
             @trade.summary.net / 2
           )} kept. Otherwise it's closed at 21 days.
         </li>
-        <li>The next night a new condor is sold the same way.</li>
+        <li>At the same check a new condor is sold the same way.</li>
       </.play_card>
       <.play_card tone="error">
         <:title><.t s="If it goes wrong" wsb="If it goes GUH" /></:title>
@@ -440,6 +486,7 @@ defmodule OpusWeb.Components.PaperTrades do
     assigns =
       assign(assigns,
         call: call,
+        paid: call.open_price * Pick.multiplier() * call.quantity,
         rises: moves(assigns.trade.spot, :up, pnl),
         drops: moves(assigns.trade.spot, :down, pnl)
       )
@@ -448,10 +495,19 @@ defmodule OpusWeb.Components.PaperTrades do
     <div class="grid gap-3 sm:grid-cols-2">
       <.play_card tone="success">
         <:title><.t s="If it goes well" wsb="If it prints (first one is free)" /></:title>
-        <li>
+        <li :if={@book == "ideas"}>
           {@trade.symbol} bounces off the dip and the call doubles: sold at {money(
             @call.open_price * 2
           )} or more, about {money(@call.open_price * Pick.multiplier())} made.
+        </li>
+        <li :if={@book == "ideas_half" and @call.quantity > 1}>
+          {@trade.symbol} bounces off the dip and the call doubles: half sold at {money(
+            @call.open_price * 2
+          )} or more, which pays back the {money(@paid)} paid. The rest rides for free.
+        </li>
+        <li :if={@book == "ideas_half" and @call.quantity == 1}>
+          Half is sold and paid back the cost: the trade can't lose money now. The rest rides
+          until 21 days or until it falls back to {money(@call.open_price)}.
         </li>
         <.change_table
           :if={@rises != []}
@@ -462,14 +518,18 @@ defmodule OpusWeb.Components.PaperTrades do
       </.play_card>
       <.play_card tone="error">
         <:title><.t s="If it goes wrong" wsb="If it goes GUH" /></:title>
-        <li>
+        <li :if={@call.quantity > 1 or @book == "ideas"}>
           The dip keeps going and the call halves: sold at {money(@call.open_price / 2)}, about {money(
-            @call.open_price * Pick.multiplier() / 2
+            @paid / 2
           )} lost.
         </li>
-        <li>
+        <li :if={@call.quantity > 1 or @book == "ideas"}>
           Or nothing happens and it decays: sold at 21 days for what's left. The most it can lose
-          is the {money(@call.open_price * Pick.multiplier())} paid.
+          is the {money(@paid)} paid.
+        </li>
+        <li :if={@call.quantity == 1 and @book == "ideas_half"}>
+          It falls back to {money(@call.open_price)} and the rest is sold there: the gain from the
+          half sold is kept.
         </li>
         <.change_table
           :if={@drops != []}
@@ -485,15 +545,29 @@ defmodule OpusWeb.Components.PaperTrades do
   defp playbook(%{trade: %{structure: "long_put"}} = assigns) do
     [put] = assigns.open_legs
     pnl = &Legs.at_expiry(assigns.open_legs, &1)
-    assigns = assign(assigns, put: put, drops: moves(assigns.trade.spot, :down, pnl))
+
+    assigns =
+      assign(assigns,
+        put: put,
+        paid: put.open_price * Pick.multiplier() * put.quantity,
+        drops: moves(assigns.trade.spot, :down, pnl)
+      )
 
     ~H"""
     <div class="grid gap-3 sm:grid-cols-2">
       <.play_card tone="success">
         <:title><.t s="If the market crashes" wsb="If it all burns (the put prints)" /></:title>
-        <li>
+        <li :if={@book == "crash_puts"}>
           {@trade.symbol} drops through {money(@put.strike)} and the put gains. It's held to the
           21-day roll and sold there, so the gain lands then.
+        </li>
+        <li :if={@book == "crash_puts_half" and @put.quantity > 1}>
+          {@trade.symbol} drops and the puts double: half are sold at {money(@put.open_price * 2)}, which
+          pays back the {money(@paid)} paid. The rest is held to the roll for the bigger move.
+        </li>
+        <li :if={@book == "crash_puts_half" and @put.quantity == 1}>
+          Half is sold and paid back the cost. The rest is held to the 21-day roll, or sold if it
+          falls back to {money(@put.open_price)}.
         </li>
         <.change_table
           :if={@drops != []}
@@ -506,9 +580,7 @@ defmodule OpusWeb.Components.PaperTrades do
         <:title><.t s="If it stays calm" wsb="If nothing happens (insurance wasted)" /></:title>
         <li>
           The put decays and is sold at 21 days for what's left, and the next month's is bought.
-          The difference is what the insurance costs: at most the {money(
-            @put.open_price * Pick.multiplier()
-          )} paid this month.
+          The difference is what the insurance costs: at most the {money(@paid)} paid this month.
         </li>
       </.play_card>
     </div>
@@ -573,8 +645,8 @@ defmodule OpusWeb.Components.PaperTrades do
       |> Enum.sort()
       |> Enum.map_join("/", &strike/1)
 
-  defp strike(value) when value == trunc(value), do: num(value, 0)
-  defp strike(value), do: num(value, 1)
+  defp leg_name(%{quantity: n} = p) when n > 1,
+    do: "#{p.side} #{n} × #{money(p.strike)} #{p.kind}"
 
   defp leg_name(p), do: "#{p.side} #{money(p.strike)} #{p.kind}"
 

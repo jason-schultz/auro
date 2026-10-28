@@ -22,6 +22,7 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "questrade_tokens",
     "rules",
     "signal_events",
+    "strategies",
     "strategy_configs",
     "strategy_evaluations",
     "trading_config",

@@ -10,8 +10,8 @@ defmodule Opus.Options.PaperBooksTest do
   alias Opus.Options.Paper.{Event, Position, Trade}
   alias Opus.Repo
 
-  # Captured 02:00 UTC on the 24th: the closing quotes of the 23rd.
-  @captured ~N[2026-10-24 02:00:03]
+  # Captured 14:00 UTC on the 23rd: the 10:00 New York snapshot.
+  @captured ~N[2026-10-23 14:00:03]
   @expiry ~D[2026-12-04]
   @spot 615.0
 
@@ -113,9 +113,9 @@ defmodule Opus.Options.PaperBooksTest do
     assert_in_delta book_cash("crash_puts"), 100_000.0 - 206.0 - 0.1, 1.0e-6
   end
 
-  test "ideas buy tonight's dip-buy call once", %{qqq: qqq, ids: ids} do
+  test "ideas buy the day's dip-buy call once", %{qqq: qqq, ids: ids} do
     Repo.insert!(%Idea{
-      scanned_on: ~D[2026-10-24],
+      scanned_on: ~D[2026-10-23],
       list: "dip_buy",
       underlying_instrument_id: qqq.id,
       contract_id: ids[{"call", 650.0}],
@@ -133,20 +133,159 @@ defmodule Opus.Options.PaperBooksTest do
     assert {:skipped, :already_ran} = Paper.run("ideas", "QQQ")
   end
 
-  test "a spread still open at expiry settles each leg at intrinsic", %{ids: ids} do
-    {:ok, _} = Paper.run("put_spread", "QQQ")
+  test "half at double: two calls bought, one sold at double, the rest rides",
+       %{conn: conn, qqq: qqq, ids: ids} do
+    call = ids[{"call", 650.0}]
 
-    # The expiry night's capture: QQQ at 570, between the strikes.
+    Repo.insert!(%Idea{
+      scanned_on: ~D[2026-10-23],
+      list: "dip_buy",
+      underlying_instrument_id: qqq.id,
+      contract_id: call,
+      kind: "call",
+      strike: 650.0,
+      expiration: @expiry,
+      dte: 42,
+      spot: @spot,
+      setup: "RSI(2) 4"
+    })
+
+    assert {:ok, [{:open, "long_call", [%{quantity: 2, open_price: 6.12}]}]} =
+             Paper.run("ideas_half", "QQQ")
+
+    assert_in_delta book_cash("ideas_half"), 100_000.0 - 1_224.0 - 0.2, 1.0e-6
+    assert book_cash("ideas") == 100_000.0
+
+    # A week later the call bids 12.50, more than double the 6.12 paid.
     Repo.insert_all("option_quotes", [
       %{
         ticker: "Q",
-        captured_at: ~N[2026-12-05 02:00:03],
+        captured_at: ~N[2026-10-30 14:00:03],
         source: "questrade",
-        spot: 570.0,
-        bid: 20.0,
-        ask: 20.5,
-        delta: -0.9,
+        spot: 640.0,
+        bid: 12.5,
+        ask: 12.7,
+        delta: 0.6,
+        contract_id: call
+      }
+    ])
+
+    assert {:ok, [{:sell_half, _trade, _leg, 12.5}]} = Paper.run("ideas_half", "QQQ")
+
+    assert [%{status: "closed", quantity: 1, close_price: 12.5}, %{status: "open", quantity: 1}] =
+             Position |> Repo.all() |> Enum.sort_by(&(&1.status != "closed"))
+
+    assert [%Trade{status: "open"}] = Repo.all(Trade)
+    # The half sold brings in 1,250 less its commission: more than the 1,224 both cost.
+    assert_in_delta book_cash("ideas_half"), 100_000.0 - 1_224.0 - 0.2 + 1_250.0 - 0.1, 1.0e-6
+
+    [trade] = Paper.book("ideas_half").trades
+    # The rest is marked at the 12.60 mid.
+    assert_in_delta trade.pnl, -1_224.2 + 1_249.9 + 1_260.0, 1.0e-6
+
+    {:ok, _view, html} = live(conn, ~p"/options?view=paper&book=ideas_half&trade=#{trade.id}")
+    assert html =~ "half was sold at double"
+  end
+
+  defp quote_at(captured_at, contract_id, bid, ask, spot \\ @spot) do
+    Repo.insert_all("option_quotes", [
+      %{
+        ticker: "Q",
+        captured_at: captured_at,
+        source: "questrade",
+        spot: spot,
+        bid: bid,
+        ask: ask,
+        delta: 0.0,
+        contract_id: contract_id
+      }
+    ])
+  end
+
+  test "an intraday quote that reaches the take-profit fills it, like a resting order",
+       %{ids: ids} do
+    {:ok, _} = Paper.run("put_spread", "QQQ")
+    assert Paper.open_contracts() == %{"QQQ" => [ids[{"put", 560.0}], ids[{"put", 590.0}]]}
+
+    # 11:00 New York: not there yet (3.05 − 1.00 = 2.05 to close, the target is 1.47).
+    quote_at(~N[2026-10-23 15:00:00], ids[{"put", 590.0}], 3.0, 3.05, 625.0)
+    quote_at(~N[2026-10-23 15:00:00], ids[{"put", 560.0}], 1.0, 1.04, 625.0)
+    assert [] = Paper.take_profits(~U[2026-10-23 15:01:00Z])
+
+    # The book is priced at that quote, not this morning's.
+    book = Paper.book("put_spread")
+    assert book.priced_at == ~N[2026-10-23 15:00:00.000000]
+    [trade] = book.trades
+    assert trade.spot == 625.0
+
+    # 14:15: 1.05 − 0.50 = 0.55 to close: filled then.
+    quote_at(~N[2026-10-23 18:15:00], ids[{"put", 590.0}], 1.0, 1.05, 640.0)
+    quote_at(~N[2026-10-23 18:15:00], ids[{"put", 560.0}], 0.5, 0.52, 640.0)
+
+    assert [{"put_spread", _id, [{:close, _trade, fills}]}] =
+             Paper.take_profits(~U[2026-10-23 18:16:00Z])
+
+    assert Enum.sort(Enum.map(fills, &elem(&1, 1))) == [0.5, 1.05]
+    assert [%Trade{status: "closed", closed_on: ~D[2026-10-23]}] = Repo.all(Trade)
+    assert Paper.open_contracts() == %{}
+  end
+
+  test "the wheel's put is bought back intraday at half its premium", %{ids: ids} do
+    assert {:ok, [{:open, %{strike: 590.0, bid: 5.0}}]} = Paper.run("wheel", "QQQ")
+
+    quote_at(~N[2026-10-23 17:00:00], ids[{"put", 590.0}], 2.3, 2.4, 650.0)
+
+    assert [{"wheel", _id, [{:close, %{strike: 590.0}, 2.4}]}] =
+             Paper.take_profits(~U[2026-10-23 17:05:00Z])
+
+    assert [%Position{status: "closed", close_price: 2.4}] = Repo.all(Position)
+  end
+
+  test "take-profits wait for the day's check, which places the orders", %{ids: ids} do
+    {:ok, _} = Paper.run("put_spread", "QQQ")
+
+    # Monday the 26th: a quote that would fill, but the book hasn't run that day.
+    quote_at(~N[2026-10-26 15:00:00], ids[{"put", 590.0}], 1.0, 1.05)
+    quote_at(~N[2026-10-26 15:00:00], ids[{"put", 560.0}], 0.5, 0.52)
+    assert [] = Paper.take_profits(~U[2026-10-26 15:01:00Z])
+    assert [%Trade{status: "open"}] = Repo.all(Trade)
+  end
+
+  test "a spread still open at expiry settles each leg at the expiry-day close",
+       %{qqq: qqq, ids: ids} do
+    {:ok, _} = Paper.run("put_spread", "QQQ")
+
+    # The Monday after a Friday expiry: QQQ has bounced to 640 by the run,
+    # but the spread settles on Friday's close of 570, between the strikes.
+    Repo.insert_all("option_quotes", [
+      %{
+        ticker: "Q",
+        captured_at: ~N[2026-12-07 15:00:03],
+        source: "questrade",
+        spot: 640.0,
+        bid: 0.0,
+        ask: 0.05,
+        delta: 0.0,
         contract_id: ids[{"put", 590.0}]
+      }
+    ])
+
+    # No close stored yet: it waits.
+    assert {:ok, [{:hold, _trade}]} = Paper.run("put_spread", "QQQ")
+    Repo.delete_all(from(e in Event, where: e.on == ^~D[2026-12-07]))
+
+    Repo.insert_all("candles", [
+      %{
+        instrument_id: qqq.id,
+        instrument: "QQQ",
+        granularity: "D",
+        timestamp: ~U[2026-12-04 05:00:00Z],
+        open: 575.0,
+        high: 578.0,
+        low: 566.0,
+        close: 570.0,
+        volume: 1,
+        complete: true
       }
     ])
 
@@ -164,6 +303,7 @@ defmodule Opus.Options.PaperBooksTest do
     {:ok, _view, html} = live(conn, ~p"/options?view=paper&book=put_spread")
     assert html =~ "Put spreads"
     assert html =~ "Where it stands"
+    assert html =~ "Priced at 10:00 New York"
     assert html =~ "QQQ"
 
     [trade] = Paper.book("put_spread").trades

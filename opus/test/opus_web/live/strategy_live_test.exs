@@ -4,12 +4,13 @@ defmodule OpusWeb.StrategyLiveTest do
   import Phoenix.LiveViewTest
 
   alias Opus.Repo
-  alias Opus.Trading.{LiveStrategy, LiveTrade, Rule, Suspension}
+  alias Opus.Trading.{LiveStrategy, LiveTrade, Recipe, Rule, Suspension}
 
   @id "cccccccc-0000-0000-0000-000000000001"
 
   setup do
-    for schema <- [Suspension, Rule, LiveTrade, LiveStrategy], do: Repo.delete_all(schema)
+    # Recipes too: the Rust DB tests leave theirs behind in the test database.
+    for schema <- [Suspension, Rule, LiveTrade, LiveStrategy, Recipe], do: Repo.delete_all(schema)
     Repo.delete_all("signal_events")
     now = DateTime.utc_now()
 
@@ -73,9 +74,12 @@ defmodule OpusWeb.StrategyLiveTest do
     assert html =~ "H1 ADX 39.4 trending"
     assert html =~ "Short"
     assert html =~ "29,206.7"
-    assert html =~ "How it decides"
-    assert html =~ "NoiseArea"
-    assert html =~ "na.exit_long or na.session_close"
+    assert html =~ "How it trades"
+    assert html =~ "the price breaks above the noise band"
+    assert html =~ "or the US session ends (16:00 New York)"
+    assert html =~ "Locked"
+    assert html =~ "Unlock to edit"
+    assert html =~ "Never run through the testing pipeline."
     assert html =~ "No completed candles stored"
     assert html =~ "unavailable while it is down"
   end

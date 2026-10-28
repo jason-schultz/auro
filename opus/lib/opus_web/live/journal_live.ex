@@ -1,8 +1,9 @@
 defmodule OpusWeb.JournalLive do
   @moduledoc """
   Journal: the weekly forward-test review in one place. Thirty-day KPIs,
-  the per-strategy leaderboard, execution quality against the backtest's
-  assumed fills, holdout verdicts, open circuit-breaker suspensions and the
+  the latest trades beside the chosen one's story in plain words, filtered
+  by strategy (`OpusWeb.Components.TradeStory`), execution quality against
+  the backtest's assumed fills, holdout verdicts, open circuit-breaker suspensions and the
   frozen weekly digests.
 
   Everything is read from the database on mount; nothing here is pushed by
@@ -12,6 +13,7 @@ defmodule OpusWeb.JournalLive do
 
   import Ecto.Query, only: [from: 2]
   import OpusWeb.Format
+  import OpusWeb.Components.TradeStory
 
   alias Opus.Journal
   alias Opus.Journal.Digest
@@ -19,6 +21,7 @@ defmodule OpusWeb.JournalLive do
 
   @kpi_days 30
   @execution_days 90
+  @recent_trades 30
 
   @impl true
   def mount(_params, _session, socket) do
@@ -33,13 +36,26 @@ defmodule OpusWeb.JournalLive do
 
     assign(socket,
       kpis: Journal.kpis(kpi_window),
-      strategies: Journal.strategy_performance(kpi_window),
+      strategies: Journal.traded_strategies(kpi_window),
       execution: Journal.execution_quality(Journal.window(@execution_days)),
       holdouts: Journal.holdout_verdicts(),
       suspensions: Journal.open_suspensions(),
       digests: Repo.all(from(d in Digest, order_by: [desc: d.week_start], limit: 12)),
       as_of: DateTime.utc_now()
     )
+  end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    strategy = params["strategy"]
+    trades = Journal.recent_trades(@recent_trades, strategy)
+
+    # The chosen trade, or the newest in the list so the story is never empty.
+    trade =
+      (params["trade"] && Journal.trade(params["trade"])) ||
+        (trades != [] && Journal.trade(hd(trades).id)) || nil
+
+    {:noreply, assign(socket, strategy: strategy, trades: trades, trade: trade)}
   end
 
   @impl true
@@ -57,39 +73,23 @@ defmodule OpusWeb.JournalLive do
         <.kpis kpis={@kpis} />
 
         <.section
-          title="Strategies"
-          wsb_title="The plays"
-          hint="Closed trades in the window; open count is current."
-          wsb_hint="Closed plays in the window; the open count is live."
+          title="Trades"
+          wsb_title="The plays, one by one"
+          hint={"The latest #{length(@trades)}, newest first. Strategy records cover the last #{@kpi_days} days."}
+          wsb_hint="Newest first. Click one for the post-mortem."
         >
-          <.review_table
-            :if={@strategies != []}
-            cols={[
-              {"Strategy", :left, "Play"},
-              {"Trades", :right, "Plays"},
-              {"Win rate", :right, "Hit rate"},
-              {"P&L", :right, "Tendies"},
-              {"Avg / trade", :right, "Per play"},
-              {"Open", :right, "Open"}
-            ]}
+          <.strategy_filter :if={@strategies != []} strategies={@strategies} selected={@strategy} />
+          <div
+            :if={@trades != []}
+            class="grid items-start gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]"
           >
-            <tr :for={s <- @strategies}>
-              <td class="py-2.5">
-                <.strategy_label row={s} /> <.enabled_dot enabled={s.enabled} />
-              </td>
-              <td class="py-2.5 text-right">{s.trades}</td>
-              <td class="py-2.5 text-right">{pct(s.win_rate_pct / 100)}</td>
-              <td class={["py-2.5 text-right font-medium", pnl_class(s.pnl_cad)]}>
-                {money(s.pnl_cad)}
-              </td>
-              <td class={["py-2.5 text-right", pnl_class(s.avg_pnl_pct)]}>
-                {pct(s.avg_pnl_pct / 100)}
-              </td>
-              <td class="py-2.5 text-right">{s.open_trades}</td>
-            </tr>
-          </.review_table>
-          <.empty :if={@strategies == []}>
-            <.t s="No live strategies." wsb="No plays. Positions or ban." />
+            <.trade_list trades={@trades} selected={@trade && @trade.id} strategy={@strategy} />
+            <div class="lg:sticky lg:top-28 lg:max-h-[calc(100vh-8rem)] lg:overflow-y-auto">
+              <.trade_panel :if={@trade} trade={@trade} />
+            </div>
+          </div>
+          <.empty :if={@trades == []}>
+            <.t s="No live trades yet." wsb="No plays yet. Positions or ban." />
           </.empty>
         </.section>
 
@@ -153,7 +153,7 @@ defmodule OpusWeb.JournalLive do
               </td>
               <td class="py-2.5 text-right">{stat(h.stats, "sharpe")}</td>
               <td class="py-2.5 text-right">{stat(h.stats, "num_trades")}</td>
-              <td class="py-2.5 text-right text-muted">{date(h.evaluated_at)}</td>
+              <td class="py-2.5 text-right text-muted">{day(h.evaluated_at)}</td>
             </tr>
           </.review_table>
           <.empty :if={@holdouts == []}>
@@ -176,7 +176,7 @@ defmodule OpusWeb.JournalLive do
               <td class="py-2.5">
                 {s.trigger_kind} <span class="text-muted">· {s.trigger_detail}</span>
               </td>
-              <td class="py-2.5 text-right text-muted">{date(s.triggered_at)}</td>
+              <td class="py-2.5 text-right text-muted">{day(s.triggered_at)}</td>
             </tr>
           </.review_table>
           <.empty :if={@suspensions == []}>
@@ -245,7 +245,7 @@ defmodule OpusWeb.JournalLive do
       <.kpi
         label="MFE / MAE"
         wsb_label="Peak / pain"
-        value={"#{pct(@kpis.avg_mfe_pct / 100)} / #{pct(@kpis.avg_mae_pct / 100)}"}
+        value={"#{pct(@kpis.avg_mfe_pct, 2)} / #{pct(@kpis.avg_mae_pct, 2)}"}
       />
     </section>
     """
@@ -327,18 +327,6 @@ defmodule OpusWeb.JournalLive do
     """
   end
 
-  attr :enabled, :boolean, default: nil
-
-  defp enabled_dot(assigns) do
-    ~H"""
-    <span
-      :if={@enabled}
-      aria-label="enabled"
-      class="ml-1 inline-block size-[7px] rounded-full bg-primary align-middle"
-    />
-    """
-  end
-
   defp pnl_class(nil), do: nil
   defp pnl_class(v) when v < 0, do: "text-error"
   defp pnl_class(v) when v > 0, do: "text-success"
@@ -367,7 +355,4 @@ defmodule OpusWeb.JournalLive do
       v -> to_string(v)
     end
   end
-
-  defp date(nil), do: "—"
-  defp date(%DateTime{} = at), do: Calendar.strftime(at, "%b %-d")
 end

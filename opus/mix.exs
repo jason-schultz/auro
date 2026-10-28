@@ -67,7 +67,8 @@ defmodule Opus.MixProject do
       {:bandit, "~> 1.13"},
       {:req, "~> 0.7"},
       {:cors_plug, "~> 3.0"},
-      {:oban, "~> 2.24"}
+      {:oban, "~> 2.24"},
+      {:tz, "~> 0.28.4"}
     ]
   end
 

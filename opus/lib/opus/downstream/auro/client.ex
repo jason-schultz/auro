@@ -288,6 +288,45 @@ defmodule Opus.Auro.Client do
   end
 
   @doc """
+  Run a strategy's rules over the last `count` bars of its instrument
+  (POST /api/strategy/signal-preview), the same runner the backtest uses.
+  `parameters` is the full strategy JSON. The body has `"signals"` (entries
+  and exits with price and why each exit happened) and `"bars"` (each bar's
+  OHLC and every rule's true/false on it). Validates the rules too: a
+  strategy the engine can't read answers 400 with the reason.
+  """
+  @spec signal_preview(map(), pos_integer()) :: {:ok, map()} | {:error, any()}
+  def signal_preview(parameters, count) when is_map(parameters) do
+    client()
+    |> Req.post(
+      url: "/api/strategy/signal-preview",
+      json: %{parameters: parameters, count: count},
+      receive_timeout: 30_000,
+      retry: false
+    )
+    |> handle_response(:quiet)
+  end
+
+  @doc """
+  Have Rust quote only these stored contracts on `underlying` from Questrade
+  (POST /api/questrade/options/quotes) and store the quotes in
+  `option_quotes`: the paper books' open legs, during the session. Contracts
+  Questrade no longer lists come back in `"missing"`.
+  """
+  @spec quote_option_contracts(String.t(), [integer()]) :: {:ok, map()} | {:error, any()}
+  def quote_option_contracts(underlying, contract_ids)
+      when is_binary(underlying) and is_list(contract_ids) do
+    client()
+    |> Req.post(
+      url: "/api/questrade/options/quotes",
+      json: %{underlying: underlying, contract_ids: contract_ids},
+      receive_timeout: 60_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  @doc """
   Massive history path. Have Rust list the option contracts on `underlying` expiring within
   `max_days_to_expiry` days and striking within `strike_band_pct` of the
   last close, and upsert them into `option_contracts`. Needs the
@@ -421,6 +460,10 @@ defmodule Opus.Auro.Client do
     Logger.error("[AuroClient] Request failed: #{inspect(reason)}")
     {:error, reason}
   end
+
+  # A large body (a chart's bars) isn't worth a log line on success.
+  defp handle_response({:ok, %Req.Response{status: 200, body: body}}, :quiet), do: {:ok, body}
+  defp handle_response(result, :quiet), do: handle_response(result)
 
   defp client do
     Req.new(

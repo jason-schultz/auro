@@ -47,20 +47,48 @@ defmodule OpusWeb.OptionsLive do
        trade: nil,
        leg: nil,
        paper_analysis: nil,
-       paper_underlyings: []
+       paper_underlyings: [],
+       quotes: %{expiries: [], rows: []}
      )
      |> assign_chain(nil, nil)
      |> assign_ideas()
-     |> assign(paper: Paper.book(), paper_counts: Paper.open_counts())}
+     |> assign(paper: nil, all_books: [], paper_counts: Paper.open_counts())}
   end
 
-  # Two views behind tabs, each with its own URL so the paper books can be
-  # bookmarked: `/options` is the workbench, `/options?view=paper` the books.
-  # `&book=` picks a book (the wheel by default), `&trade=` one of its trades
-  # (the wheel's by underlying, the others' by id) and `&leg=` one of its legs.
+  # Three views behind tabs, each with its own URL so they can be
+  # bookmarked: `/options` is the workbench, `?view=custom` a contract typed
+  # by hand, `?view=paper` the books. On the books `&book=` picks a book (all
+  # five side by side by default), `&trade=` one of its trades (the wheel's
+  # by underlying, the others' by id) and `&leg=` one of its legs.
   @impl true
   def handle_params(%{"view" => "paper"} = params, _uri, socket) do
-    book = if params["book"] in Paper.books(), do: params["book"], else: "wheel"
+    if params["book"] in Paper.books(),
+      do: book_params(params, socket),
+      else: all_books_params(socket)
+  end
+
+  def handle_params(%{"view" => "custom"}, _uri, socket) do
+    params = socket.assigns.params
+    {:noreply, socket |> assign(view: "custom") |> fill_from_chain(params, params)}
+  end
+
+  def handle_params(_params, _uri, socket), do: {:noreply, assign(socket, view: "workbench")}
+
+  defp all_books_params(socket) do
+    {:noreply,
+     assign(socket,
+       view: "paper",
+       paper: nil,
+       all_books: Enum.map(Paper.books(), &Paper.book/1),
+       paper_counts: Paper.open_counts(),
+       trade: nil,
+       leg: nil,
+       paper_analysis: nil
+     )}
+  end
+
+  defp book_params(params, socket) do
+    book = params["book"]
     paper = Paper.book(book)
     {trade, leg, analysis} = paper_selection(book, paper, params)
 
@@ -75,8 +103,6 @@ defmodule OpusWeb.OptionsLive do
        paper_analysis: analysis
      )}
   end
-
-  def handle_params(_params, _uri, socket), do: {:noreply, assign(socket, view: "workbench")}
 
   defp paper_selection("wheel", paper, params) do
     trade = Enum.find(paper.trades, &(&1.symbol == params["trade"]))
@@ -168,6 +194,15 @@ defmodule OpusWeb.OptionsLive do
   end
 
   @impl true
+  def handle_event("change", %{"position" => params}, %{assigns: %{view: "custom"}} = socket) do
+    %{params: old, chain: chain} = socket.assigns
+
+    {:noreply,
+     socket
+     |> fill_from_chain(old, Map.merge(old, params))
+     |> assign_chain(chain.underlying, chain.expiration)}
+  end
+
   def handle_event("change", %{"position" => params}, socket) do
     params = Map.merge(socket.assigns.params, params)
     socket = assign(socket, params: params, form: to_form(params, as: :position))
@@ -282,6 +317,76 @@ defmodule OpusWeb.OptionsLive do
     end
   end
 
+  # The contract tab picks from the stored chain when its underlying has
+  # one: the expiry and strike come from the snapshot, and a newly picked
+  # contract (another underlying, strategy, expiry or strike) brings its
+  # quote along: the bid when selling, the ask when buying, with the spot
+  # and implied vol. A premium typed over that is kept until the contract
+  # changes. An underlying with no stored chain is typed by hand.
+  @contract_keys ~w(underlying strategy expiration strike)
+
+  defp fill_from_chain(socket, old, params) do
+    symbol = params["underlying"] |> to_string() |> String.trim() |> String.upcase()
+    expiries = if symbol == "", do: [], else: Options.expiries(symbol)
+
+    params =
+      cond do
+        expiries != [] -> pick_contract(old, Map.put(params, "underlying", symbol), expiries)
+        params["underlying"] == old["underlying"] -> params
+        # Another underlying with nothing stored: the old one's numbers don't apply.
+        true -> Map.merge(params, Map.new(~w(strike expiration premium spot sigma), &{&1, ""}))
+      end
+
+    rows =
+      case parse_date(params["expiration"]) do
+        nil ->
+          []
+
+        date ->
+          if date in expiries,
+            do: Options.chain(symbol, date, Options.kind(params["strategy"])),
+            else: []
+      end
+
+    assign(socket,
+      params: params,
+      form: to_form(params, as: :position),
+      quotes: %{expiries: expiries, rows: rows}
+    )
+  end
+
+  defp pick_contract(old, params, expiries) do
+    expiration = parse_date(params["expiration"])
+    expiration = if expiration in expiries, do: expiration, else: hd(expiries)
+    params = Map.put(params, "expiration", Date.to_iso8601(expiration))
+
+    rows =
+      Options.chain(params["underlying"], expiration, Options.kind(params["strategy"]),
+        each_side: :all
+      )
+
+    row = Enum.find(rows, &(plain(&1.strike) == params["strike"]))
+
+    cond do
+      rows == [] ->
+        params
+
+      row && Map.take(old, @contract_keys) == Map.take(params, @contract_keys) ->
+        params
+
+      true ->
+        row = row || Enum.find(rows, & &1.at_the_money)
+        premium = if Options.side(params["strategy"]) == :sell, do: row.bid, else: row.ask
+
+        Map.merge(params, %{
+          "strike" => plain(row.strike),
+          "premium" => plain(premium),
+          "spot" => plain(row.spot),
+          "sigma" => plain(row.volatility)
+        })
+    end
+  end
+
   defp put_strategy(socket, strategy) do
     params = Map.put(socket.assigns.params, "strategy", strategy)
     assign(socket, params: params, form: to_form(params, as: :position))
@@ -298,6 +403,14 @@ defmodule OpusWeb.OptionsLive do
   end
 
   defp parse_date(_), do: nil
+
+  defp expiry_option(date),
+    do: "#{Calendar.strftime(date, "%b %-d, %Y")} · #{Date.diff(date, Date.utc_today())}d"
+
+  defp strike_option(%{at_the_money: true} = row), do: "#{plain(row.strike)} · at the money"
+  defp strike_option(row), do: plain(row.strike)
+
+  defp picked_quote(rows, params), do: Enum.find(rows, &(plain(&1.strike) == params["strike"]))
 
   # A number the way a person would type it into the form.
   defp plain(nil), do: ""
@@ -339,6 +452,9 @@ defmodule OpusWeb.OptionsLive do
           <.view_tab view="workbench" current={@view} path={~p"/options"}>
             <.t s="Workbench" wsb="The casino floor" />
           </.view_tab>
+          <.view_tab view="custom" current={@view} path={~p"/options?view=custom"}>
+            <.t s="Your own contract" wsb="Type your own degen contract" />
+          </.view_tab>
           <.view_tab view="paper" current={@view} path={~p"/options?view=paper"}>
             <.t s="Paper book" wsb="Theta gang" />
             <span
@@ -351,7 +467,7 @@ defmodule OpusWeb.OptionsLive do
         </nav>
 
         <p
-          :if={@error && @view == "workbench"}
+          :if={@error && @view in ["workbench", "custom"]}
           role="alert"
           class="rounded-box border border-error/40 bg-base-200 px-4 py-3 text-sm"
         >
@@ -418,19 +534,49 @@ defmodule OpusWeb.OptionsLive do
                 </p>
               </div>
             <% end %>
-            <details class="rounded-box border border-base-300 bg-base-200">
-              <summary class="cursor-pointer px-5 py-3 text-[14px] font-medium">
-                <.t s="Type a contract instead" wsb="Type your own degen contract" />
-              </summary>
-              <div class="px-5 pb-4">
-                <.position_form form={@form} params={@params} busy={@busy} />
-              </div>
-            </details>
           </section>
         </div>
 
+        <div :if={@view == "custom"} class="flex flex-wrap items-start gap-5">
+          <section
+            aria-label="Contract"
+            class="flex w-full min-w-0 flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4 sm:w-[420px] sm:flex-none"
+          >
+            <span class="text-[15px] font-semibold">
+              <.t s="Type a contract" wsb="Type your own degen contract" />
+            </span>
+            <p class="text-[13px] text-muted">
+              For a contract the scan and the stored chains don't have: copy its numbers from your
+              broker and see the payoff.
+            </p>
+            <.position_form form={@form} params={@params} busy={@busy} quotes={@quotes} />
+          </section>
+          <section aria-label="Position" class="flex min-w-0 flex-[999_1_520px] flex-col gap-4">
+            <.position
+              :if={@analysis}
+              analysis={@analysis}
+              params={@params}
+              form={@form}
+              busy={@busy}
+              tune={false}
+            />
+            <p
+              :if={!@analysis}
+              class="rounded-box border border-base-300 bg-base-200 px-5 py-4 text-[13px] text-muted"
+            >
+              Fill in the contract and press Analyze: what you pay, the payoff by price, and what happens at expiry.
+            </p>
+          </section>
+        </div>
+
+        <PaperBook.all_books
+          :if={@view == "paper" and @paper == nil}
+          books={@all_books}
+          counts={@paper_counts}
+        />
+
         <PaperBook.paper_book
-          :if={@view == "paper"}
+          :if={@view == "paper" and @paper != nil}
           counts={@paper_counts}
           underlyings={@paper_underlyings}
           book={@paper}
@@ -505,7 +651,7 @@ defmodule OpusWeb.OptionsLive do
       @class
     ]}>
       <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-4 pt-3.5 pb-2.5">
-        <span class="text-[15px] font-semibold"><.t s="Ideas" wsb="Tonight's plays" /></span>
+        <span class="text-[15px] font-semibold"><.t s="Ideas" wsb="Today's plays" /></span>
         <span :if={@scanned_on} class="text-[12px] text-muted">
           <.t
             s="implied vs realized, at the money · cheapest first"
@@ -540,7 +686,7 @@ defmodule OpusWeb.OptionsLive do
         </button>
       </div>
       <p :if={!@scanned_on} class="border-t border-base-300 px-4 py-3 text-[13px] text-muted">
-        The scan runs nightly after the chain snapshot. It lists calls worth a look when an index ETF closes
+        The scan runs on trading days at 9:15 and 10:15 New York, after each chain snapshot. It lists calls worth a look when an index ETF closes
         oversold above its 100-day average, and each chain's at-the-money implied volatility against what the
         stock has actually been doing.
       </p>
@@ -649,8 +795,8 @@ defmodule OpusWeb.OptionsLive do
     ]}>
       <span class="text-[15px] font-semibold">Chain</span>
       <p class="text-[13px] text-muted">
-        No stored option chains yet. Tick "Option chains" for a listing on the Instruments page and the nightly
-        snapshot fills this in.
+        No stored option chains yet. Tick "Option chains" for a listing on the Instruments page and the next
+        snapshot (9:00 or 10:00 New York) fills this in.
       </p>
     </section>
     """
@@ -663,7 +809,7 @@ defmodule OpusWeb.OptionsLive do
       @class
     ]}>
       <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-4 pt-3.5 pb-2.5">
-        <span class="text-[15px] font-semibold"><.t s="Chain" wsb="The menu" />
+        <span class="text-[15px] font-semibold"><.t s="Chain" wsb="The menu (option chain)" />
         · {@chain.underlying} {@chain.kind}s</span>
         <span :if={@chain.captured_at} class="text-[12px] text-muted">
           spot {money(@chain.spot)} · {if @chain.expiration,
@@ -768,6 +914,9 @@ defmodule OpusWeb.OptionsLive do
   attr :params, :map, required: true
   attr :form, :map, required: true
   attr :busy, :boolean, required: true
+  # The quick-edit fields repeat the full form's: off where that form is on
+  # screen. They carry their own ids so the two can never collide.
+  attr :tune, :boolean, default: true
 
   defp position(assigns) do
     ~H"""
@@ -799,35 +948,42 @@ defmodule OpusWeb.OptionsLive do
           class="flex flex-wrap items-end gap-2.5"
         >
           <.input
+            :if={@tune}
             field={@form[:contracts]}
+            id="tune_contracts"
             type="text"
             inputmode="numeric"
             label="Contracts"
             class="input input-sm w-20"
           />
           <.input
+            :if={@tune}
             field={@form[:premium]}
+            id="tune_premium"
             type="text"
             inputmode="decimal"
             label="Premium"
             class="input input-sm w-24"
           />
           <.input
+            :if={@tune}
             field={@form[:sigma]}
+            id="tune_sigma"
             type="text"
             inputmode="decimal"
             label="Vol %"
             class="input input-sm w-24"
           />
           <.input
-            :if={@params["strategy"] == "covered_call"}
+            :if={@tune and @params["strategy"] == "covered_call"}
             field={@form[:cost_basis]}
+            id="tune_cost_basis"
             type="text"
             inputmode="decimal"
             label="Shares cost"
             class="input input-sm w-24"
           />
-          <button type="submit" disabled={@busy} class="btn btn-sm mb-2">
+          <button :if={@tune} type="submit" disabled={@busy} class="btn btn-sm mb-2">
             <span :if={@busy}>…</span>
             <.t :if={!@busy} s="Update" wsb="Send it" />
           </button>
@@ -889,26 +1045,51 @@ defmodule OpusWeb.OptionsLive do
   attr :form, :map, required: true
   attr :params, :map, required: true
   attr :busy, :boolean, required: true
+  attr :quotes, :map, required: true
 
   defp position_form(assigns) do
+    assigns = assign(assigns, picked: picked_quote(assigns.quotes.rows, assigns.params))
+
     ~H"""
     <.form for={@form} id="position-form" phx-change="change" phx-submit="analyze">
-      <div class="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
-        <.input field={@form[:underlying]} label="Underlying" placeholder="SPY" />
+      <div class="grid grid-cols-2 gap-x-4 gap-y-1 [&>*]:min-w-0">
+        <div class="col-span-2">
+          <.input
+            field={@form[:strategy]}
+            type="select"
+            label="Strategy"
+            options={Options.strategy_options()}
+          />
+        </div>
         <.input
-          field={@form[:strategy]}
-          type="select"
-          label="Strategy"
-          options={Options.strategy_options()}
+          field={@form[:underlying]}
+          label="Underlying"
+          placeholder="SPY"
+          phx-debounce="400"
         />
-        <.input
-          field={@form[:strike]}
-          type="text"
-          inputmode="decimal"
-          label="Strike"
-          placeholder="640"
-        />
-        <.input field={@form[:expiration]} type="date" label="Expiration" />
+        <%= if @quotes.rows != [] do %>
+          <.input
+            field={@form[:expiration]}
+            type="select"
+            label="Expiration"
+            options={for e <- @quotes.expiries, do: {expiry_option(e), Date.to_iso8601(e)}}
+          />
+          <.input
+            field={@form[:strike]}
+            type="select"
+            label="Strike"
+            options={for r <- @quotes.rows, do: {strike_option(r), plain(r.strike)}}
+          />
+        <% else %>
+          <.input field={@form[:expiration]} type="date" label="Expiration" />
+          <.input
+            field={@form[:strike]}
+            type="text"
+            inputmode="decimal"
+            label="Strike"
+            placeholder="640"
+          />
+        <% end %>
         <.input
           field={@form[:premium]}
           type="text"
@@ -921,28 +1102,40 @@ defmodule OpusWeb.OptionsLive do
           field={@form[:spot]}
           type="text"
           inputmode="decimal"
-          label="Stock price (blank = last close)"
+          label="Stock price"
+          placeholder="last close"
         />
         <.input
           field={@form[:sigma]}
           type="text"
           inputmode="decimal"
-          label="Volatility % (blank = from premium)"
+          label="Volatility %"
+          placeholder="from the premium"
         />
         <.input
           :if={@params["strategy"] == "covered_call"}
           field={@form[:cost_basis]}
           type="text"
           inputmode="decimal"
-          label="What your shares cost (blank = stock price)"
+          label="Your shares cost"
+          placeholder="stock price"
         />
       </div>
-      <div class="mt-4 flex items-center gap-4">
-        <.button variant="primary" disabled={@busy}>
-          {if @busy, do: "Working…", else: "Show me what happens"}
-        </.button>
-        <span class="text-[13px] text-muted">Premium and strike are per share; a contract is 100 shares.</span>
-      </div>
+      <p :if={quote = picked_quote(@quotes.rows, @params)} class="mt-1 text-[12px] text-muted">
+        From the {stamp(quote.captured_at)} UTC snapshot: bid {money(quote.bid)}, ask {money(
+          quote.ask
+        )}.
+        The premium is the {if Options.side(@params["strategy"]) == :sell,
+          do: "bid (what selling gets you)",
+          else: "ask (what buying costs you)"}; type over it to try another price.
+      </p>
+      <p class="mt-1 text-[12px] text-muted">
+        Strike and premium are per share; one contract is 100 shares. Leave stock price or
+        volatility blank to use the last close or the volatility the premium implies.
+      </p>
+      <.button variant="primary" disabled={@busy} class="btn btn-primary mt-4 w-full">
+        {if @busy, do: "Working…", else: "Show me what happens"}
+      </.button>
     </.form>
     """
   end
@@ -1107,8 +1300,8 @@ defmodule OpusWeb.OptionsLive do
         wsb_title: "Shares yoinked above #{money(a["strike"])}",
         body:
           "You are assigned: your #{shares(a["shares"])} shares are sold at #{money(a["strike"])} no matter how high the stock went. You keep the premium too. That is the most this position can make.",
-        amount: "#{signed_money(a["max_gain"])} best case",
-        wsb_amount: "#{signed_money(a["max_gain"])} max tendies, no moon for you",
+        amount: "#{payoff_money(a["max_gain"])} best case",
+        wsb_amount: "#{payoff_money(a["max_gain"])} max tendies, no moon for you",
         tone: :good
       }
     ]
@@ -1152,8 +1345,8 @@ defmodule OpusWeb.OptionsLive do
         wsb_title: "🌈🐻 tendies: stock closes below #{money(a["breakeven"])}",
         body:
           "You make money. The put is worth the distance from #{money(a["strike"])} down to the stock price, less what you paid. Best case the stock goes to zero.",
-        amount: "#{signed_money(a["max_gain"])} best case",
-        wsb_amount: "#{signed_money(a["max_gain"])} if it goes to zero, hedgies r fuk",
+        amount: "#{payoff_money(a["max_gain"])} best case",
+        wsb_amount: "#{payoff_money(a["max_gain"])} if it goes to zero, hedgies r fuk",
         tone: :good
       }
     ]
@@ -1264,10 +1457,9 @@ defmodule OpusWeb.OptionsLive do
   defp maybe_pct(nil), do: "—"
   defp maybe_pct(value), do: pct(value)
 
-  defp signed_money(nil), do: "unlimited"
-  defp signed_money(value) when is_number(value) and value > 0, do: "+#{money(value)}"
-  defp signed_money(value) when is_number(value) and value < 0, do: "-#{money(abs(value))}"
-  defp signed_money(value), do: money(value)
+  # A payoff with no cap has no number.
+  defp payoff_money(nil), do: "unlimited"
+  defp payoff_money(value), do: signed_money(value)
 
   defp pnl_tone(value) when is_number(value) and value > 0, do: :good
   defp pnl_tone(value) when is_number(value) and value < 0, do: :bad

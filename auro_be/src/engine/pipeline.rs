@@ -127,6 +127,13 @@ async fn load_financing(pool: &PgPool) -> AppResult<FinancingModel> {
         .map_err(|e| AppError::Internal(format!("load financing model: {e}")))
 }
 
+/// How many standard errors the average trade sits above zero: the
+/// per-trade Sharpe (mean / spread of trade returns) times √trades. Around
+/// 2 or more means a result this good would rarely come from luck alone.
+fn t_stat(stats: &BacktestStats) -> f64 {
+    stats.sharpe_ratio * (stats.num_trades as f64).sqrt()
+}
+
 fn compute_expectancy(stats: &BacktestStats) -> f64 {
     let loss_rate = 1.0 - stats.win_rate;
     (stats.win_rate * stats.avg_win) - (loss_rate * stats.avg_loss.abs())
@@ -152,8 +159,11 @@ fn operator_failure_text(operator: &str) -> &'static str {
     }
 }
 
+/// Judge stage stats against the thresholds, and record every check in
+/// `stats_json["checks"]` (`metric`, `operator`, `required`, `actual`,
+/// `passed`) so a page can show each rule next to its result.
 fn evaluate_thresholds(
-    stats_json: &Value,
+    stats_json: &mut Value,
     thresholds: &[ThresholdRow],
     stage: &str,
     timeframe_class: &str,
@@ -168,26 +178,44 @@ fn evaluate_thresholds(
         );
     }
 
-    let failures: Vec<String> = thresholds
+    let checks: Vec<(&ThresholdRow, Option<f64>, bool)> = thresholds
         .iter()
-        .filter_map(|t| {
-            let actual = match stats_json.get(&t.metric).and_then(|v| v.as_f64()) {
-                Some(v) => v,
-                None => return Some(format!("{}: missing from stats", t.metric)),
-            };
-            if !apply_threshold(&t.operator, actual, t.value) {
-                Some(format!(
-                    "{}: {:.4} {} {:.4}",
-                    t.metric,
-                    actual,
-                    operator_failure_text(&t.operator),
-                    t.value
-                ))
-            } else {
-                None
-            }
+        .map(|t| {
+            let actual = stats_json.get(&t.metric).and_then(|v| v.as_f64());
+            let passed = actual.is_some_and(|a| apply_threshold(&t.operator, a, t.value));
+            (t, actual, passed)
         })
         .collect();
+
+    let failures: Vec<String> = checks
+        .iter()
+        .filter(|(_, _, passed)| !passed)
+        .map(|(t, actual, _)| match actual {
+            None => format!("{}: missing from stats", t.metric),
+            Some(a) => format!(
+                "{}: {:.4} {} {:.4}",
+                t.metric,
+                a,
+                operator_failure_text(&t.operator),
+                t.value
+            ),
+        })
+        .collect();
+
+    stats_json["checks"] = Value::Array(
+        checks
+            .iter()
+            .map(|(t, actual, passed)| {
+                serde_json::json!({
+                    "metric": t.metric,
+                    "operator": t.operator,
+                    "required": t.value,
+                    "actual": actual,
+                    "passed": passed,
+                })
+            })
+            .collect(),
+    );
 
     if failures.is_empty() {
         ("passed".to_string(), None)
@@ -378,7 +406,7 @@ pub async fn run_holdout(pool: &PgPool, config: &StrategyConfig) -> AppResult<Ev
     )
     .await?;
     let (status, failure_reason) =
-        evaluate_thresholds(&stats_json, &thresholds, "holdout", timeframe_class);
+        evaluate_thresholds(&mut stats_json, &thresholds, "holdout", timeframe_class);
 
     finalize_evaluation(
         pool,
@@ -414,6 +442,7 @@ fn backtest_stats_to_json(stats: &BacktestStats) -> Value {
     let expectancy = compute_expectancy(stats);
     serde_json::json!({
         "sharpe":       stats.sharpe_ratio,
+        "t_stat":       t_stat(stats),
         "max_drawdown": stats.max_drawdown.abs(),
         "num_trades":   stats.num_trades,
         "win_rate":     stats.win_rate,
@@ -444,7 +473,7 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
         }
     };
 
-    let stats_json = backtest_stats_to_json(&bt_stats);
+    let mut stats_json = backtest_stats_to_json(&bt_stats);
     let timeframe_class = config.granularity.timeframe_class();
     let instrument_class = instrument_to_class(&config.instrument);
     let thresholds = load_thresholds(
@@ -456,7 +485,7 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
     )
     .await?;
     let (status, failure_reason) =
-        evaluate_thresholds(&stats_json, &thresholds, "backtest", timeframe_class);
+        evaluate_thresholds(&mut stats_json, &thresholds, "backtest", timeframe_class);
 
     finalize_evaluation(
         pool,
@@ -501,6 +530,7 @@ fn walk_forward_stats_to_json(is_stats: &BacktestStats, oos_stats: &BacktestStat
     serde_json::json!({
         // Evaluated against thresholds
         "oos_sharpe":       oos_stats.sharpe_ratio,
+        "oos_t_stat":       t_stat(oos_stats),
         "oos_return":       oos_stats.total_return,
         "oos_num_trades":   oos_stats.num_trades,
         "sharpe_retention": sharpe_retention,
@@ -552,7 +582,7 @@ pub async fn run_walk_forward(
 
     let is_stats = calculate_backtest_stats(&is_trades);
     let oos_stats = calculate_backtest_stats(&oos_trades);
-    let stats_json = walk_forward_stats_to_json(&is_stats, &oos_stats);
+    let mut stats_json = walk_forward_stats_to_json(&is_stats, &oos_stats);
     let timeframe_class = config.granularity.timeframe_class();
     let instrument_class = instrument_to_class(&config.instrument);
     let thresholds = load_thresholds(
@@ -563,8 +593,12 @@ pub async fn run_walk_forward(
         &config.strategy_type,
     )
     .await?;
-    let (status, failure_reason) =
-        evaluate_thresholds(&stats_json, &thresholds, "walk_forward", timeframe_class);
+    let (status, failure_reason) = evaluate_thresholds(
+        &mut stats_json,
+        &thresholds,
+        "walk_forward",
+        timeframe_class,
+    );
 
     finalize_evaluation(
         pool,
@@ -719,7 +753,7 @@ pub async fn run_monte_carlo(
         return fail_stage(pool, evaluation_id, failure).await;
     }
 
-    let stats_json = run_monte_carlo_sims(&trades);
+    let mut stats_json = run_monte_carlo_sims(&trades);
     let timeframe_class = config.granularity.timeframe_class();
     let instrument_class = instrument_to_class(&config.instrument);
     let thresholds = load_thresholds(
@@ -731,7 +765,7 @@ pub async fn run_monte_carlo(
     )
     .await?;
     let (status, failure_reason) =
-        evaluate_thresholds(&stats_json, &thresholds, "monte_carlo", timeframe_class);
+        evaluate_thresholds(&mut stats_json, &thresholds, "monte_carlo", timeframe_class);
 
     finalize_evaluation(
         pool,
@@ -783,6 +817,53 @@ mod tests {
             },
             exit_reason: ExitReason::TrendReversal,
         }
+    }
+
+    fn threshold(metric: &str, operator: &str, value: f64) -> ThresholdRow {
+        ThresholdRow {
+            metric: metric.to_string(),
+            operator: operator.to_string(),
+            value,
+        }
+    }
+
+    #[test]
+    fn every_check_is_recorded_with_what_it_needed_and_got() {
+        let mut stats = serde_json::json!({"num_trades": 40.0, "t_stat": 1.5});
+        let (status, failure) = evaluate_thresholds(
+            &mut stats,
+            &[
+                threshold("num_trades", "gte", 30.0),
+                threshold("t_stat", "gte", 2.0),
+            ],
+            "backtest",
+            "H4",
+        );
+
+        assert_eq!(status, "failed");
+        assert_eq!(
+            failure.as_deref(),
+            Some("t_stat: 1.5000 is below minimum 2.0000")
+        );
+        assert_eq!(
+            stats["checks"],
+            serde_json::json!([
+                {"metric": "num_trades", "operator": "gte", "required": 30.0, "actual": 40.0, "passed": true},
+                {"metric": "t_stat", "operator": "gte", "required": 2.0, "actual": 1.5, "passed": false}
+            ])
+        );
+    }
+
+    #[test]
+    fn t_stat_is_per_trade_sharpe_times_root_trades() {
+        let trades: Vec<Trade> = [0.02, -0.01, 0.03, 0.01]
+            .iter()
+            .map(|&p| trade_with_pnl(p))
+            .collect();
+        let stats = calculate_backtest_stats(&trades);
+
+        assert!((t_stat(&stats) - stats.sharpe_ratio * 2.0).abs() < 1e-12);
+        assert!(backtest_stats_to_json(&stats)["t_stat"].as_f64().is_some());
     }
 
     #[test]

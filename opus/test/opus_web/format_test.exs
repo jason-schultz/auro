@@ -11,6 +11,25 @@ defmodule OpusWeb.FormatTest do
     assert money(nil) == "—"
   end
 
+  test "signed_money shows a plus on gains and a true minus on losses" do
+    assert signed_money(84.4) == "+$84.40"
+    assert signed_money(-38.0) == "−$38.00"
+    assert signed_money(nil) == "—"
+  end
+
+  test "tone is green for gains, red for losses, plain at zero" do
+    assert tone(12.5) == "text-success"
+    assert tone(-0.1) == "text-error"
+    assert tone(0) == nil
+    assert tone(nil) == nil
+  end
+
+  test "date has the year, day doesn't" do
+    assert date(~D[2026-10-27]) == "Oct 27, 2026"
+    assert day(~U[2026-10-27 20:00:00Z]) == "Oct 27"
+    assert date(nil) == "—"
+  end
+
   test "pct renders one decimal" do
     assert pct(0.6452) == "64.5%"
     assert pct(0.0008) == "0.1%"

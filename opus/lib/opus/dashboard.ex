@@ -16,6 +16,7 @@ defmodule Opus.Dashboard do
   alias Opus.Accounts.IndexExposure
   alias Opus.Auro.Client
   alias Opus.Dashboard.Alerts
+  alias Opus.Journal.TradeStory
   alias Opus.Options
   alias Opus.Options.Paper
   alias Opus.Options.Paper.{Legs, Wheel}
@@ -23,14 +24,6 @@ defmodule Opus.Dashboard do
   alias Opus.Trading.Strategies
 
   @day_seconds 86_400
-
-  @book_names %{
-    "wheel" => {"Wheel", "Theta gang"},
-    "put_spread" => {"Put spreads", "Defined-risk degen"},
-    "iron_condor" => {"Iron condors", "Iron condor (theta + prayer)"},
-    "ideas" => {"Ideas", "Dip YOLO calls"},
-    "crash_puts" => {"Crash puts", "Doomsday insurance"}
-  }
 
   @doc """
   Everything but the broker balances: `:input` for the alert rules and the
@@ -43,6 +36,8 @@ defmodule Opus.Dashboard do
     {scanned_on, ideas} = Options.latest_ideas()
     exposure = IndexExposure.current(DateTime.to_date(now))
 
+    live_open = live_positions()
+
     input = %{
       now: now,
       today: DateTime.to_date(now),
@@ -54,6 +49,7 @@ defmodule Opus.Dashboard do
       exposure: exposure,
       paper: Enum.flat_map(books, &paper_trades/1),
       paper_events: paper_events(books),
+      live_opens: Enum.filter(live_open, &opened_since?(&1, now)),
       live_closes: live_closes(now),
       ideas: scanned_on && %{count: length(ideas), scanned_on: scanned_on}
     }
@@ -62,6 +58,7 @@ defmodule Opus.Dashboard do
       input: input,
       live: live(health),
       books: Enum.map(books, &book_tile/1),
+      positions: live_open ++ input.paper,
       exposure: exposure
     }
   end
@@ -71,13 +68,33 @@ defmodule Opus.Dashboard do
   def alerts(input, offline_brokers \\ []),
     do: Alerts.build(%{input | offline_brokers: offline_brokers})
 
-  @doc "The accounts overview for the Accounts tile (slow: brokers are called)."
-  @spec accounts() :: {:ok, map()} | {:error, term()}
-  def accounts, do: Accounts.overview()
+  # The last good accounts overview, kept between visits so the Accounts
+  # tile shows a total at once instead of "asking the brokers…" every time.
+  # Written at most every few minutes, so :persistent_term's cost on update
+  # doesn't matter, and it needs no process to own it.
+  @accounts_key {__MODULE__, :accounts}
+  @accounts_fresh_seconds 300
 
-  @doc "Display names for a book, serious and WSB."
-  @spec book_name(String.t()) :: {String.t(), String.t()}
-  def book_name(book), do: Map.get(@book_names, book, {book, book})
+  @doc """
+  The accounts overview for the Accounts tile. Slow: the brokers are called.
+  A good answer is cached for `cached_accounts/0`.
+  """
+  @spec accounts() :: {:ok, map()} | {:error, term()}
+  def accounts do
+    with {:ok, overview} <- Accounts.overview() do
+      :persistent_term.put(@accounts_key, {overview, DateTime.utc_now()})
+      {:ok, overview}
+    end
+  end
+
+  @doc "The last good accounts overview and when it was fetched, or nil."
+  @spec cached_accounts() :: {map(), DateTime.t()} | nil
+  def cached_accounts, do: :persistent_term.get(@accounts_key, nil)
+
+  @doc "Whether a cached overview is recent enough not to ask the brokers again."
+  @spec fresh?({map(), DateTime.t()} | nil) :: boolean()
+  def fresh?({_overview, at}), do: DateTime.diff(DateTime.utc_now(), at) < @accounts_fresh_seconds
+  def fresh?(nil), do: false
 
   defp engine({:ok, _health}), do: :up
   defp engine({:error, reason}), do: {:down, Client.describe_error(reason)}
@@ -91,6 +108,24 @@ defmodule Opus.Dashboard do
     for %{suspension: %{} = s} = row <- Strategies.list() do
       %{id: row.id, name: row.name, detail: s.trigger_detail}
     end
+  end
+
+  @doc """
+  Clear a job's failures from the dashboard: removes its discarded runs
+  from the last day. A run still retrying stays until it succeeds or gives
+  up. Returns how many were removed.
+  """
+  @spec clear_failed_jobs(String.t(), DateTime.t()) :: non_neg_integer()
+  def clear_failed_jobs(worker, now \\ DateTime.utc_now()) do
+    since = now |> DateTime.add(-@day_seconds) |> DateTime.to_naive()
+
+    {count, _} =
+      from(j in "oban_jobs",
+        where: j.worker == ^worker and j.state == "discarded" and j.attempted_at >= ^since
+      )
+      |> Repo.delete_all()
+
+    count
   end
 
   # Jobs discarded, or retrying after an error, in the last day.
@@ -124,8 +159,16 @@ defmodule Opus.Dashboard do
       where: t.status == "closed" and t.exit_time >= ^since,
       order_by: [desc: t.exit_time],
       select: %{
+        id: type(t.id, Ecto.UUID),
         instrument: t.instrument,
         direction: t.direction,
+        status: t.status,
+        units: t.units,
+        entry_price: t.entry_price,
+        exit_price: t.exit_price,
+        entry_time: type(t.entry_time, :utc_datetime_usec),
+        exit_time: type(t.exit_time, :utc_datetime_usec),
+        exit_reason: t.exit_reason,
         pnl: t.pnl,
         pnl_percent: t.pnl_percent
       }
@@ -145,6 +188,7 @@ defmodule Opus.Dashboard do
 
       %{
         book: "wheel",
+        key: "wheel:#{short.id}",
         symbol: trade.symbol,
         label: "#{trade.symbol} #{money(short.strike)} #{short.kind} (wheel)",
         link: link("wheel", trade.symbol),
@@ -154,7 +198,9 @@ defmodule Opus.Dashboard do
         shorts: [short],
         longs: [],
         max_loss: nil,
-        take_profit: mark && %{close_cost: mark, target: Wheel.take_profit_price(short)}
+        take_profit: mark && %{close_cost: mark, target: Wheel.take_profit_price(short)},
+        pnl: trade.pnl,
+        opened_on: short.opened_on
       }
     end
   end
@@ -166,6 +212,7 @@ defmodule Opus.Dashboard do
 
       %{
         book: book_key,
+        key: "#{book_key}:#{trade.id}",
         symbol: trade.symbol,
         label: label(book_key, trade.symbol, shorts, longs),
         link: link(book_key, trade.id),
@@ -175,7 +222,9 @@ defmodule Opus.Dashboard do
         shorts: shorts,
         longs: longs,
         max_loss: trade.summary.max_loss,
-        take_profit: take_profit(book_key, open, trade.marks)
+        take_profit: take_profit(book_key, open, trade.marks),
+        pnl: trade.pnl,
+        opened_on: trade.opened_on
       }
     end
   end
@@ -192,14 +241,26 @@ defmodule Opus.Dashboard do
   defp take_profit("ideas", [leg], marks),
     do: is_number(marks[leg.id]) && %{mark: marks[leg.id], target: leg.open_price * 2}
 
+  # A half-at-double book until it has sold its half.
+  defp take_profit(book, [%{quantity: contracts} = leg], marks)
+       when book in ~w(ideas_half crash_puts_half) and contracts > 1,
+       do:
+         is_number(marks[leg.id]) &&
+           %{mark: marks[leg.id], target: leg.open_price * 2, half: true}
+
   defp take_profit(_book, _legs, _marks), do: nil
 
   defp label("put_spread", symbol, [short], [long]),
-    do: "#{symbol} put spread #{num(short.strike)}/#{num(long.strike)}"
+    do: "#{symbol} put spread #{strike(short.strike)}/#{strike(long.strike)}"
 
-  defp label("iron_condor", symbol, _shorts, _longs), do: "#{symbol} iron condor"
+  defp label("iron_condor", symbol, shorts, longs) do
+    strikes =
+      (shorts ++ longs) |> Enum.map(& &1.strike) |> Enum.sort() |> Enum.map_join("/", &strike/1)
 
-  defp label("crash_puts", symbol, _shorts, [leg | _]),
+    "#{symbol} iron condor #{strikes}"
+  end
+
+  defp label(book, symbol, _shorts, [leg | _]) when book in ~w(crash_puts crash_puts_half),
     do: "#{symbol} #{money(leg.strike)} crash put"
 
   defp label(_book, symbol, _shorts, [%{kind: kind} = leg | _]),
@@ -207,27 +268,156 @@ defmodule Opus.Dashboard do
 
   defp label(book, symbol, _shorts, _longs), do: "#{symbol} #{book}"
 
-  # The books' events on the latest market date any of them recorded.
+  # What happened on the latest market date any book recorded: one row per
+  # closed trade with its P&L (a spread's legs close together), the wheel's
+  # single-leg closes, expiries, assignments and call-aways with their cash,
+  # every half sold at double, and every trade opened, with its legs so it
+  # can be copied by hand.
   defp paper_events(books) do
-    events =
-      for {book, %{events: events, trades: trades}} <- books, event <- events do
-        Map.merge(event, %{book: book, link: event_link(book, event, trades)})
-      end
+    latest =
+      books
+      |> Enum.flat_map(fn {_book, data} -> Enum.map(data.events, & &1.on) end)
+      |> Enum.max(Date, fn -> nil end)
 
-    case events |> Enum.map(& &1.on) |> Enum.max(Date, fn -> nil end) do
-      nil -> []
-      latest -> Enum.filter(events, &(&1.on == latest))
+    if latest,
+      do: Enum.flat_map(books, &(finished(&1, latest) ++ opened(&1, latest))),
+      else: []
+  end
+
+  defp opened({"wheel", %{trades: trades}}, on) do
+    for t <- trades, %{opened_on: ^on, kind: kind} = leg <- t.legs, kind in ~w(put call) do
+      %{
+        book: "wheel",
+        key: "wheel:#{leg.id}:open",
+        symbol: t.symbol,
+        kind: "open",
+        on: on,
+        label: leg_label(leg, t.symbol),
+        spot: t.spot,
+        legs: [leg],
+        link: link("wheel", t.symbol)
+      }
     end
   end
 
-  defp event_link("wheel", event, _trades), do: link("wheel", event.symbol)
+  defp opened({book, %{trades: trades}}, on) do
+    for %{opened_on: ^on} = t <- trades do
+      {shorts, longs} = Enum.split_with(t.legs, &(&1.side == "short"))
 
-  defp event_link(book, event, trades) do
-    case Enum.find(trades, fn t -> Enum.any?(t.legs, &(&1.id == event.position_id)) end) do
-      nil -> link(book, nil)
-      trade -> link(book, trade.id)
+      %{
+        book: book,
+        key: "#{book}:#{t.id}:open",
+        symbol: t.symbol,
+        kind: "open",
+        on: on,
+        label: label(book, t.symbol, shorts, longs),
+        spot: t.spot,
+        legs: t.legs,
+        link: link(book, t.id)
+      }
     end
   end
+
+  defp finished({"wheel", %{events: events, trades: trades}}, on) do
+    legs = for t <- trades, leg <- t.legs, into: %{}, do: {leg.id, leg}
+
+    for %{on: ^on, kind: kind} = e <- events, kind in ~w(close expire assign call_away) do
+      Map.merge(e, %{
+        book: "wheel",
+        key: "wheel:event:#{e.id}",
+        label: leg_label(legs[e.position_id], e.symbol),
+        pnl: nil,
+        link: link("wheel", e.symbol)
+      })
+    end
+  end
+
+  defp finished({book, %{trades: trades}}, on) do
+    closed(book, trades, on) ++ halves_sold(book, trades, on)
+  end
+
+  defp closed(book, trades, on) do
+    for %{closed_on: ^on} = t <- trades do
+      {shorts, longs} = Enum.split_with(t.legs, &(&1.side == "short"))
+
+      %{
+        book: book,
+        key: "#{book}:#{t.id}:close",
+        symbol: t.symbol,
+        kind: if(Enum.all?(t.legs, &(&1.status == "expired")), do: "expire", else: "close"),
+        on: on,
+        label: label(book, t.symbol, shorts, longs),
+        cash: nil,
+        pnl: t.pnl,
+        link: link(book, t.id)
+      }
+    end
+  end
+
+  # The half a half-at-double book sold at double: a closed leg in a trade
+  # still open.
+  defp halves_sold(book, trades, on) do
+    for %{status: "open"} = t <- trades,
+        %{status: "closed", closed_on: ^on} = sold <- t.legs,
+        kept <- Enum.filter(t.legs, &(&1.status == "open")) do
+      {shorts, longs} = Enum.split_with(t.legs, &(&1.side == "short"))
+
+      %{
+        book: book,
+        key: "#{book}:#{t.id}:half",
+        symbol: t.symbol,
+        kind: "half",
+        on: on,
+        label: label(book, t.symbol, shorts, longs),
+        sold: sold,
+        kept: kept,
+        manage_on: Date.add(kept.expiration, -21),
+        link: link(book, t.id)
+      }
+    end
+  end
+
+  defp leg_label(%{kind: "shares", quantity: n}, symbol), do: "#{n} #{symbol} shares"
+  defp leg_label(%{kind: kind, strike: strike}, symbol), do: "#{symbol} #{money(strike)} #{kind}"
+  defp leg_label(nil, symbol), do: symbol
+
+  # Open live trades, as rows beside the paper trades in the open positions.
+  defp live_positions do
+    from(t in "live_trades",
+      where: t.status == "open",
+      order_by: [desc: t.entry_time],
+      select: %{
+        id: type(t.id, Ecto.UUID),
+        instrument: t.instrument,
+        direction: t.direction,
+        units: t.units,
+        entry_price: t.entry_price,
+        stop_loss_price: t.stop_loss_price,
+        entry_time: type(t.entry_time, :utc_datetime_usec)
+      }
+    )
+    |> Repo.all()
+    |> Enum.map(fn t ->
+      %{
+        id: t.id,
+        book: "live",
+        label: "#{TradeStory.market(t)} #{String.downcase(t.direction)}",
+        direction: t.direction,
+        units: t.units,
+        link: "/journal?trade=#{t.id}",
+        pnl: nil,
+        opened_on: t.entry_time && Opus.Clock.date(t.entry_time),
+        entry_time: t.entry_time,
+        entry_price: t.entry_price,
+        stop_loss_price: t.stop_loss_price
+      }
+    end)
+  end
+
+  defp opened_since?(%{entry_time: %DateTime{} = at}, now),
+    do: DateTime.diff(now, at) < @day_seconds
+
+  defp opened_since?(_trade, _now), do: false
 
   defp link(book, nil), do: "/options?view=paper&book=#{book}"
   defp link(book, trade), do: "/options?view=paper&book=#{book}&trade=#{trade}"
@@ -238,7 +428,7 @@ defmodule Opus.Dashboard do
         do: Enum.count(data.trades, &(&1.short || &1.shares)),
         else: Enum.count(data.trades, &(&1.status == "open"))
 
-    {name, wsb} = book_name(book)
+    {name, wsb} = Paper.book_name(book)
 
     %{
       book: book,
@@ -282,5 +472,5 @@ defmodule Opus.Dashboard do
   end
 
   defp money(value), do: OpusWeb.Format.money(value)
-  defp num(value), do: OpusWeb.Format.num(value)
+  defp strike(value), do: OpusWeb.Format.strike(value)
 end

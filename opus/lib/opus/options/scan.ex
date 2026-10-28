@@ -1,6 +1,6 @@
 defmodule Opus.Options.Scan do
   @moduledoc """
-  The nightly look through the stored option chains for contracts worth a
+  The daily look through the stored option chains for contracts worth a
   glance. Two lists:
 
     * **dip_buy** — on an index ETF whose daily RSI(2) closed under 10 while
@@ -34,11 +34,11 @@ defmodule Opus.Options.Scan do
   @ideas_per_setup 8
 
   @doc """
-  Scan every underlying with a stored chain and record tonight's ideas,
+  Scan every underlying with a stored chain and record the day's ideas,
   replacing any already recorded for `scanned_on`. Returns the count stored.
   """
   @spec run(Date.t()) :: {:ok, non_neg_integer()}
-  def run(scanned_on \\ Date.utc_today()) do
+  def run(scanned_on \\ Opus.Clock.today()) do
     ideas =
       Options.underlyings()
       |> Enum.flat_map(&scan_underlying(&1, scanned_on))

@@ -1,27 +1,28 @@
 defmodule Opus.MarketData.OptionsChainWorker do
   @moduledoc """
-  Nightly option chain snapshots from Questrade, persisted by Rust.
+  Option chain snapshots from Questrade, persisted by Rust: 09:00 and
+  10:00 New York on trading days (config.exs).
 
   Two job shapes share this worker, like `MassiveBarsWorker`:
 
-    * no args (the nightly cron) — fan out one job per listing flagged
+    * no args (the cron) — fan out one job per listing flagged
       `feed_options_chain` in the instruments table;
     * `%{"underlying" => _}` — capture that underlying's near-the-money
       chain (`POST /api/questrade/options/snapshot`): the contracts into
-      `option_contracts`, tonight's quotes with the exchange greeks into
+      `option_contracts`, the current quotes with the exchange greeks into
       `option_quotes`.
 
-  Runs after the close, when the quotes are the day's closing values, so
-  Questrade's data delay does not matter. The strike band is centred on the
-  underlying's Questrade quote at capture time, not on stored bars. The
-  cron fan-out is gated on `enabled`. Historical bars are the Massive
+  The 09:00 run, before the open, holds the previous session's closing
+  quotes; the 10:00 run holds live ones, after the opening rush. The strike
+  band is centred on the underlying's Questrade quote at capture time, not
+  on stored bars. The cron fan-out is gated on `enabled`. Historical bars are the Massive
   flat-file path, not this worker's job.
   """
 
   use Oban.Worker,
     queue: :market_data,
     max_attempts: 3,
-    unique: [period: 20 * 3600, keys: [:underlying]]
+    unique: [period: 30 * 60, keys: [:underlying]]
 
   require Logger
 

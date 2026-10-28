@@ -64,17 +64,23 @@ pub(crate) struct TradingConfigRow {
     pub value: Value,
 }
 
+/// An assignment's full strategy JSON (`engine::strategy::Strategy`): its
+/// recipe (`strategies.definition`) plus the assignment's instrument,
+/// timeframe and sizing. Needs `live_strategies ls JOIN strategies s`.
+/// research/strategy_assignments_plan.md has the split.
+pub(crate) const PARAMETERS_SQL: &str = "(s.definition \
+    || jsonb_build_object('instrument', ls.instrument, 'granularity', s.granularity) \
+    || CASE WHEN ls.sizing IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('sizing', ls.sizing) END)";
+
 pub(crate) async fn list_live_strategies(
     pool: &PgPool,
 ) -> Result<Vec<LiveStrategyListRow>, sqlx::Error> {
-    sqlx::query_as(
-        r#"
-        SELECT id, strategy_type, instrument, granularity, parameters,
-             enabled, curator_mode, created_at, updated_at
-        FROM live_strategies
-        ORDER BY instrument, strategy_type
-        "#,
-    )
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT ls.id, ls.strategy_type, ls.instrument, ls.granularity, {PARAMETERS_SQL} AS parameters, \
+             ls.enabled, ls.curator_mode, ls.created_at, ls.updated_at \
+         FROM live_strategies ls JOIN strategies s ON s.id = ls.strategy_id \
+         ORDER BY ls.instrument, ls.strategy_type"
+    )))
     .fetch_all(pool)
     .await
 }
@@ -172,9 +178,12 @@ pub(crate) async fn get_live_strategy_by_id(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<Option<LiveStrategyDetailRow>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, strategy_type, instrument, granularity, parameters, enabled, curator_mode, created_at, updated_at FROM live_strategies WHERE id = $1",
-    )
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT ls.id, ls.strategy_type, ls.instrument, ls.granularity, {PARAMETERS_SQL} AS parameters, \
+             ls.enabled, ls.curator_mode, ls.created_at, ls.updated_at \
+         FROM live_strategies ls JOIN strategies s ON s.id = ls.strategy_id \
+         WHERE ls.id = $1"
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await
@@ -283,12 +292,100 @@ pub(crate) async fn list_for_instrument_granularity(
     instrument: &str,
     granularity: &str,
 ) -> Result<Vec<LiveStrategy>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, strategy_type, instrument, granularity, parameters, enabled \
-         FROM live_strategies WHERE instrument = $1 AND granularity = $2",
-    )
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT ls.id, ls.strategy_type, ls.instrument, ls.granularity, {PARAMETERS_SQL} AS parameters, ls.enabled \
+         FROM live_strategies ls JOIN strategies s ON s.id = ls.strategy_id \
+         WHERE ls.instrument = $1 AND ls.granularity = $2"
+    )))
     .bind(instrument)
     .bind(granularity)
     .fetch_all(pool)
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use serde_json::json;
+
+    fn rsi_dip_buy(instrument: &str, pct: f64) -> Value {
+        json!({
+            "version": "v1_composite",
+            "strategy_id": null,
+            "strategy_name": "split test dip-buy",
+            "instrument": instrument,
+            "granularity": "D",
+            "components": {
+                "r": {"type": "RsiReversion", "params": {"rsi_period": 2, "oversold": 20, "overbought": 80}}
+            },
+            "entry": {"long": "r.long"},
+            "exit": {"long": "r.exit_long"},
+            "stop": {"type": "AtrMultiple", "params": {"k": 3.0, "period": 14}},
+            "sizing": {"type": "RiskPct", "params": {"pct": pct}},
+            "max_hold_bars": 10
+        })
+    }
+
+    async fn recipe_of(pool: &PgPool, id: Uuid) -> Uuid {
+        sqlx::query_scalar("SELECT strategy_id FROM live_strategies WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn parameters_of(pool: &PgPool, instrument: &str) -> Value {
+        list_for_instrument_granularity(pool, instrument, "D")
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("strategy listed")
+            .parameters
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn one_recipe_serves_many_assignments_and_reads_back_whole() {
+        let pool = AppState::for_tests_with_test_db().await.db;
+        let (spx, nas) = (Uuid::new_v4(), Uuid::new_v4());
+        let (spx_params, nas_params) = (
+            rsi_dip_buy("SPLIT_SPX", 0.01),
+            rsi_dip_buy("SPLIT_NAS", 0.005),
+        );
+
+        insert_live_strategy(&pool, spx, "composite", "SPLIT_SPX", "D", &spx_params)
+            .await
+            .unwrap();
+        insert_live_strategy(&pool, nas, "composite", "SPLIT_NAS", "D", &nas_params)
+            .await
+            .unwrap();
+
+        // Same rules, different instrument and size: one recipe.
+        let recipe = recipe_of(&pool, spx).await;
+        assert_eq!(recipe_of(&pool, nas).await, recipe);
+        assert_eq!(parameters_of(&pool, "SPLIT_SPX").await, spx_params);
+        assert_eq!(parameters_of(&pool, "SPLIT_NAS").await, nas_params);
+
+        // Changing one assignment's rules gives it its own recipe; the other keeps the old.
+        let mut edited = nas_params.clone();
+        edited["max_hold_bars"] = json!(5);
+        update_live_strategy(&pool, nas, "composite", "SPLIT_NAS", "D", &edited)
+            .await
+            .unwrap();
+        assert_ne!(recipe_of(&pool, nas).await, recipe);
+        assert_eq!(recipe_of(&pool, spx).await, recipe);
+        assert_eq!(parameters_of(&pool, "SPLIT_NAS").await, edited);
+
+        sqlx::query("DELETE FROM live_strategies WHERE id = ANY($1)")
+            .bind(vec![spx, nas])
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM strategies WHERE name = 'split test dip-buy'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 }

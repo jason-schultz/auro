@@ -54,7 +54,7 @@ defmodule Opus.Options.PaperTest do
     :ok
   end
 
-  test "sells the put once per night, however often it runs" do
+  test "sells the put once per market day, however often it runs" do
     assert Paper.market_date(@captured) == ~D[2026-10-23]
     assert {:ok, [{:open, %{strike: 590.0}}]} = Paper.run_underlying("SPY")
     assert {:skipped, :already_ran} = Paper.run_underlying("SPY")
@@ -78,15 +78,23 @@ defmodule Opus.Options.PaperTest do
   test "the paper book has its own tab", %{conn: conn} do
     {:ok, view, html} = live(conn, ~p"/options")
     assert html =~ "Paper book"
-    refute html =~ "the first trades open after tonight"
+    refute html =~ "the first trades open at the next 10:30"
 
+    # The tab opens on all five books side by side.
     html = view |> element("nav a", "Paper book") |> render_click()
     assert_patch(view, ~p"/options?view=paper")
-    assert html =~ "the first trades open after tonight"
+    assert html =~ "All books"
+    assert html =~ "not started"
+
+    {:ok, _view, html} = live(conn, ~p"/options?view=paper&book=wheel")
+    assert html =~ "the first trades open at the next 10:30"
 
     Paper.run_underlying("SPY")
     {:ok, _view, html} = live(conn, ~p"/options?view=paper")
     assert html =~ "1 open"
+    assert html =~ "Too early to judge"
+
+    {:ok, _view, html} = live(conn, ~p"/options?view=paper&book=wheel")
     assert html =~ "SPY wheel"
 
     # The book opens on the overview: one row per trade.
@@ -95,7 +103,7 @@ defmodule Opus.Options.PaperTest do
 
     # A trade shows its cycle and its current leg, with the rules spelled
     # out; the payoff chart needs the engine, which tests can't reach.
-    {:ok, _view, html} = live(conn, ~p"/options?view=paper&trade=SPY")
+    {:ok, _view, html} = live(conn, ~p"/options?view=paper&book=wheel&trade=SPY")
     assert html =~ "Premium collected"
     assert html =~ "What happens next"
     assert html =~ "effective cost"
@@ -110,7 +118,6 @@ defmodule Opus.Options.PaperTest do
     assert detail.manage_on == Date.add(leg.position.expiration, -21)
     assert [%{mid: _}] = detail.marks
     assert Paper.leg(-1) == nil
-    assert html =~ "sold an option"
     assert html =~ "Net premium sold"
   end
 end

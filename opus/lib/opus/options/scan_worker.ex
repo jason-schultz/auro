@@ -1,10 +1,11 @@
 defmodule Opus.Options.ScanWorker do
   @moduledoc """
-  Runs `Opus.Options.Scan` after the nightly chain snapshot has landed, so
-  the Options page has that night's ideas by morning. Gated on `enabled`.
+  Runs `Opus.Options.Scan` after each chain snapshot: a heads-up before the
+  open, then again on the 10:00 New York quotes before the paper books
+  trade. Gated on `enabled`.
   """
 
-  use Oban.Worker, queue: :market_data, max_attempts: 2, unique: [period: 20 * 3600]
+  use Oban.Worker, queue: :market_data, max_attempts: 2, unique: [period: 30 * 60]
 
   require Logger
 

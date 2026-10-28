@@ -52,6 +52,21 @@ defmodule Opus.Options.Paper.Legs do
         (-sign(leg) * price * Pick.multiplier() - commission) * leg.quantity
       end)
 
+  @doc """
+  Where a leg expiring on `expiration` stands on the snapshot's market date:
+  `{:open, days_left}` up to and including expiry day, `{:settle, close}` once
+  the expiry day's closing price is in `expiry_spots`, and `:awaiting_close`
+  after expiry until it is.
+  """
+  @spec expiry_state(Date.t(), map()) :: {:open, integer()} | {:settle, float()} | :awaiting_close
+  def expiry_state(expiration, %{as_of: as_of, expiry_spots: spots}) do
+    cond do
+      Map.has_key?(spots, expiration) -> {:settle, Map.fetch!(spots, expiration)}
+      Date.after?(as_of, expiration) -> :awaiting_close
+      true -> {:open, Date.diff(expiration, as_of)}
+    end
+  end
+
   @doc "Cash from settling legs at expiry against `spot`: intrinsic value, no commission."
   @spec settle_cash([map()], float()) :: float()
   def settle_cash(legs, spot),
@@ -63,13 +78,22 @@ defmodule Opus.Options.Paper.Legs do
 
   @doc """
   The signed change to a book's cash from a trade action: `{:open, _, legs}`,
-  `{:close, trade, fills}` or `{:settle, trade, spot}`; nothing for a hold.
+  `{:close, trade, fills}`, `{:sell_half, trade, leg, price}` or
+  `{:settle, trade, spot}`; nothing for a hold.
   """
   @spec cash(tuple(), float()) :: float()
   def cash({:open, _structure, legs}, commission), do: open_cash(legs, commission)
   def cash({:close, _trade, fills}, commission), do: close_cash(fills, commission)
+
+  def cash({:sell_half, _trade, leg, price}, commission),
+    do: close_cash([{half(leg), price}], commission)
+
   def cash({:settle, trade, spot}, _commission), do: settle_cash(trade.legs, spot)
   def cash({:hold, _trade}, _commission), do: 0.0
+
+  @doc "The half of a leg's contracts that `{:sell_half, …}` sells (rounded down)."
+  @spec half(map()) :: map()
+  def half(leg), do: %{leg | quantity: div(leg.quantity, 2)}
 
   @doc """
   An option row from a chain (or an idea) as a leg to open on `side`: one

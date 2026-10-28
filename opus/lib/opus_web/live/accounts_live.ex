@@ -236,7 +236,7 @@ defmodule OpusWeb.AccountsLive do
               <td class="py-2.5 text-right">{money(row.avg_cost)}</td>
               <td class="py-2.5 text-right">{money(row.price)}</td>
               <td class="py-2.5 text-right">{money(row.value)}</td>
-              <td class={["py-2.5 text-right", gain_class(row.gain)]}>{money(row.gain)}</td>
+              <td class={["py-2.5 text-right", tone(row.gain)]}>{money(row.gain)}</td>
             </tr>
           </tbody>
         </table>
@@ -267,8 +267,4 @@ defmodule OpusWeb.AccountsLive do
     <span aria-hidden="true" class="size-2.5 rounded-[3px]" style={"background: #{@color}"} />
     """
   end
-
-  defp gain_class(nil), do: "text-muted"
-  defp gain_class(gain) when gain < 0, do: "text-error"
-  defp gain_class(_gain), do: "text-success"
 end

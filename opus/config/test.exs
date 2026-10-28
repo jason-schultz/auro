@@ -37,3 +37,8 @@ config :opus, auro_base_url: "http://127.0.0.1:3999"
 
 config :opus, Oban, testing: :manual
 config :opus, start_scheduled_workers: false
+
+# Discord posts go to a Req.Test stub, never to a real channel.
+config :opus, Opus.Dashboard.Discord,
+  webhook_url: "https://discord.test/api/webhooks/1/test",
+  req_options: [plug: {Req.Test, Opus.Dashboard.Discord}, retry: false]

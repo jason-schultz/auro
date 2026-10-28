@@ -37,36 +37,36 @@ defmodule OpusWeb.Layouts do
            page, so the bar's own content starts below that strip; the hit areas
            are tall enough that a link stays clickable even half-covered. --%>
       <div class="mx-auto flex w-full max-w-7xl items-center justify-between gap-6 px-4 pt-[max(2.5rem,env(safe-area-inset-top))] pb-3 sm:px-6">
-        <a href={~p"/"} class="py-2 text-base font-semibold tracking-tight">Auro</a>
+        <.link navigate={~p"/"} class="py-2 text-base font-semibold tracking-tight">Auro</.link>
         <nav class="flex min-w-0 items-center gap-5 overflow-x-auto whitespace-nowrap text-sm">
-          <a href={~p"/"} class="py-2 text-muted hover:text-base-content"><.t
+          <.link navigate={~p"/"} class="py-2 text-muted hover:text-base-content"><.t
             s="Dashboard"
             wsb="War room"
-          /></a>
-          <a href={~p"/strategies"} class="py-2 text-muted hover:text-base-content"><.t
+          /></.link>
+          <.link navigate={~p"/strategies"} class="py-2 text-muted hover:text-base-content"><.t
             s="Strategies"
             wsb="Plays"
-          /></a>
-          <a href={~p"/journal"} class="py-2 text-muted hover:text-base-content"><.t
+          /></.link>
+          <.link navigate={~p"/journal"} class="py-2 text-muted hover:text-base-content"><.t
             s="Journal"
             wsb="Loss porn"
-          /></a>
-          <a href={~p"/accounts"} class="py-2 text-muted hover:text-base-content"><.t
+          /></.link>
+          <.link navigate={~p"/accounts"} class="py-2 text-muted hover:text-base-content"><.t
             s="Accounts"
             wsb="The bag"
-          /></a>
-          <a href={~p"/options"} class="py-2 text-muted hover:text-base-content"><.t
+          /></.link>
+          <.link navigate={~p"/options"} class="py-2 text-muted hover:text-base-content"><.t
             s="Options"
             wsb="Casino"
-          /></a>
-          <a href={~p"/instruments"} class="py-2 text-muted hover:text-base-content"><.t
+          /></.link>
+          <.link navigate={~p"/instruments"} class="py-2 text-muted hover:text-base-content"><.t
             s="Instruments"
             wsb="Tickers"
-          /></a>
-          <a href={~p"/research"} class="py-2 text-muted hover:text-base-content"><.t
+          /></.link>
+          <.link navigate={~p"/research"} class="py-2 text-muted hover:text-base-content"><.t
             s="Research"
             wsb="DD"
-          /></a>
+          /></.link>
           <.theme_toggle />
         </nav>
       </div>

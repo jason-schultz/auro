@@ -6,6 +6,8 @@ defmodule OpusWeb.ResearchLive do
   """
   use OpusWeb, :live_view
 
+  import OpusWeb.Format, only: [date: 1]
+
   alias Opus.Research
   alias Opus.Research.Entry
 
@@ -260,6 +262,4 @@ defmodule OpusWeb.ResearchLive do
   defp status_class("testing"), do: "text-info"
   defp status_class("parked"), do: "text-warning"
   defp status_class(_), do: "text-muted"
-
-  defp date(day), do: Calendar.strftime(day, "%b %-d, %Y")
 end

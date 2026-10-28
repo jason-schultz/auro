@@ -30,7 +30,7 @@ defmodule Opus.DashboardTest do
 
     assert data.input.engine == {:down, "Auro is not running."}
     refute data.live.engine_up
-    assert length(data.books) == 5
+    assert length(data.books) == 7
 
     titles = Enum.map(alerts, & &1.title)
     assert "Auro (the Rust engine) is not running" in titles
@@ -38,7 +38,20 @@ defmodule Opus.DashboardTest do
     refute Enum.any?(titles, &(&1 =~ "ideas scan failed"))
 
     failed = Enum.find(alerts, &(&1.title == "Option chain snapshot failed"))
-    assert failed.detail == "** (RuntimeError) boom"
+    assert failed.detail == "(RuntimeError) boom"
+    assert failed.clear_worker == "Opus.MarketData.OptionsChainWorker"
+
+    # Clearing removes the recent failure; the alert goes with it.
+    assert Dashboard.clear_failed_jobs("Opus.MarketData.OptionsChainWorker", now) == 1
+
+    titles =
+      now
+      |> Dashboard.gather()
+      |> Map.fetch!(:input)
+      |> Dashboard.alerts()
+      |> Enum.map(& &1.title)
+
+    refute "Option chain snapshot failed" in titles
   end
 
   test "offline brokers found later join the alerts" do

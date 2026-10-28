@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::instruments as instruments_repo;
+use super::live_strategies::PARAMETERS_SQL;
 use crate::engine::types::{Direction, Granularity};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -155,18 +156,21 @@ pub(crate) async fn list_live_trades(
     status: Option<&str>,
     limit: i64,
 ) -> Result<Vec<LiveTradeListRow>, sqlx::Error> {
-    let select_cols = r#"
+    let select_cols = format!(
+        r#"
         SELECT lt.id, lt.live_strategy_id, lt.oanda_trade_id, lt.instrument, lt.direction, lt.units,
                lt.entry_price, lt.exit_price, lt.entry_time, lt.exit_time,
                lt.pnl_percent, lt.entry_reason, lt.exit_reason, lt.status,
-               ls.strategy_type, ls.parameters, ls.granularity,
+               ls.strategy_type, {PARAMETERS_SQL} AS parameters, ls.granularity,
                lt.indicators_at_entry, lt.regime_at_entry,
                lt.mae_pct, lt.mfe_pct, lt.stop_loss_state_at_close
         FROM live_trades lt
         LEFT JOIN live_strategies ls ON ls.id = lt.live_strategy_id
-    "#;
+        LEFT JOIN strategies s ON s.id = ls.strategy_id
+    "#
+    );
 
-    // `select_cols` is a literal; `status` and `limit` are bound parameters.
+    // `select_cols` is built from literals; `status` and `limit` are bound parameters.
     match status {
         Some(status) if status != "all" => {
             sqlx::query_as::<_, LiveTradeListRow>(sqlx::AssertSqlSafe(format!(
@@ -194,18 +198,19 @@ pub(crate) async fn find_live_trade_detail(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<Option<TradeDetailRow>, sqlx::Error> {
-    sqlx::query_as(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT lt.id, lt.live_strategy_id, lt.oanda_trade_id, lt.instrument, lt.direction, lt.units,
                lt.entry_price, lt.exit_price, lt.entry_time, lt.exit_time,
              lt.pnl_percent, lt.entry_reason, lt.exit_reason, lt.status,
              lt.indicators_at_entry, lt.regime_at_entry, lt.stop_loss_state_at_close,
-               ls.strategy_type, ls.parameters, ls.granularity, ls.enabled
+               ls.strategy_type, {PARAMETERS_SQL} AS parameters, ls.granularity, ls.enabled
         FROM live_trades lt
         LEFT JOIN live_strategies ls ON ls.id = lt.live_strategy_id
+        LEFT JOIN strategies s ON s.id = ls.strategy_id
         WHERE lt.id = $1
-        "#,
-    )
+        "#
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await

@@ -25,6 +25,12 @@ config :opus,
   oanda_account_id: System.get_env("OANDA_ACCOUNT_ID"),
   oanda_api_key: System.get_env("OANDA_API_KEY")
 
+# Alerts to a Discord channel's webhook (Opus.Dashboard.NotifyWorker); unset,
+# nothing is sent. Tests set their own (config/test.exs).
+if config_env() != :test do
+  config :opus, Opus.Dashboard.Discord, webhook_url: System.get_env("DISCORD_WEBHOOK_URL")
+end
+
 # Tests point at a closed port (config/test.exs) so they never reach a running engine.
 if config_env() != :test do
   config :opus, auro_base_url: System.get_env("AURO_BASE_URL") || "http://localhost:3000"

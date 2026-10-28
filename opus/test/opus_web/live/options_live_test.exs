@@ -7,6 +7,10 @@ defmodule OpusWeb.OptionsLiveTest do
 
   test "renders the form with a cash-secured put as the default", %{conn: conn} do
     {:ok, _view, html} = live(conn, ~p"/options")
+    assert html =~ "Your own contract"
+    refute html =~ "Show me what happens"
+
+    {:ok, _view, html} = live(conn, ~p"/options?view=custom")
 
     assert html =~ "Options"
     # The WallStreetBets wording is rendered beside the serious wording; the theme picks one.
@@ -16,7 +20,7 @@ defmodule OpusWeb.OptionsLiveTest do
   end
 
   test "input mistakes are explained before anything is sent", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/options")
+    {:ok, view, _html} = live(conn, ~p"/options?view=custom")
 
     html =
       view
@@ -28,7 +32,7 @@ defmodule OpusWeb.OptionsLiveTest do
 
   # config/test.exs points the Auro client at a closed port.
   test "a complete position reports that Auro is unreachable", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/options")
+    {:ok, view, _html} = live(conn, ~p"/options?view=custom")
 
     html =
       view
@@ -41,15 +45,15 @@ defmodule OpusWeb.OptionsLiveTest do
   end
 
   test "the covered-call cost basis field appears only for covered calls", %{conn: conn} do
-    {:ok, view, html} = live(conn, ~p"/options")
-    refute html =~ "What your shares cost"
+    {:ok, view, html} = live(conn, ~p"/options?view=custom")
+    refute html =~ "Your shares cost"
 
     html =
       view
       |> form("#position-form", position: %{"strategy" => "covered_call"})
       |> render_change()
 
-    assert html =~ "What your shares cost"
+    assert html =~ "Your shares cost"
   end
 
   describe "Options.build_request/1" do

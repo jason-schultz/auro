@@ -4,6 +4,13 @@ defmodule OpusWeb.CandleChart do
   horizontal price lines (entry, stop, target, last price) and an optional
   moving-average overlay. Pure layout; the LiveView decides what to show.
 
+  With `signals` (`Opus.Trading.SignalChart.shape/3`) it also draws each
+  trade the rules made: the bars it was open shaded, ▲ where it bought and
+  ▼ where it sold, and under the time axis one strip per rule, lit on the
+  bars it was true, lined up with the candles above. `marker_event` makes a
+  marker clickable (`phx-value-trade` is the trade's id); `focus` rings the
+  chosen trade's opening marker.
+
   Prices that fall outside the candles' range are not drawn as lines. They
   get a note at the nearest edge instead, so a stop 2.6% away still reads.
   """
@@ -21,6 +28,9 @@ defmodule OpusWeb.CandleChart do
   attr :overlay_period, :integer, default: nil, doc: "simple moving average to draw, if any"
   attr :bars, :integer, default: nil, doc: "how many of the trailing candles to show"
   attr :label, :string, required: true
+  attr :signals, :map, default: nil, doc: "markers, spans and lanes from SignalChart.shape/3"
+  attr :marker_event, :string, default: nil
+  attr :focus, :integer, default: nil, doc: "trade id whose opening marker is ringed"
 
   def candle_chart(%{candles: []} = assigns) do
     ~H"""
@@ -34,7 +44,14 @@ defmodule OpusWeb.CandleChart do
     assigns =
       assign(
         assigns,
-        layout(assigns.candles, assigns.lines, assigns.overlay_period, assigns.bars)
+        layout(
+          assigns.candles,
+          assigns.lines,
+          assigns.overlay_period,
+          assigns.bars,
+          assigns.signals,
+          assigns.focus
+        )
       )
 
     ~H"""
@@ -55,10 +72,19 @@ defmodule OpusWeb.CandleChart do
               class="stroke-base-300"
               stroke-width="1"
             />
-            <text x={@plot_width + 8} y={tick.y + 4} font-size="11" class="fill-neutral-content">
+            <text x={@plot_width + 8} y={tick.y + 5} font-size="13" class="fill-neutral-content">
               {tick.text}
             </text>
           </g>
+          <rect
+            :for={span <- @spans}
+            x={span.x}
+            y="0"
+            width={span.width}
+            height={@height}
+            fill="var(--color-info)"
+            fill-opacity="0.1"
+          />
           <g :for={candle <- @drawn}>
             <line
               x1={candle.x}
@@ -111,31 +137,71 @@ defmodule OpusWeb.CandleChart do
               {line.text}
             </text>
           </g>
+          <circle
+            :if={@ring}
+            cx={@ring.x}
+            cy={@ring.y}
+            r="11"
+            fill="none"
+            stroke="var(--color-base-content)"
+            stroke-width="1.5"
+          />
           <g :for={note <- @edge_notes}>
             <rect x="0" y={note.y} width={@plot_width} height="3" fill={note.color} />
             <text x="8" y={note.text_y} font-size="11" fill={note.color}>{note.text}</text>
           </g>
-          <text x="2" y={@height + 16} font-size="11" class="fill-neutral-content">
+          <text x="2" y={@height + 17} font-size="13" class="fill-neutral-content">
             {@first_time}
           </text>
           <text
             x={@plot_width - 2}
-            y={@height + 16}
-            font-size="11"
+            y={@height + 17}
+            font-size="13"
             text-anchor="end"
             class="fill-neutral-content"
           >
             {@last_time}
           </text>
         </g>
+        <g
+          :for={marker <- @markers}
+          phx-click={@marker_event}
+          phx-value-trade={marker.trade}
+          class={@marker_event && "cursor-pointer"}
+        >
+          <title>{marker.title}</title>
+          <path d={marker.path} fill={marker.color} />
+        </g>
       </svg>
+      <div :if={@lanes != []} class="flex min-w-[640px] flex-col gap-2.5 pt-3">
+        <div :for={lane <- @lanes} class="flex flex-col gap-1">
+          <span class="text-[13px] leading-snug">{lane.label}</span>
+          <svg
+            aria-hidden="true"
+            viewBox={"0 0 #{@width} 8"}
+            preserveAspectRatio="none"
+            class="block h-2 w-full"
+          >
+            <rect x="0" y="0" width={@plot_width} height="8" rx="2" class="fill-base-100" />
+            <rect
+              :for={run <- lane.runs}
+              x={run.x}
+              y="0"
+              width={run.width}
+              height="8"
+              fill={lane.color}
+            />
+          </svg>
+        </div>
+      </div>
     </div>
     """
   end
 
   @doc false
-  @spec layout([map()], [map()], integer() | nil, integer() | nil) :: map()
-  def layout(candles, lines, overlay_period, bars) do
+  @spec layout([map()], [map()], integer() | nil, integer() | nil, map() | nil, integer() | nil) ::
+          map()
+  def layout(candles, lines, overlay_period, bars, signals \\ nil, focus \\ nil) do
     shown = if bars, do: Enum.take(candles, -bars), else: candles
     n = length(shown)
     plot_width = @width - @axis
@@ -203,6 +269,86 @@ defmodule OpusWeb.CandleChart do
         end),
       first_time: stamp(List.first(shown).time),
       last_time: stamp(List.last(shown).time)
+    }
+    |> Map.merge(signal_layout(signals, length(candles) - n, shown, step, x, y, focus))
+  end
+
+  defp signal_layout(nil, _offset, _shown, _step, _x, _y, _focus),
+    do: %{markers: [], spans: [], lanes: [], ring: nil}
+
+  defp signal_layout(signals, offset, shown, step, x, y, focus) do
+    n = length(shown)
+    seen? = &(&1 >= 0 and &1 < n)
+    at = fn i -> Enum.at(shown, i) end
+
+    markers =
+      for m <- signals.markers, i = m.index - offset, seen?.(i) do
+        candle = at.(i)
+        cx = x.(i)
+
+        {path, color} =
+          case m.kind do
+            :buy ->
+              cy = y.(candle.low) + 12
+
+              {"M#{cx} #{cy - 6} L#{cx + 6} #{cy + 5} L#{cx - 6} #{cy + 5} Z",
+               "var(--color-info)"}
+
+            :sell ->
+              cy = y.(candle.high) - 12
+
+              {"M#{cx} #{cy + 6} L#{cx + 6} #{cy - 5} L#{cx - 6} #{cy - 5} Z",
+               "var(--color-warning)"}
+          end
+
+        %{
+          path: path,
+          color: color,
+          trade: m.trade,
+          kind: m.kind,
+          x: cx,
+          y: if(m.kind == :buy, do: y.(candle.low) + 12, else: y.(candle.high) - 12),
+          title: "#{if m.kind == :buy, do: "Buy", else: "Sell"} at #{price(m.price)}"
+        }
+      end
+
+    ring =
+      Enum.find_value(signals.markers, fn m ->
+        m.trade == focus && Enum.find(markers, &(&1.trade == m.trade))
+      end)
+
+    spans =
+      for {from, to} <- signals.spans,
+          from = max(from - offset, 0),
+          to = min(to - offset, n - 1),
+          from <= to do
+        %{x: Float.round(from * step, 1), width: Float.round((to - from + 1) * step, 1)}
+      end
+
+    lanes =
+      signals.lanes
+      |> Enum.map(fn lane ->
+        %{
+          label: lane.label,
+          color: if(lane.role == :buy, do: "var(--color-info)", else: "var(--color-warning)"),
+          runs:
+            for {from, to} <- lane.runs,
+                from = max(from - offset, 0),
+                to = min(to - offset, n - 1),
+                from <= to do
+              %{
+                x: Float.round(from * step, 1),
+                width: Float.round(max(to - from + 1, 1) * step, 1)
+              }
+            end
+        }
+      end)
+
+    %{
+      markers: markers,
+      spans: spans,
+      lanes: lanes,
+      ring: ring && %{x: ring.x, y: ring.y}
     }
   end
 

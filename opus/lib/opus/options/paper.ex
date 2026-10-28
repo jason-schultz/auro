@@ -1,18 +1,26 @@
 defmodule Opus.Options.Paper do
   @moduledoc """
-  The options paper books (research/options_paper_engine.md). Once a night,
+  The options paper books (research/options_paper_engine.md). Once a market day,
   on each underlying's latest stored chain, every book runs its rules: the
   wheel (`Opus.Options.Paper.Wheel`), the put credit spread and iron condor
-  (`Opus.Options.Paper.Structures`), and the ideas calls and crash puts
-  (`Opus.Options.Paper.LongOptions`). The books are read back for the
+  (`Opus.Options.Paper.Structures`), and the ideas calls and crash puts,
+  each also in a "half at double" book (`Opus.Options.Paper.LongOptions`).
+  The books are read back for the
   Options page. Places no orders.
 
   Each book is its own paper account: its cash is the starting cash plus
   its events' cash. Open wheel puts reserve their strike × 100, spreads and
-  condors their maximum loss. A snapshot captured around 02:00 UTC holds the
-  previous New York session's closing quotes, so its market date is the
-  capture time less six hours. A night already recorded for a book and
-  underlying is never run again.
+  condors their maximum loss. A snapshot's market date is its New York date
+  at capture. A market date already recorded for a book and underlying is
+  never run again. A leg still open at expiry settles on the first run after
+  expiry day, against that day's close from the underlying's daily bars; it
+  waits while the bar isn't stored.
+
+  During the session (`take_profits/1`, every 15 minutes) each take-profit
+  works like a resting order at the broker: once that day's check has run,
+  a fresh quote that reaches it fills it then. Entries, the 21-day closes,
+  rolls and stops stay with the once-a-day check. Open legs are priced at
+  their latest quote, so the books show intraday P&L.
   """
 
   import Ecto.Query
@@ -20,9 +28,8 @@ defmodule Opus.Options.Paper do
   alias Opus.Options
   alias Opus.Options.Idea
   alias Opus.Options.Paper.{Event, Legs, LongOptions, Position, Structures, Trade, Wheel}
-  alias Opus.Repo
+  alias Opus.{Clock, Repo}
 
-  @market_offset_hours -6
   @recent_events 12
 
   defp config, do: Application.fetch_env!(:opus, __MODULE__)
@@ -31,9 +38,25 @@ defmodule Opus.Options.Paper do
   @spec books() :: [String.t()]
   def books, do: Trade.strategies()
 
+  @book_names %{
+    "wheel" => {"Wheel", "Theta gang"},
+    "put_spread" => {"Put spreads", "Spread degen"},
+    "iron_condor" => {"Iron condors", "Condor prayers"},
+    "ideas" => {"Ideas", "Dip YOLOs"},
+    "ideas_half" => {"Ideas · half at double", "Dip YOLOs · house money"},
+    "crash_puts" => {"Crash puts", "Doomsday puts"},
+    "crash_puts_half" => {"Crash puts · half at double", "Doomsday puts · house money"}
+  }
+
+  @doc "A book's display names, serious and WSB."
+  @spec book_name(String.t()) :: {String.t(), String.t()}
+  def book_name(book), do: Map.get(@book_names, book, {book, book})
+
   @doc "The underlyings a book trades: configured, or every stored chain for ideas."
   @spec underlyings(String.t()) :: [String.t()]
-  def underlyings("ideas"), do: Enum.map(Options.underlyings(), & &1.symbol)
+  def underlyings(book) when book in ~w(ideas ideas_half),
+    do: Enum.map(Options.underlyings(), & &1.symbol)
+
   def underlyings(book), do: Map.fetch!(config()[:books], book)
 
   @doc "Run tonight's rules for every book on each of its underlyings."
@@ -53,7 +76,7 @@ defmodule Opus.Options.Paper do
 
         if ran?(book, id, as_of),
           do: {:skipped, :already_ran},
-          else: Repo.transaction(fn -> step(book, id, as_of, captured_at, rows) end)
+          else: Repo.transaction(fn -> step(book, id, as_of, rows) end)
     end
   end
 
@@ -61,9 +84,104 @@ defmodule Opus.Options.Paper do
   @spec run_underlying(String.t()) :: {:ok, [Wheel.action()]} | {:skipped, atom()}
   def run_underlying(symbol), do: run("wheel", symbol)
 
+  @doc "Every open option leg's contract across the books, by underlying symbol."
+  @spec open_contracts() :: %{String.t() => [integer()]}
+  def open_contracts do
+    from(p in Position,
+      join: i in "instruments",
+      on: i.id == p.underlying_instrument_id,
+      where: p.status == "open" and p.kind in ~w(put call),
+      distinct: true,
+      select: {i.symbol, p.contract_id}
+    )
+    |> Repo.all()
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+  end
+
+  @doc """
+  Fill the take-profits that today's quotes reach, as resting orders would:
+  every open trade in every book, on the latest quote captured since New
+  York midnight, once that book's check has run on the underlying today
+  (the check is when the orders are placed). Returns each book and
+  underlying with the fills made.
+  """
+  @spec take_profits(DateTime.t()) :: [{String.t(), integer(), [tuple()]}]
+  def take_profits(now \\ DateTime.utc_now()) do
+    as_of = Clock.date(now)
+    commission = config()[:commission]
+
+    from(t in Trade, where: t.status == "open", select: {t.strategy, t.underlying_instrument_id})
+    |> distinct(true)
+    |> Repo.all()
+    |> Enum.filter(fn {book, id} -> ran?(book, id, as_of) end)
+    |> Enum.map(fn {book, id} ->
+      {:ok, fills} =
+        Repo.transaction(fn -> take_profits(book, id, as_of, commission) end)
+
+      {book, id, fills}
+    end)
+    |> Enum.reject(&match?({_book, _id, []}, &1))
+  end
+
+  defp take_profits("wheel", id, as_of, commission) do
+    open = open_positions("wheel", id)
+    lot = Enum.find(open, &(&1.kind == "shares"))
+    legs = Enum.filter(open, &(&1.kind in ~w(put call)))
+    quotes = latest_quotes(Enum.map(legs, & &1.contract_id), Clock.midnight(as_of))
+
+    for leg <- legs,
+        quote = quotes[leg.contract_id],
+        {:close, _leg, _price} = fill <- [Wheel.take_profit(leg, quote)] do
+      apply_wheel(fill, id, as_of, lot, %{spot: quote.spot}, commission)
+      fill
+    end
+  end
+
+  defp take_profits(book, id, as_of, commission) do
+    trades = open_trades(book, id)
+    ids = for t <- trades, leg <- t.legs, do: leg.contract_id
+    quotes = latest_quotes(ids, Clock.midnight(as_of))
+
+    for trade <- trades,
+        fill = trade_take_profit(book, trade, quotes),
+        not match?({:hold, _trade}, fill) do
+      spot = quotes |> Map.values() |> Enum.max_by(& &1.captured_at) |> Map.fetch!(:spot)
+      apply_trade(fill, book, id, as_of, %{spot: spot}, commission)
+      fill
+    end
+  end
+
+  defp trade_take_profit(book, trade, quotes) when book in ~w(put_spread iron_condor),
+    do: Structures.take_profit(trade, quotes)
+
+  defp trade_take_profit(book, trade, quotes), do: LongOptions.take_profit(book, trade, quotes)
+
+  # Each contract's latest quote captured at or after `since`.
+  defp latest_quotes([], _since), do: %{}
+
+  defp latest_quotes(contract_ids, since) do
+    from(q in "option_quotes",
+      where:
+        q.contract_id in type(^contract_ids, {:array, :integer}) and
+          q.captured_at >= type(^since, :utc_datetime_usec),
+      distinct: q.contract_id,
+      order_by: [asc: q.contract_id, desc: q.captured_at],
+      select:
+        {q.contract_id,
+         %{
+           bid: q.bid,
+           ask: q.ask,
+           spot: q.spot,
+           captured_at: type(q.captured_at, :naive_datetime_usec)
+         }}
+    )
+    |> Repo.all()
+    |> Map.new()
+  end
+
   @spec market_date(NaiveDateTime.t()) :: Date.t()
   def market_date(captured_at),
-    do: captured_at |> NaiveDateTime.add(@market_offset_hours, :hour) |> NaiveDateTime.to_date()
+    do: Clock.date(captured_at)
 
   defp ran?(book, id, as_of),
     do:
@@ -73,7 +191,7 @@ defmodule Opus.Options.Paper do
         )
       )
 
-  defp step("wheel", id, as_of, _captured_at, rows) do
+  defp step("wheel", id, as_of, rows) do
     commission = config()[:commission]
     open = open_positions("wheel", id)
     legs = Enum.filter(open, &(&1.kind in ~w(put call)))
@@ -86,7 +204,7 @@ defmodule Opus.Options.Paper do
     actions
   end
 
-  defp step(book, id, as_of, captured_at, rows) do
+  defp step(book, id, as_of, rows) do
     commission = config()[:commission]
     trades = open_trades(book, id)
     snapshot = snapshot(id, as_of, rows, Enum.flat_map(trades, & &1.legs))
@@ -94,19 +212,20 @@ defmodule Opus.Options.Paper do
 
     actions =
       case book do
-        "ideas" ->
+        ideas when ideas in ~w(ideas ideas_half) ->
           LongOptions.plan_ideas(
+            book,
             trades,
-            tonight_ideas(id, captured_at),
+            todays_ideas(id, as_of),
             snapshot,
             available,
             commission,
-            open_count("ideas") - length(trades),
-            held_contracts("ideas")
+            open_count(book) - length(trades),
+            held_contracts(book)
           )
 
-        "crash_puts" ->
-          LongOptions.plan_crash_puts(trades, snapshot, available, commission)
+        crash when crash in ~w(crash_puts crash_puts_half) ->
+          LongOptions.plan_crash_puts(book, trades, snapshot, available, commission)
 
         structure ->
           Structures.plan(structure, List.first(trades), snapshot, available, commission)
@@ -161,37 +280,31 @@ defmodule Opus.Options.Paper do
     |> MapSet.new()
   end
 
-  # The scan that ran on the same capture as tonight's snapshot.
-  defp tonight_ideas(id, captured_at) do
-    scanned_on = NaiveDateTime.to_date(captured_at)
+  # The scan from the snapshot's market date.
+  defp todays_ideas(id, as_of),
+    do:
+      Repo.all(
+        from(i in Idea, where: i.underlying_instrument_id == ^id and i.scanned_on == ^as_of)
+      )
 
-    Repo.all(
-      from(i in Idea, where: i.underlying_instrument_id == ^id and i.scanned_on == ^scanned_on)
-    )
-  end
-
-  # The closing price on each expired leg's expiry date: the last stored spot
-  # whose market date is on or before it.
+  # The closing price of each expiry day already past, from the underlying's
+  # daily bars (stamped at New York midnight); one not stored yet is left out.
   defp expiry_spots(id, legs, as_of) do
-    legs
-    |> Enum.map(& &1.expiration)
-    |> Enum.uniq()
-    |> Enum.filter(&(Date.compare(as_of, &1) != :lt))
-    |> Enum.map(&{&1, spot_at(id, &1)})
-    |> Enum.filter(fn {_date, spot} -> is_number(spot) end)
-    |> Map.new()
+    for expiration <- legs |> Enum.map(& &1.expiration) |> Enum.uniq(),
+        Date.before?(expiration, as_of),
+        close = daily_close(id, expiration),
+        is_number(close),
+        into: %{},
+        do: {expiration, close}
   end
 
-  defp spot_at(id, date) do
-    cutoff = NaiveDateTime.new!(Date.add(date, 1), Time.new!(-@market_offset_hours, 0, 0))
-
-    from(q in "option_quotes",
-      join: c in "option_contracts",
-      on: c.id == q.contract_id,
-      where: c.underlying_instrument_id == ^id and q.captured_at < ^cutoff,
-      order_by: [desc: q.captured_at],
-      limit: 1,
-      select: q.spot
+  defp daily_close(id, date) do
+    from(c in "candles",
+      where:
+        c.instrument_id == ^id and c.granularity == "D" and c.complete and
+          c.timestamp >= ^Clock.midnight(date) and
+          c.timestamp < ^Clock.midnight(Date.add(date, 1)),
+      select: c.close
     )
     |> Repo.one()
   end
@@ -352,6 +465,40 @@ defmodule Opus.Options.Paper do
     end
   end
 
+  # Half the contracts sold: they become their own closed position in the
+  # trade, and the rest stay open, each part with its share of the opening
+  # commission.
+  defp apply_trade(
+         {:sell_half, _trade, leg, price} = action,
+         book,
+         _id,
+         as_of,
+         snapshot,
+         commission
+       ) do
+    %{quantity: sold} = Legs.half(leg)
+    per_contract = leg.commission / leg.quantity
+
+    leg
+    |> Ecto.Changeset.change(
+      quantity: leg.quantity - sold,
+      commission: per_contract * (leg.quantity - sold)
+    )
+    |> Repo.update!()
+
+    Position
+    |> struct(Map.take(leg, ~w(trade_id underlying_instrument_id contract_id side kind strike
+        expiration open_price opened_on)a))
+    |> Map.merge(%{quantity: sold, commission: per_contract * sold})
+    |> Repo.insert!()
+    |> close(as_of, "closed", price, (per_contract + commission) * sold)
+    |> event(book, "close", as_of, Legs.cash(action, commission), %{
+      "spot" => snapshot.spot,
+      "price" => price,
+      "half" => true
+    })
+  end
+
   defp apply_trade({:settle, trade, spot}, book, _id, as_of, _snapshot, _commission) do
     for leg <- trade.legs do
       value = Legs.intrinsic(leg.kind, leg.strike, spot)
@@ -458,13 +605,21 @@ defmodule Opus.Options.Paper do
         )
       )
 
+    open = Enum.filter(positions, &(&1.status == "open"))
+    live = live_quotes(open)
+
     marks =
       events
       |> Enum.filter(&(&1.kind == "mark"))
       |> Enum.uniq_by(& &1.position_id)
       |> Map.new(&{&1.position_id, &1.detail["mid"]})
+      |> Map.merge(Map.new(live, fn {id, quote} -> {id, Wheel.mid(quote)} end))
 
-    open = Enum.filter(positions, &(&1.status == "open"))
+    spots =
+      events
+      |> latest_spots()
+      |> Map.merge(live_spots(open, live))
+
     options = Enum.filter(positions, &(&1.kind in ~w(put call)))
 
     legs =
@@ -493,7 +648,8 @@ defmodule Opus.Options.Paper do
       premium: Legs.net_premium(options) * Wheel.multiplier(),
       legs: legs,
       lots: lots,
-      trades: trades(strategy, positions, events, marks),
+      trades: trades(strategy, positions, events, marks, spots),
+      priced_at: live |> Map.values() |> Enum.map(& &1.captured_at) |> Enum.max(fn -> nil end),
       hold_return: hold_return(events),
       started_on: events |> List.last() |> then(&(&1 && &1.on)),
       events: events |> Enum.reject(&(&1.kind == "mark")) |> Enum.take(@recent_events)
@@ -512,6 +668,28 @@ defmodule Opus.Options.Paper do
     |> Map.new()
   end
 
+  # Each open option leg's latest quote with a mid, by position id: never
+  # older than its nightly mark, which came from a stored quote too.
+  defp live_quotes(open) do
+    legs = Enum.filter(open, &(&1.kind in ~w(put call)))
+    quotes = latest_quotes(Enum.map(legs, & &1.contract_id), ~U[2000-01-01 00:00:00Z])
+
+    for leg <- legs,
+        quote = quotes[leg.contract_id],
+        Wheel.mid(quote),
+        into: %{},
+        do: {leg.id, quote}
+  end
+
+  # Each underlying's spot from its newest live quote.
+  defp live_spots(open, live) do
+    symbols = Map.new(open, &{&1.id, &1.symbol})
+
+    live
+    |> Enum.sort_by(fn {_id, quote} -> quote.captured_at end, NaiveDateTime)
+    |> Map.new(fn {id, quote} -> {symbols[id], quote.spot} end)
+  end
+
   defp latest_spots(events) do
     events
     |> Enum.filter(&(&1.kind == "mark"))
@@ -522,9 +700,7 @@ defmodule Opus.Options.Paper do
   # The wheel: one trade per underlying, its legs in order, its stage, the
   # premium it has collected, and its P&L (its events' cash plus what its
   # open positions are marked at).
-  defp trades("wheel", positions, events, marks) do
-    spots = latest_spots(events)
-
+  defp trades("wheel", positions, events, marks, spots) do
     positions
     |> Enum.group_by(& &1.symbol)
     |> Enum.map(fn {symbol, mine} ->
@@ -549,8 +725,7 @@ defmodule Opus.Options.Paper do
 
   # Every other book: the trades it opened, newest first, each with its
   # legs, what it can make and lose at expiry, and its P&L.
-  defp trades(strategy, positions, events, marks) do
-    spots = latest_spots(events)
+  defp trades(strategy, positions, events, marks, spots) do
     by_trade = Enum.group_by(positions, & &1.trade_id)
 
     from(t in Trade, where: t.strategy == ^strategy, order_by: [desc: t.id])

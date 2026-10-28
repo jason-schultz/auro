@@ -95,9 +95,17 @@ defmodule Opus.Options.Paper.StructuresTest do
       assert {:hold, ^trade} = Structures.manage(trade, %{2 => %{bid: 1.0, ask: 1.02}}, late)
     end
 
-    test "settles at intrinsic once expired", %{trade: trade} do
-      expired = %{snapshot(590.0, []) | as_of: Date.add(@as_of, @dte), expiry_spots: %{}}
-      assert {:settle, ^trade, 590.0} = Structures.manage(trade, %{}, expired)
+    test "settles at intrinsic after expiry day, against that day's close", %{trade: trade} do
+      expiration = Date.add(@as_of, @dte)
+      after_expiry = %{snapshot(640.0, []) | as_of: Date.add(expiration, 3)}
+
+      assert {:hold, ^trade} = Structures.manage(trade, %{}, after_expiry)
+
+      assert {:settle, ^trade, 590.0} =
+               Structures.manage(trade, %{}, %{
+                 after_expiry
+                 | expiry_spots: %{expiration => 590.0}
+               })
     end
   end
 
@@ -111,7 +119,7 @@ defmodule Opus.Options.Paper.StructuresTest do
       assert [] = Structures.plan("put_spread", nil, snap, 2_000.0, 0.1)
     end
 
-    test "a closed trade's collateral pays for tonight's new one" do
+    test "a closed trade's collateral pays for the same check's new one" do
       [long, short] = Structures.entry("put_spread", chain())
       trade = %{id: 1, legs: [%{long | contract_id: 1}, %{short | contract_id: 2}]}
       quotes = %{2 => %{bid: 1.0, ask: 1.02}, 1 => %{bid: 0.2, ask: 0.21}}

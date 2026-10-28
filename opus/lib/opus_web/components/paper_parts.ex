@@ -103,35 +103,4 @@ defmodule OpusWeb.Components.PaperParts do
 
   def moves(now, :up, pnl),
     do: for({label, d} <- @rises, p = now * (1 + d), do: {label, p, pnl.(p)})
-
-  attr :kind, :string, required: true
-  attr :book, :string, required: true
-
-  def event_label(assigns) do
-    {serious, meme} = event_words(assigns.book, assigns.kind)
-    assigns = assign(assigns, serious: serious, meme: meme)
-
-    ~H"""
-    <.t s={@serious} wsb={@meme} />
-    """
-  end
-
-  defp event_words("wheel", "open"), do: {"sold an option", "sold some theta"}
-  defp event_words("wheel", "close"), do: {"bought it back", "took the tendies early"}
-  defp event_words("wheel", "expire"), do: {"expired worthless", "expired worthless (free money)"}
-
-  defp event_words("wheel", "assign"),
-    do: {"assigned 100 shares", "got assigned (bagholder mode)"}
-
-  defp event_words("wheel", "call_away"), do: {"called away", "called away (tendies)"}
-  defp event_words(_book, "open"), do: {"opened a leg", "aped in"}
-  defp event_words(_book, "close"), do: {"closed a leg", "took it off the table"}
-  defp event_words(_book, "expire"), do: {"settled at expiry", "expired (it is what it is)"}
-
-  def day(date), do: Calendar.strftime(date, "%b %-d")
-
-  def tone(nil), do: nil
-  def tone(value) when value < 0, do: "text-error"
-  def tone(value) when value > 0, do: "text-success"
-  def tone(_value), do: nil
 end

@@ -80,12 +80,16 @@ defmodule OpusWeb.OptionsIdeasTest do
 
     [%Idea{id: id}] = Repo.all(Idea)
     html = view |> element("#idea-#{id} button[phx-click=idea]") |> render_click()
+    assert html =~ "Auro is not running."
 
+    # The contract tab holds what was picked, to tweak by hand.
+    html = render_patch(view, ~p"/options?view=custom")
     assert html =~ ~s(value="235")
     assert html =~ ~s(value="6.1")
     assert html =~ ~s(value="21.4")
-    assert html =~ "Buy a call"
-    assert html =~ "Auro is not running."
+
+    assert html =~
+             ~r/<option[^>]*value="long_call"[^>]*selected|<option[^>]*selected[^>]*value="long_call"/
   end
 
   test "dismissing an idea takes it off the list", %{conn: conn} do
@@ -101,6 +105,6 @@ defmodule OpusWeb.OptionsIdeasTest do
   test "with no scan recorded the section says so", %{conn: conn} do
     Repo.delete_all(Idea)
     {:ok, _view, html} = live(conn, ~p"/options")
-    assert html =~ "The scan runs nightly after the chain snapshot."
+    assert html =~ "The scan runs on trading days at 9:15 and 10:15 New York"
   end
 end

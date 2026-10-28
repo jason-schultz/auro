@@ -4,14 +4,15 @@ defmodule OpusWeb.StrategiesLiveTest do
   import Phoenix.LiveViewTest
 
   alias Opus.Repo
-  alias Opus.Trading.{LiveStrategy, LiveTrade, Rule, Suspension}
+  alias Opus.Trading.{LiveStrategy, LiveTrade, Recipe, Rule, Suspension}
 
   @trading_id "bbbbbbbb-0000-0000-0000-000000000001"
   @suspended_id "bbbbbbbb-0000-0000-0000-000000000002"
   @held_id "bbbbbbbb-0000-0000-0000-000000000003"
 
   setup do
-    for schema <- [Suspension, Rule, LiveTrade, LiveStrategy], do: Repo.delete_all(schema)
+    # Recipes too: the Rust DB tests leave theirs behind in the test database.
+    for schema <- [Suspension, Rule, LiveTrade, LiveStrategy, Recipe], do: Repo.delete_all(schema)
     now = DateTime.utc_now()
 
     Repo.insert!(%LiveStrategy{
@@ -93,6 +94,18 @@ defmodule OpusWeb.StrategiesLiveTest do
     assert html =~ "Suspended"
     assert html =~ "-6.2% over 30d across 9 trades"
     assert html =~ ~s(href="/strategies/#{@trading_id}")
+  end
+
+  test "each recipe shows its rules, its lock and why tests are missing", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/strategies")
+    html = render(view)
+
+    assert html =~ "2 recipes"
+    assert html =~ "Locked"
+    assert html =~ "Switched on for EU50_EUR"
+    assert html =~ "not tested"
+    refute html =~ "Never run through the testing pipeline."
+    refute html =~ "No closed trades yet."
   end
 
   test "reset clears the suspension and the row loses its badge", %{conn: conn} do

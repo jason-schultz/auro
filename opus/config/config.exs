@@ -11,6 +11,9 @@ config :opus,
   ecto_repos: [Opus.Repo],
   generators: [timestamp_type: :utc_datetime]
 
+# New York time for the US market schedule (Oban cron, market dates).
+config :elixir, :time_zone_database, Tz.TimeZoneDatabase
+
 # Configures the endpoint
 config :opus, OpusWeb.Endpoint,
   url: [host: "localhost"],
@@ -35,24 +38,33 @@ config :opus, Oban,
        # (one job per symbol). Rust treats a daily bar as final once extended
        # hours end at 20:00 New York, which is 00:00/01:00 UTC by season.
        {"30 1 * * 2-6", Opus.MarketData.MassiveBarsWorker},
-       # Option chain snapshots from Questrade after the close (02:00 UTC is
-       # 21:00/22:00 New York): the quotes are the day's closing values.
-       {"0 2 * * 2-6", Opus.MarketData.OptionsChainWorker},
-       # Half an hour after the snapshot: which of tonight's contracts are
-       # worth a look (Options page ideas).
-       {"30 2 * * 2-6", Opus.Options.ScanWorker},
-       # After the ideas: the options paper book's nightly wheel.
-       {"45 2 * * 2-6", Opus.Options.PaperWorker},
+       # US options, New York time on trading days: a chain snapshot and
+       # ideas scan before the open (yesterday's closing quotes, a heads-up),
+       # then a snapshot on live quotes once the opening rush has settled, the
+       # scan again, and the paper books (research/options_paper_engine.md).
+       {"0 9 * * 1-5", Opus.MarketData.OptionsChainWorker, timezone: "America/New_York"},
+       {"15 9 * * 1-5", Opus.Options.ScanWorker, timezone: "America/New_York"},
+       {"0 10 * * 1-5", Opus.MarketData.OptionsChainWorker, timezone: "America/New_York"},
+       {"15 10 * * 1-5", Opus.Options.ScanWorker, timezone: "America/New_York"},
+       {"30 10 * * 1-5", Opus.Options.PaperWorker, timezone: "America/New_York"},
+       # Every 15 minutes in the session: quote the paper books' open legs and
+       # fill take-profits as resting orders would (Opus.Options.IntradayWorker).
+       {"*/15 10-15 * * 1-5", Opus.Options.IntradayWorker, timezone: "America/New_York"},
        # 20:30 UTC is before the 17:00 New York rollover (21:00/22:00 UTC) the
        # day's financing rates apply to.
        {"30 20 * * 1-5", Opus.MarketData.FinancingSnapshotWorker},
        # Daily; also keeps newly created event strategies current within a day.
        {"15 0 * * *", Opus.MarketData.EventWindowSyncWorker},
        # Monday 12:00 UTC (08:00 ET): snapshot last week's forward-test numbers.
-       {"0 12 * * 1", Opus.Journal.DigestWorker}
+       {"0 12 * * 1", Opus.Journal.DigestWorker},
+       # Dashboard alerts to Discord: new ones every 5 minutes, and a check-in
+       # after the US close so a quiet day still says it was quiet.
+       {"*/5 * * * *", Opus.Dashboard.NotifyWorker},
+       {"30 16 * * 1-5", Opus.Dashboard.NotifyWorker,
+        args: %{check_in: true}, timezone: "America/New_York"}
      ]}
   ],
-  queues: [pipeline: 2, market_data: 1]
+  queues: [pipeline: 2, market_data: 1, alerts: 1]
 
 # Which instruments each feed stores is a flag on the `instruments` table
 # (the Instruments page); config keeps only the feed parameters.
@@ -75,13 +87,14 @@ config :opus, Opus.Options.ScanWorker, enabled: true
 config :opus, Opus.Options.PaperWorker, enabled: true
 
 # Each paper book is its own US$100,000 (research/options_paper_engine.md).
-# Ideas trades whatever the nightly scan flags, on any stored chain.
+# Ideas (and ideas_half) trade whatever the nightly scan flags, on any stored chain.
 config :opus, Opus.Options.Paper,
   books: %{
     "wheel" => ~w(SPY IWM),
     "put_spread" => ~w(SPY IWM QQQ),
     "iron_condor" => ~w(SPY IWM QQQ),
-    "crash_puts" => ~w(SPY)
+    "crash_puts" => ~w(SPY),
+    "crash_puts_half" => ~w(SPY)
   },
   starting_cash: 100_000.0,
   commission: 0.10

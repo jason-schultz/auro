@@ -15,7 +15,17 @@ defmodule Opus.Trading.Strategies do
 
   alias Opus.Auro.Client
   alias Opus.Repo
-  alias Opus.Trading.{LiveStrategy, Rule, RulesEngine, Suspension}
+
+  alias Opus.Trading.{
+    LiveStrategy,
+    Recipe,
+    Rule,
+    RulesEngine,
+    SignalChart,
+    StrategyResults,
+    StrategyWords,
+    Suspension
+  }
 
   @type row :: %{
           id: String.t(),
@@ -31,6 +41,14 @@ defmodule Opus.Trading.Strategies do
           open_trades: non_neg_integer(),
           last_signal: map() | nil
         }
+
+  # Sizing a preview or a test uses when none is set yet: the engine needs one
+  # to read the strategy, and 1% is what the running strategies use.
+  @default_sizing %{"type" => "RiskPct", "params" => %{"pct" => 0.01}}
+
+  @doc "The sizing a new assignment or a test run starts with."
+  @spec default_sizing() :: map()
+  def default_sizing, do: @default_sizing
 
   # Bars the detail chart shows, by how fast the timeframe moves.
   @chart_bars %{"M1" => 90, "M5" => 90, "M15" => 80, "H1" => 80, "H4" => 80, "D" => 120}
@@ -49,6 +67,143 @@ defmodule Opus.Trading.Strategies do
   end
 
   @doc """
+  Every recipe with the instruments it's assigned to, for the Strategies
+  page: the rules in plain words, each assignment's status row (as
+  `list/0`), sizing and test results, and why the recipe is locked.
+
+  A recipe is locked while any of its assignments is switched on or holds
+  an open trade: changing its rules would change a strategy mid-trade.
+  `locked_by` names those assignments; empty means it's free to edit.
+  `status` is `:trading` (locked), `:off` (assigned, nothing running) or
+  `:draft` (not assigned anywhere yet). `runs` are its test runs on
+  instruments it isn't assigned to yet. Trading first, drafts last.
+  """
+  @spec recipes() :: [map()]
+  def recipes do
+    assignments =
+      LiveStrategy
+      |> order_by([s], desc: s.enabled, asc: s.instrument)
+      |> Repo.all()
+
+    ids = Enum.map(assignments, & &1.id)
+    context = context(ids)
+    results = StrategyResults.for_ids(ids)
+    by_recipe = Enum.group_by(assignments, & &1.strategy_id)
+
+    Recipe
+    |> Repo.all()
+    |> Enum.map(fn recipe ->
+      rows =
+        by_recipe
+        |> Map.get(recipe.id, [])
+        |> Enum.map(fn strategy ->
+          strategy
+          |> row(context)
+          |> Map.merge(%{
+            sizing: StrategyWords.sizing(strategy.sizing),
+            sizing_params: strategy.sizing,
+            results: Map.fetch!(results, strategy.id)
+          })
+        end)
+
+      locked_by = Enum.filter(rows, &(&1.enabled or &1.open_trades > 0))
+      assigned = MapSet.new(rows, & &1.instrument)
+
+      recipe
+      |> recipe_view()
+      |> Map.merge(%{
+        assignments: rows,
+        locked_by: locked_by,
+        # Test runs on instruments it isn't on yet: a draft's, or a copy's.
+        runs:
+          recipe.definition
+          |> StrategyResults.for_recipe()
+          |> Enum.reject(&MapSet.member?(assigned, &1.instrument)),
+        status:
+          cond do
+            locked_by != [] -> :trading
+            rows == [] -> :draft
+            true -> :off
+          end
+      })
+    end)
+    |> Enum.sort_by(&{status_rank(&1.status), &1.name})
+  end
+
+  defp status_rank(:trading), do: 0
+  defp status_rank(:off), do: 1
+  defp status_rank(:draft), do: 2
+
+  @doc "A recipe's own fields with its rules in plain words."
+  @spec recipe_view(Recipe.t()) :: map()
+  def recipe_view(%Recipe{} = recipe) do
+    %{
+      id: recipe.id,
+      name: recipe.name,
+      granularity: recipe.granularity,
+      timeframe: StrategyWords.timeframe(recipe.granularity),
+      notes: recipe.notes,
+      definition: recipe.definition,
+      created_at: recipe.created_at,
+      rules: StrategyWords.rules(recipe.definition, recipe.granularity)
+    }
+  end
+
+  @doc """
+  The full strategy JSON the engine reads: the recipe plus the
+  instrument, timeframe and sizing. The same shape the database bridge
+  builds for an assignment (`PARAMETERS_SQL` in Rust).
+  """
+  @spec compose(map(), String.t(), String.t(), map() | nil) :: map()
+  def compose(definition, instrument, granularity, sizing) do
+    definition
+    |> Map.merge(%{"instrument" => instrument, "granularity" => granularity})
+    |> then(&if(sizing, do: Map.put(&1, "sizing", sizing), else: &1))
+  end
+
+  @doc """
+  Where the recipe would have bought and sold over the last `count` bars of
+  `instrument`, shaped for a chart (`Opus.Trading.SignalChart`). Needs the
+  engine, which also checks the rules: a recipe it can't read comes back
+  as `{:error, reason}`.
+  """
+  @spec preview(map(), String.t(), String.t(), map() | nil, pos_integer()) ::
+          {:ok, map()} | {:error, term()}
+  def preview(definition, instrument, granularity, sizing, count \\ 120) do
+    params = compose(definition, instrument, granularity, sizing || @default_sizing)
+
+    with {:ok, body} <- Client.signal_preview(params, count) do
+      {:ok, SignalChart.shape(body, definition, granularity)}
+    end
+  end
+
+  @doc "Instruments with bars at `granularity` in the last 30 days: what a preview can run on."
+  @spec preview_instruments(String.t()) :: [String.t()]
+  def preview_instruments(granularity) do
+    since = DateTime.add(DateTime.utc_now(), -30 * 86_400, :second)
+
+    # One index probe per instrument (candles' key is instrument_id,
+    # granularity, timestamp); a DISTINCT over the candles takes seconds.
+    named =
+      from(c in "candles",
+        where:
+          c.instrument_id == parent_as(:instrument).id and c.granularity == ^granularity and
+            c.timestamp >= ^since,
+        limit: 1,
+        select: c.instrument
+      )
+
+    from(i in "instruments",
+      as: :instrument,
+      inner_lateral_join: c in subquery(named),
+      on: true,
+      order_by: c.instrument,
+      select: c.instrument
+    )
+    |> Repo.all()
+  end
+
+  @doc """
   One strategy with everything its page shows. The engine-backed parts
   (`stats`, `indicators`) are `nil` when Rust is unreachable, and
   `engine_error` says why.
@@ -64,6 +219,8 @@ defmodule Opus.Trading.Strategies do
   end
 
   defp detail(strategy) do
+    strategy = Repo.preload(strategy, :recipe)
+    siblings = siblings(strategy)
     row = row(strategy, context([strategy.id]))
     {stats, engine_error} = engine_stats(strategy.id)
     overlay_period = ma_overlay_period(strategy.parameters)
@@ -81,8 +238,40 @@ defmodule Opus.Trading.Strategies do
       engine_error: engine_error,
       candles: candles,
       chart_bars: bars,
-      overlay_period: overlay_period
+      overlay_period: overlay_period,
+      recipe: recipe_view(strategy.recipe),
+      sizing: StrategyWords.sizing(strategy.sizing),
+      sizing_params: strategy.sizing,
+      siblings: siblings,
+      # Tests on instruments the recipe doesn't run on.
+      runs:
+        strategy.recipe.definition
+        |> StrategyResults.for_recipe()
+        |> Enum.reject(fn run -> Enum.any?(siblings, &(&1.instrument == run.instrument)) end),
+      locked_by: Enum.filter(siblings, &(&1.enabled or &1.open_trades > 0)),
+      results: StrategyResults.for_ids([strategy.id]) |> Map.fetch!(strategy.id)
     })
+  end
+
+  # Every instrument the same recipe runs on, this one included.
+  defp siblings(strategy) do
+    members =
+      LiveStrategy
+      |> where([s], s.strategy_id == ^strategy.strategy_id)
+      |> order_by([s], desc: s.enabled, asc: s.instrument)
+      |> Repo.all()
+
+    open = members |> Enum.map(& &1.id) |> open_trades_by_strategy()
+
+    Enum.map(members, fn s ->
+      %{
+        id: s.id,
+        instrument: s.instrument,
+        enabled: s.enabled,
+        open_trades: Map.get(open, s.id, 0),
+        sizing: StrategyWords.sizing(s.sizing)
+      }
+    end)
   end
 
   @doc """
@@ -291,19 +480,22 @@ defmodule Opus.Trading.Strategies do
 
   defp ma_overlay_period(_), do: nil
 
-  # Composite strategies carry the name the pipeline gave them; the older
-  # single-component rows are named after their type.
-  defp name(%LiveStrategy{parameters: %{"strategy_name" => name}})
-       when is_binary(name) and name != "",
-       do: name
+  @doc """
+  A strategy's display name: composites carry the name the pipeline gave
+  them; the older single-component rows are named after their type.
+  """
+  @spec display_name(%LiveStrategy{}) :: String.t()
+  def display_name(%LiveStrategy{parameters: %{"strategy_name" => name}})
+      when is_binary(name) and name != "",
+      do: name
 
-  defp name(%LiveStrategy{strategy_type: type}),
+  def display_name(%LiveStrategy{strategy_type: type}),
     do: type |> String.replace("_", " ") |> String.capitalize()
 
   defp row(strategy, context) do
     %{
       id: strategy.id,
-      name: name(strategy),
+      name: display_name(strategy),
       strategy_type: strategy.strategy_type,
       instrument: strategy.instrument,
       granularity: strategy.granularity,

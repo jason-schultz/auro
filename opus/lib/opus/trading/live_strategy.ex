@@ -1,4 +1,11 @@
 defmodule Opus.Trading.LiveStrategy do
+  @moduledoc """
+  A recipe (`Opus.Trading.Recipe`) assigned to one instrument, with its
+  sizing and what a signal does (`action`). Until the writers move to Opus,
+  `parameters` is what gets written and a database trigger links the recipe
+  and copies the sizing from it.
+  """
+
   use Ecto.Schema
 
   @primary_key {:id, Ecto.UUID, autogenerate: true}
@@ -10,6 +17,9 @@ defmodule Opus.Trading.LiveStrategy do
     field :parameters, :map
     field :enabled, :boolean
     field :curator_mode, :string, default: "auto"
+    field :sizing, :map
+    field :action, :map, default: %{"type" => "oanda"}
+    belongs_to :recipe, Opus.Trading.Recipe, foreign_key: :strategy_id, type: Ecto.UUID
 
     timestamps(type: :utc_datetime_usec, inserted_at: :created_at)
   end

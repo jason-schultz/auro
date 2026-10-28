@@ -79,25 +79,50 @@ defmodule Opus.Options.Paper.Structures do
 
   @doc "What to do with an open trade tonight."
   @spec manage(trade(), %{integer() => map()}, map()) :: tuple()
-  def manage(%{legs: [%{expiration: expiration} | _]} = trade, quotes, %{as_of: as_of} = snapshot) do
-    if Date.compare(as_of, expiration) == :lt,
-      do: manage_open(trade, quotes, Date.diff(expiration, as_of)),
-      else: {:settle, trade, Map.get(snapshot.expiry_spots, expiration, snapshot.spot)}
+  def manage(%{legs: [%{expiration: expiration} | _]} = trade, quotes, snapshot) do
+    case Legs.expiry_state(expiration, snapshot) do
+      {:open, dte} -> manage_open(trade, quotes, dte)
+      {:settle, close} -> {:settle, trade, close}
+      :awaiting_close -> {:hold, trade}
+    end
   end
 
   defp manage_open(trade, quotes, dte) do
+    case take_profit(trade, quotes) do
+      {:close, _trade, _fills} = close ->
+        close
+
+      {:hold, trade} ->
+        case fills(trade, quotes) do
+          fills when is_list(fills) and dte <= @manage_dte -> {:close, trade, fills}
+          _ -> {:hold, trade}
+        end
+    end
+  end
+
+  @doc """
+  The take-profit on its own, as the resting order a broker would hold:
+  the whole trade bought back once it costs half the credit or less, with
+  every leg fillable. Checked by the daily rules and on every intraday
+  quote.
+  """
+  @spec take_profit(trade(), %{integer() => map()}) :: tuple()
+  def take_profit(trade, quotes) do
+    with fills when is_list(fills) <- fills(trade, quotes),
+         debit = Enum.sum_by(fills, fn {leg, price} -> Legs.sign(leg) * price * leg.quantity end),
+         true <- debit <= Legs.net_premium(trade.legs) * (1 - @take_profit) do
+      {:close, trade, fills}
+    else
+      _ -> {:hold, trade}
+    end
+  end
+
+  # The price each leg closes at, or nil unless every leg is fillable.
+  defp fills(trade, quotes) do
     quoted = Enum.map(trade.legs, &{&1, Map.get(quotes, &1.contract_id)})
 
-    if Enum.all?(quoted, fn {_leg, quote} -> Pick.fillable?(quote) end) do
-      fills = Enum.map(quoted, fn {leg, quote} -> {leg, Legs.close_price(leg, quote)} end)
-      debit = Enum.sum_by(fills, fn {leg, price} -> Legs.sign(leg) * price * leg.quantity end)
-
-      if debit <= Legs.net_premium(trade.legs) * (1 - @take_profit) or dte <= @manage_dte,
-        do: {:close, trade, fills},
-        else: {:hold, trade}
-    else
-      {:hold, trade}
-    end
+    if Enum.all?(quoted, fn {_leg, quote} -> Pick.fillable?(quote) end),
+      do: Enum.map(quoted, fn {leg, quote} -> {leg, Legs.close_price(leg, quote)} end)
   end
 
   @doc """

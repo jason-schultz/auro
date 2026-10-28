@@ -20,10 +20,39 @@ defmodule OpusWeb.Format do
     "#{sign}$#{group_thousands(whole)}.#{String.pad_leading(Integer.to_string(fraction), 2, "0")}"
   end
 
-  @doc "Formats a share of one: `pct(0.6452)` → `\"64.5%\"`."
-  @spec pct(float() | nil) :: String.t()
-  def pct(nil), do: "—"
-  def pct(share), do: "#{:erlang.float_to_binary(share * 100, decimals: 1)}%"
+  @doc """
+  A CAD amount with its sign, for gains and losses: `signed_money(84.4)` →
+  `"+$84.40"`, `signed_money(-38.0)` → `"−$38.00"`. `nil` renders as an em dash.
+  """
+  @spec signed_money(number() | nil) :: String.t()
+  def signed_money(nil), do: "—"
+  def signed_money(amount) when amount < 0, do: money(amount)
+  def signed_money(amount), do: "+" <> money(amount)
+
+  @doc "A date with its year: `date(~D[2026-10-27])` → `\"Oct 27, 2026\"`. Takes a date or a timestamp; `nil` is an em dash."
+  @spec date(Date.t() | DateTime.t() | nil) :: String.t()
+  def date(nil), do: "—"
+  def date(at), do: Calendar.strftime(at, "%b %-d, %Y")
+
+  @doc "A date in the current year's short form: `day(~D[2026-10-27])` → `\"Oct 27\"`. `nil` is an em dash."
+  @spec day(Date.t() | DateTime.t() | nil) :: String.t()
+  def day(nil), do: "—"
+  def day(at), do: Calendar.strftime(at, "%b %-d")
+
+  @doc """
+  The colour class for a gain or loss: `"text-success"` above zero,
+  `"text-error"` below, nil (the normal text colour) at zero or nil.
+  """
+  @spec tone(number() | nil) :: String.t() | nil
+  def tone(value) when is_number(value) and value > 0, do: "text-success"
+  def tone(value) when is_number(value) and value < 0, do: "text-error"
+  def tone(_value), do: nil
+
+  @doc "Formats a share of one: `pct(0.6452)` → `\"64.5%\"`; `pct(0.0037, 2)` → `\"0.37%\"`."
+  @spec pct(float() | nil, non_neg_integer()) :: String.t()
+  def pct(share, decimals \\ 1)
+  def pct(nil, _decimals), do: "—"
+  def pct(share, decimals), do: "#{:erlang.float_to_binary(share * 100, decimals: decimals)}%"
 
   @doc "Formats a share count: whole numbers without decimals, fractional with up to four."
   @spec shares(number()) :: String.t()
@@ -66,10 +95,11 @@ defmodule OpusWeb.Format do
   end
 
   @doc "A signed percentage from a share of one: `signed_pct(0.0069)` → `\"+0.7%\"`."
-  @spec signed_pct(number() | nil) :: String.t()
-  def signed_pct(nil), do: "—"
-  def signed_pct(share) when share < 0, do: "−" <> pct(abs(share))
-  def signed_pct(share), do: "+" <> pct(share)
+  @spec signed_pct(number() | nil, non_neg_integer()) :: String.t()
+  def signed_pct(share, decimals \\ 1)
+  def signed_pct(nil, _decimals), do: "—"
+  def signed_pct(share, decimals) when share < 0, do: "−" <> pct(abs(share), decimals)
+  def signed_pct(share, decimals), do: "+" <> pct(share, decimals)
 
   @doc "How long between two instants, e.g. `5h 30m`; the end defaults to now."
   @spec held(DateTime.t() | nil, DateTime.t() | nil) :: String.t()
@@ -93,6 +123,11 @@ defmodule OpusWeb.Format do
 
   def num(value, decimals) when is_float(value),
     do: :erlang.float_to_binary(value, decimals: decimals)
+
+  @doc "Formats an option strike: 680, 262.5."
+  @spec strike(number()) :: String.t()
+  def strike(value) when value == trunc(value), do: num(trunc(value))
+  def strike(value), do: num(value, 1)
 
   defp group_thousands(whole) when is_integer(whole) do
     whole

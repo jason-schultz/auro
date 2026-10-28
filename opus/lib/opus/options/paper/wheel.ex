@@ -17,7 +17,7 @@ defmodule Opus.Options.Paper.Wheel do
   all without a bid or with a spread wider than 10% of the mid.
   """
 
-  alias Opus.Options.Paper.Pick
+  alias Opus.Options.Paper.{Legs, Pick}
 
   @put_delta -0.25
   @call_delta 0.30
@@ -68,22 +68,39 @@ defmodule Opus.Options.Paper.Wheel do
 
   @doc "What to do with one open short leg tonight, given its quote (or nil)."
   @spec manage(leg(), map() | nil, snapshot()) :: action()
-  def manage(%{expiration: expiration} = leg, quote, %{as_of: as_of} = snapshot) do
-    if Date.compare(as_of, expiration) == :lt do
-      manage_open(leg, quote, snapshot.spot, Date.diff(expiration, as_of))
-    else
-      settle(leg, Map.get(snapshot.expiry_spots, expiration, snapshot.spot))
+  def manage(%{expiration: expiration} = leg, quote, snapshot) do
+    case Legs.expiry_state(expiration, snapshot) do
+      {:open, dte} -> manage_open(leg, quote, snapshot.spot, dte)
+      {:settle, close} -> settle(leg, close)
+      :awaiting_close -> {:hold, leg}
     end
   end
 
   defp manage_open(leg, quote, spot, dte) do
-    cond do
-      not fillable?(quote) -> {:hold, leg}
-      quote.ask <= leg.open_price * (1 - @take_profit) -> {:close, leg, quote.ask}
-      dte > @manage_dte -> {:hold, leg}
-      in_the_money?(leg, spot) -> {:hold, leg}
-      true -> {:close, leg, quote.ask}
+    case take_profit(leg, quote) do
+      {:close, _leg, _price} = close ->
+        close
+
+      {:hold, leg} ->
+        cond do
+          not fillable?(quote) -> {:hold, leg}
+          dte > @manage_dte -> {:hold, leg}
+          in_the_money?(leg, spot) -> {:hold, leg}
+          true -> {:close, leg, quote.ask}
+        end
     end
+  end
+
+  @doc """
+  The take-profit on its own, as the resting order a broker would hold:
+  bought back at the ask once that's half the premium or less. Checked by
+  the daily rules and on every intraday quote.
+  """
+  @spec take_profit(leg(), map() | nil) :: action()
+  def take_profit(leg, quote) do
+    if fillable?(quote) and quote.ask <= take_profit_price(leg),
+      do: {:close, leg, quote.ask},
+      else: {:hold, leg}
   end
 
   @doc "Settle a leg at expiry against the underlying's closing price."

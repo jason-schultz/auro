@@ -261,6 +261,28 @@ pub async fn list_contracts(
     .await
 }
 
+/// The contracts with these ids on `underlying`; ids on another underlying
+/// or not stored are left out.
+pub async fn contracts_by_ids(
+    pool: &PgPool,
+    underlying: InstrumentId,
+    ids: &[i64],
+) -> Result<Vec<ContractRow>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        SELECT id, ticker, underlying_instrument_id, underlying, contract_type,
+               expiration_date, strike, shares_per_contract
+        FROM option_contracts
+        WHERE underlying_instrument_id = $1 AND id = ANY($2)
+        ORDER BY expiration_date, strike, contract_type
+        "#,
+    )
+    .bind(underlying)
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

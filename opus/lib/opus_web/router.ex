@@ -19,6 +19,8 @@ defmodule OpusWeb.Router do
 
     live("/", DashboardLive)
     live("/strategies", StrategiesLive)
+    live("/strategies/new", StrategyBuilderLive, :new)
+    live("/strategies/recipes/:recipe_id/edit", StrategyBuilderLive, :edit)
     live("/strategies/:id", StrategyLive)
     live("/accounts", AccountsLive)
     live("/journal", JournalLive)

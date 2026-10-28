@@ -1,7 +1,7 @@
 defmodule OpusWeb.Components.PaperBook do
   @moduledoc """
   The Options page's paper books (`Opus.Options.Paper.book/1`): a selector
-  across the five books, the chosen book's headline numbers, and its
+  across the books, the chosen book's headline numbers, and its
   trades. The other books' trades are drawn by
   `OpusWeb.Components.PaperTrades`; the wheel's are drawn here. In the wheel
   each underlying is one trade: its legs one after another (a put, then
@@ -20,27 +20,200 @@ defmodule OpusWeb.Components.PaperBook do
   import OpusWeb.PayoffChart
   import OpusWeb.Components.PaperParts
 
+  alias Opus.Options.Paper
   alias Opus.Options.Paper.Wheel
   alias OpusWeb.Components.PaperTrades
 
-  # Each book: its key, its name and WSB twin, and what it does in both voices.
+  # Each book: its key and what it does in both voices (names: `Paper.book_name/1`).
   @books [
-    {"wheel", "Wheel", "Theta gang",
+    {"wheel",
      "The wheel: sell puts, take the shares if assigned, sell calls on them. Paper US$, nothing real.",
-     "Selling puts to degens nightly. Paper money, real copium."},
-    {"put_spread", "Put spreads", "Defined-risk degen",
+     "Selling puts to degens every morning. Paper money, real copium."},
+    {"put_spread",
      "The wheel's put with a cheaper put bought below it: the crash risk capped. Paper US$.",
      "Selling puts with a seatbelt on. Paper money, capped copium."},
-    {"iron_condor", "Iron condors", "Iron condor (theta + prayer)",
+    {"iron_condor",
      "A put spread and a call spread around the price: paid if it goes nowhere. Paper US$.",
      "Betting the market does nothing. Theta and a prayer."},
-    {"ideas", "Ideas", "Dip YOLO calls",
-     "Buys the calls the nightly scan flags on dips; sells at double, half, or 21 days. Paper US$.",
+    {"ideas",
+     "Buys the calls the morning scan flags on dips; sells at double, half, or 21 days. Paper US$.",
      "Buying the dip with calls. YOLO, but with rules."},
-    {"crash_puts", "Crash puts", "Doomsday insurance",
+    {"ideas_half",
+     "The same calls, two at a time: half sold at double to pay back the cost, the rest rides. Paper US$.",
+     "Same dip YOLOs, but take the house's money back at a double and let the rest ride."},
+    {"crash_puts",
      "A SPY put about 10% below the price, rolled monthly: what crash insurance costs. Paper US$.",
-     "Doomsday insurance. Pays when everything burns."}
+     "Doomsday insurance. Pays when everything burns."},
+    {"crash_puts_half",
+     "The same crash puts, two at a time: half sold at double, the rest held to the roll. Paper US$.",
+     "Doomsday puts, but cash half at a double and let the rest burn with the market."}
   ]
+
+  attr :current, :string, required: true
+  attr :counts, :map, required: true
+
+  defp book_nav(assigns) do
+    assigns = assign(assigns, books: [{"all", "All books", "All the bags"} | book_names()])
+
+    ~H"""
+    <nav aria-label="Paper books" class="flex flex-wrap gap-1.5">
+      <.link
+        :for={{key, name, meme} <- @books}
+        patch={
+          if key == "all", do: ~p"/options?view=paper", else: ~p"/options?view=paper&book=#{key}"
+        }
+        aria-current={if key == @current, do: "page"}
+        class={[
+          "inline-flex items-center gap-1.5 rounded-field border px-3 py-1.5 text-[13px] font-medium",
+          if(key == @current,
+            do: "border-primary text-primary",
+            else: "border-base-300 text-muted hover:text-base-content"
+          )
+        ]}
+      >
+        <.t s={name} wsb={meme} />
+        <span :if={@counts[key]} class="rounded-full bg-base-300 px-1.5 text-[11px] text-base-content">
+          {@counts[key]}
+        </span>
+      </.link>
+    </nav>
+    """
+  end
+
+  defp book_names do
+    for {key, _about, _wsb} <- @books do
+      {name, meme} = Paper.book_name(key)
+      {key, name, meme}
+    end
+  end
+
+  # How long a forward test runs before its numbers say more than luck.
+  @judge_after_days 90
+
+  attr :books, :list, required: true
+  attr :counts, :map, default: %{}
+
+  @doc """
+  The five books side by side: what each has made against just holding its
+  underlyings, how long it has run, and what's open. A paper book is a
+  forward test, so the page says plainly when it is too early to judge.
+  """
+  def all_books(assigns) do
+    started = Enum.filter(assigns.books, & &1.started_on)
+
+    assigns =
+      assign(assigns,
+        names: Map.new(book_names(), fn {key, name, meme} -> {key, {name, meme}} end),
+        pnl: Enum.sum_by(started, & &1.pnl),
+        value: Enum.sum_by(started, & &1.value),
+        open: assigns.counts |> Map.values() |> Enum.sum(),
+        priced_at:
+          assigns.books
+          |> Enum.map(& &1.priced_at)
+          |> Enum.reject(&is_nil/1)
+          |> Enum.max(NaiveDateTime, fn -> nil end),
+        days:
+          started
+          |> Enum.map(&Date.diff(Date.utc_today(), &1.started_on))
+          |> Enum.max(fn -> 0 end)
+      )
+
+    ~H"""
+    <section
+      id="paper-book"
+      class="flex flex-col gap-4 rounded-box border border-base-300 bg-base-200 px-5 py-4"
+    >
+      <.book_nav current="all" counts={@counts} />
+      <.priced_at at={@priced_at} />
+
+      <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <.stat label="Value, all books" wsb="Net worth" value={money(@value)} />
+        <.stat
+          label="P&L, all books"
+          wsb="Gains (or loss porn)"
+          value={money(@pnl)}
+          tone={tone(@pnl)}
+        />
+        <.stat label="Open trades" wsb="Bags held" value={to_string(@open)} />
+        <.stat label="Running for" wsb="Days of copium" value={"#{@days} days"} />
+      </div>
+
+      <p class="text-[13px]">
+        <span class="font-medium"><.t s="What to take from it:" wsb="The play:" /></span>
+        {verdict(@days)}
+      </p>
+
+      <div class="overflow-x-auto">
+        <table class="w-full min-w-[600px] border-collapse text-[13px]">
+          <thead>
+            <tr class="text-left text-[11px] text-muted">
+              <th class="border-b border-base-300 py-2 font-medium">Book</th>
+              <th class="border-b border-base-300 px-2 py-2 text-right font-medium">P&L</th>
+              <th class="border-b border-base-300 px-2 py-2 text-right font-medium">Return</th>
+              <th class="border-b border-base-300 px-2 py-2 text-right font-medium">
+                Just holding
+              </th>
+              <th class="border-b border-base-300 px-2 py-2 text-right font-medium">Open</th>
+              <th class="border-b border-base-300 py-2 pl-2 text-right font-medium">Since</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={book <- @books} class="border-b border-neutral last:border-b-0">
+              <td class="py-2">
+                <.link
+                  patch={~p"/options?view=paper&book=#{book.strategy}"}
+                  class="hover:text-primary"
+                >
+                  <.t s={elem(@names[book.strategy], 0)} wsb={elem(@names[book.strategy], 1)} />
+                </.link>
+              </td>
+              <%= if book.started_on do %>
+                <td class={["px-2 py-2 text-right", tone(book.pnl)]}>{money(book.pnl)}</td>
+                <td class={["px-2 py-2 text-right", tone(book.return)]}>
+                  {signed_pct(book.return, 2)}
+                </td>
+                <td class={["px-2 py-2 text-right", tone(book.hold_return)]}>
+                  {signed_pct(book.hold_return, 2)}
+                </td>
+                <td class="px-2 py-2 text-right">{@counts[book.strategy] || 0}</td>
+                <td class="py-2 pl-2 text-right text-muted">
+                  {Calendar.strftime(book.started_on, "%b %-d")}
+                </td>
+              <% else %>
+                <td colspan="5" class="py-2 pl-2 text-right text-muted">not started</td>
+              <% end %>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    """
+  end
+
+  defp verdict(days) when days < @judge_after_days,
+    do:
+      "Too early to judge: #{days} of the #{@judge_after_days} days a forward test needs. " <>
+        "Day-to-day swings here are noise; nothing to change yet. Compare each book's return " <>
+        "with just holding once it has run a few months, through at least one market drop."
+
+  defp verdict(_days),
+    do:
+      "Long enough to compare: a book that trails just holding after this long is paying " <>
+        "for its risk without being paid for it. Consider stopping it."
+
+  # How fresh the prices are: open legs carry their latest quote.
+  attr :at, :any, required: true
+
+  defp priced_at(assigns) do
+    ~H"""
+    <p :if={@at} class="text-[12px] text-muted">
+      <.t
+        s={"Priced at #{clock(Opus.Clock.local(@at))} New York. Open trades update every 15 minutes while the market is open, and a take-profit fills as soon as a quote reaches it."}
+        wsb={"Marked at #{clock(Opus.Clock.local(@at))} NY. Refreshes every 15 min; take-profits fill the second they print."}
+      />
+    </p>
+    """
+  end
 
   attr :book, :map, required: true
   attr :counts, :map, default: %{}
@@ -50,43 +223,23 @@ defmodule OpusWeb.Components.PaperBook do
   attr :analysis, :map, default: nil
 
   def paper_book(assigns) do
-    {_key, _name, _meme, about, about_wsb} = List.keyfind(@books, assigns.book.strategy, 0)
-    assigns = assign(assigns, books: @books, about: about, about_wsb: about_wsb)
+    {_key, about, about_wsb} = List.keyfind(@books, assigns.book.strategy, 0)
+    assigns = assign(assigns, about: about, about_wsb: about_wsb)
 
     ~H"""
     <section
       id="paper-book"
       class="flex flex-col gap-4 rounded-box border border-base-300 bg-base-200 px-5 py-4"
     >
-      <nav aria-label="Paper books" class="flex flex-wrap gap-1.5">
-        <.link
-          :for={{key, name, meme, _about, _wsb} <- @books}
-          patch={~p"/options?view=paper&book=#{key}"}
-          aria-current={if key == @book.strategy, do: "page"}
-          class={[
-            "inline-flex items-center gap-1.5 rounded-field border px-3 py-1.5 text-[13px] font-medium",
-            if(key == @book.strategy,
-              do: "border-primary text-primary",
-              else: "border-base-300 text-muted hover:text-base-content"
-            )
-          ]}
-        >
-          <.t s={name} wsb={meme} />
-          <span
-            :if={@counts[key]}
-            class="rounded-full bg-base-300 px-1.5 text-[11px] text-base-content"
-          >
-            {@counts[key]}
-          </span>
-        </.link>
-      </nav>
+      <.book_nav current={@book.strategy} counts={@counts} />
 
       <p class="text-[12px] text-muted"><.t s={@about} wsb={@about_wsb} /></p>
+      <.priced_at at={@book.priced_at} />
 
       <p :if={@book.started_on == nil} class="text-[13px] text-muted">
         <.t
-          s="Nothing yet: the first trades open after tonight's chain snapshot."
-          wsb="No bags yet. The first trades open after tonight's snapshot."
+          s="Nothing yet: the first trades open at the next 10:30 New York check."
+          wsb="No bags yet. The first trades open at the next 10:30 check."
         />
       </p>
 
@@ -133,7 +286,7 @@ defmodule OpusWeb.Components.PaperBook do
       >
         <nav aria-label="Trades" class="flex flex-col gap-2">
           <.link
-            patch={~p"/options?view=paper"}
+            patch={~p"/options?view=paper&book=wheel"}
             class={[
               "rounded-field px-3 py-2 text-[13px]",
               if(@trade, do: "text-muted hover:text-base-content", else: "bg-base-300 font-medium")
@@ -143,7 +296,11 @@ defmodule OpusWeb.Components.PaperBook do
           </.link>
           <div :for={trade <- @book.trades} class="flex flex-col">
             <.link
-              patch={~p"/options?view=paper&trade=#{trade.symbol}"}
+              patch={
+                if @trade && @trade.symbol == trade.symbol,
+                  do: ~p"/options?view=paper&book=wheel",
+                  else: ~p"/options?view=paper&book=wheel&trade=#{trade.symbol}"
+              }
               class={[
                 "flex flex-col gap-0.5 rounded-field border px-3 py-2",
                 if(@trade && @trade.symbol == trade.symbol,
@@ -164,7 +321,11 @@ defmodule OpusWeb.Components.PaperBook do
             >
               <li :for={leg <- Enum.reverse(trade.legs)}>
                 <.link
-                  patch={~p"/options?view=paper&trade=#{trade.symbol}&leg=#{leg.id}"}
+                  patch={
+                    if @leg && @leg.position.id == leg.id,
+                      do: ~p"/options?view=paper&book=wheel&trade=#{trade.symbol}",
+                      else: ~p"/options?view=paper&book=wheel&trade=#{trade.symbol}&leg=#{leg.id}"
+                  }
                   class={[
                     "flex justify-between gap-3 px-3 py-1.5 text-[13px]",
                     if(@leg && @leg.position.id == leg.id,
@@ -186,16 +347,6 @@ defmodule OpusWeb.Components.PaperBook do
           <.trade_panel :if={@trade} trade={@trade} leg={@leg} analysis={@analysis} />
         </div>
       </div>
-
-      <ul :if={@book.events != []} class="m-0 flex list-none flex-col gap-1 p-0 text-[13px]">
-        <li :for={event <- @book.events} class="flex flex-wrap justify-between gap-x-4">
-          <span>
-            <span class="text-muted">{day(event.on)}</span>
-            {event.symbol} <.event_label kind={event.kind} book={@book.strategy} />
-          </span>
-          <span class={tone(event.cash)}>{money(event.cash)}</span>
-        </li>
-      </ul>
     </section>
     """
   end
@@ -232,7 +383,10 @@ defmodule OpusWeb.Components.PaperBook do
         <tbody>
           <tr :for={trade <- @book.trades} class="border-b border-neutral last:border-b-0">
             <td class="py-2">
-              <.link patch={~p"/options?view=paper&trade=#{trade.symbol}"} class="hover:text-primary">
+              <.link
+                patch={~p"/options?view=paper&book=wheel&trade=#{trade.symbol}"}
+                class="hover:text-primary"
+              >
                 <span class="font-medium">{trade.symbol}</span>
                 <span class="text-muted">{stage_word(trade.stage)}</span>
               </.link>
@@ -395,7 +549,7 @@ defmodule OpusWeb.Components.PaperBook do
         </span>
         <ol class="m-0 flex list-none flex-col gap-1.5 p-0 text-[13px]">
           <li>
-            <span class="font-medium">Any night:</span>
+            <span class="font-medium">Any day:</span>
             bought back if it can be bought for {money(@leg.take_profit_price)} or less, keeping about {money(
               @premium / 2
             )}.
@@ -465,7 +619,7 @@ defmodule OpusWeb.Components.PaperBook do
           {@p.symbol} stays above {money(@p.strike)} or rises, and the put loses value every day.
         </li>
         <li>
-          The first night it can be bought back for {money(@take_profit)} or less, it is: buy to
+          At the first daily check it can be bought back for {money(@take_profit)} or less, it is: buy to
           close 1 {@p.symbol} {day(@p.expiration)} {num(@p.strike)} put, limit {money(@take_profit)}. About {money(
             @premium - @take_profit * 100 - 0.2
           )} kept after fees.
@@ -475,7 +629,7 @@ defmodule OpusWeb.Components.PaperBook do
             @p.strike
           )}, it's bought back then at the ask, keeping whatever has decayed.
         </li>
-        <li>The next night a new put is sold the same way: 30–45 days, delta near −0.25.</li>
+        <li>At the same check a new put is sold the same way: 30–45 days, delta near −0.25.</li>
       </.play_card>
       <.play_card tone="error">
         <:title><.t s="If it goes wrong" wsb="If it goes GUH" /></:title>
@@ -529,7 +683,7 @@ defmodule OpusWeb.Components.PaperBook do
           {@p.symbol} ends above {money(@p.strike)}: the shares are called away at {money(@p.strike)}<span :if={
             @cost_basis
           }>, {money((@p.strike - @cost_basis) * 100)} more than they cost</span>,
-          plus every premium collected. The next night a new put starts the cycle again.
+          plus every premium collected. At the same check a new put starts the cycle again.
         </li>
       </.play_card>
       <.play_card tone="error">

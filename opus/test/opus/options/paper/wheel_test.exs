@@ -32,6 +32,10 @@ defmodule Opus.Options.Paper.WheelTest do
   defp snapshot(spot, quotes \\ %{}, chain \\ []),
     do: %{as_of: @as_of, spot: spot, quotes: quotes, chain: chain, expiry_spots: %{}}
 
+  # A run after `leg`'s expiry day, with that day's close stored.
+  defp settled(leg, close, quotes \\ %{}, chain \\ []),
+    do: %{snapshot(close, quotes, chain) | expiry_spots: %{leg.expiration => close}}
+
   describe "fills" do
     test "need a bid and a spread within 10% of the mid" do
       assert Wheel.fillable?(%{bid: 5.0, ask: 5.2})
@@ -84,17 +88,24 @@ defmodule Opus.Options.Paper.WheelTest do
       assert {:hold, ^put} = Wheel.manage(put, nil, snapshot(600.0))
     end
 
-    test "settles at expiry against the expiry-day close" do
-      put = leg("put", 590.0, 0, 4.0)
+    test "settles after expiry day against that day's close" do
+      put = leg("put", 590.0, -3, 4.0)
       call = leg("call", 610.0, -1, 3.0)
 
-      assert {:assign, ^put} = Wheel.manage(put, nil, snapshot(585.0))
-      assert {:expire, ^put} = Wheel.manage(put, nil, snapshot(595.0))
-      assert {:call_away, ^call} = Wheel.manage(call, nil, snapshot(615.0))
+      assert {:assign, ^put} = Wheel.manage(put, nil, settled(put, 585.0))
+      assert {:expire, ^put} = Wheel.manage(put, nil, settled(put, 595.0))
+      assert {:call_away, ^call} = Wheel.manage(call, nil, settled(call, 615.0))
 
-      # A missed night settles on the expiry date's close, not tonight's.
-      late = %{snapshot(580.0) | expiry_spots: %{call.expiration => 605.0}}
-      assert {:expire, ^call} = Wheel.manage(call, nil, late)
+      # The expiry-day close, not the price at the run.
+      assert {:expire, ^call} = Wheel.manage(call, nil, %{settled(call, 605.0) | spot: 650.0})
+    end
+
+    test "is still managed on expiry day, and waits for its close after" do
+      put = leg("put", 590.0, 0, 4.0)
+      assert {:hold, ^put} = Wheel.manage(put, %{bid: 6.0, ask: 6.1}, snapshot(585.0))
+
+      expired = leg("put", 590.0, -3, 4.0)
+      assert {:hold, ^expired} = Wheel.manage(expired, nil, snapshot(585.0))
     end
   end
 
@@ -122,18 +133,23 @@ defmodule Opus.Options.Paper.WheelTest do
     end
 
     test "assignment turns into a covered call at or above the strike", %{chain: chain} do
-      put = leg("put", 595.0, 0, 4.0)
+      put = leg("put", 595.0, -3, 4.0)
 
       assert [{:assign, ^put}, {:open, %{kind: "call", strike: 600.0}}] =
-               Wheel.plan(%{legs: [put], shares: nil}, snapshot(585.0, %{}, chain), 0.0, 0.1)
+               Wheel.plan(%{legs: [put], shares: nil}, settled(put, 585.0, %{}, chain), 0.0, 0.1)
     end
 
     test "a call-away frees the cash for the next put", %{chain: chain} do
-      call = leg("call", 600.0, 0, 3.0)
+      call = leg("call", 600.0, -3, 3.0)
       lot = %{quantity: 100, open_price: 595.0}
 
       assert [{:call_away, ^call}, {:open, %{kind: "put"}}] =
-               Wheel.plan(%{legs: [call], shares: lot}, snapshot(605.0, %{}, chain), 0.0, 0.1)
+               Wheel.plan(
+                 %{legs: [call], shares: lot},
+                 settled(call, 605.0, %{}, chain),
+                 0.0,
+                 0.1
+               )
     end
   end
 

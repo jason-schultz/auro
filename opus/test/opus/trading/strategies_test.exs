@@ -3,14 +3,17 @@ defmodule Opus.Trading.StrategiesTest do
 
   import Ecto.Query
 
+  alias Opus.Instruments
+  alias Opus.Pipeline.{StrategyConfig, StrategyEvaluation}
   alias Opus.Repo
-  alias Opus.Trading.{LiveStrategy, LiveTrade, Rule, Strategies, Suspension}
+  alias Opus.Trading.{LiveStrategy, LiveTrade, Recipe, Rule, Strategies, Suspension}
 
   @enabled_id "aaaaaaaa-0000-0000-0000-000000000001"
   @held_id "aaaaaaaa-0000-0000-0000-000000000002"
 
   setup do
-    for schema <- [Suspension, Rule, LiveTrade, LiveStrategy], do: Repo.delete_all(schema)
+    # Recipes too: the Rust DB tests leave theirs behind in the test database.
+    for schema <- [Suspension, Rule, LiveTrade, LiveStrategy, Recipe], do: Repo.delete_all(schema)
     Repo.delete_all("signal_events")
     now = DateTime.utc_now()
 
@@ -206,5 +209,94 @@ defmodule Opus.Trading.StrategiesTest do
              "strategy_name" => "x"
            }).settings ==
              [{"entry_threshold", "0.02"}, {"ma_period", "20"}]
+  end
+
+  describe "recipes/0" do
+    @spx_id "aaaaaaaa-0000-0000-0000-000000000003"
+
+    setup do
+      now = DateTime.utc_now()
+
+      # Same rules as the NAS100 row, on another instrument: same recipe.
+      Repo.insert!(%LiveStrategy{
+        id: @spx_id,
+        strategy_type: "composite",
+        instrument: "SPX500_USD",
+        granularity: "D",
+        parameters: %{"strategy_name" => "Index RSI(2) dip-buy"},
+        enabled: false,
+        curator_mode: "pinned_off",
+        created_at: now,
+        updated_at: now
+      })
+
+      with :error <- Instruments.id_for("NAS100_USD"), do: Instruments.add("NAS100_USD", "index")
+
+      config =
+        %StrategyConfig{}
+        |> StrategyConfig.changeset(%{
+          instrument: "NAS100_USD",
+          granularity: "D",
+          strategy_type: "composite",
+          parameters: %{"strategy_name" => "Index RSI(2) dip-buy"}
+        })
+        |> Repo.insert!()
+
+      for {stage, status, stats, reason} <- [
+            {"backtest", "passed", %{"total_return" => 0.43, "num_trades" => 118}, nil},
+            {"walk_forward", "failed", nil, "out-of-sample Sharpe below 0.05"}
+          ] do
+        Repo.insert!(%StrategyEvaluation{
+          strategy_config_id: config.id,
+          stage: stage,
+          status: status,
+          stats: stats,
+          failure_reason: reason,
+          evaluated_at: now
+        })
+      end
+
+      Repo.insert!(%LiveTrade{
+        live_strategy_id: @enabled_id,
+        instrument: "NAS100_USD",
+        status: "closed",
+        pnl: 84.44,
+        entry_time: DateTime.add(now, -86_400, :second),
+        exit_time: now,
+        created_at: now,
+        updated_at: now
+      })
+
+      :ok
+    end
+
+    test "groups instruments under one recipe and locks it while one is trading" do
+      [dip_buy, held] = Strategies.recipes()
+
+      assert dip_buy.name == "Index RSI(2) dip-buy"
+      assert dip_buy.timeframe == "daily bars"
+      assert Enum.map(dip_buy.assignments, & &1.instrument) == ["NAS100_USD", "SPX500_USD"]
+      assert [%{instrument: "NAS100_USD"}] = dip_buy.locked_by
+
+      assert held.locked_by == []
+    end
+
+    test "says what each test found, and why a test has no result" do
+      [dip_buy, _held] = Strategies.recipes()
+      [nas, spx] = dip_buy.assignments
+
+      assert %{status: :passed, stats: %{"num_trades" => 118}} = nas.results.backtest
+
+      assert %{status: :failed, reason: "out-of-sample Sharpe below 0.05"} =
+               nas.results.walk_forward
+
+      assert nas.results.monte_carlo.reason ==
+               "Skipped because the walk-forward test failed."
+
+      assert %{trades: 1, wins: 1, pnl: 84.44} = nas.results.live
+
+      assert spx.results.backtest.reason == "Never run through the testing pipeline."
+      assert spx.results.live == %{trades: 0}
+    end
   end
 end

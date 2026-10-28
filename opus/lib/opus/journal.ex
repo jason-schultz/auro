@@ -13,7 +13,8 @@ defmodule Opus.Journal do
 
   alias Opus.Pipeline.{StrategyConfig, StrategyEvaluation}
   alias Opus.Repo
-  alias Opus.Trading.{ExecutionQuality, LiveTrade, Suspension}
+  alias Opus.Journal.TradeStory
+  alias Opus.Trading.{ExecutionQuality, LiveStrategy, LiveTrade, Strategies, Suspension}
 
   @type window :: {DateTime.t(), DateTime.t()}
 
@@ -256,6 +257,118 @@ defmodule Opus.Journal do
     |> Enum.uniq_by(& &1.live_strategy_id)
     |> Enum.map(fn row -> Map.merge(row, Map.get(labels, row.live_strategy_id, %{})) end)
   end
+
+  @doc """
+  The strategies that traded in the window or hold an open trade, by P&L,
+  each named: the Journal's filters over its trade list.
+  """
+  @spec traded_strategies(window()) :: [map()]
+  def traded_strategies(window) do
+    rows =
+      window
+      |> strategy_performance()
+      |> Enum.filter(&(&1.trades > 0 or &1.open_trades > 0))
+
+    names = strategy_names(Enum.map(rows, & &1.strategy_id))
+    Enum.map(rows, &Map.put(&1, :name, Map.get(names, &1.strategy_id, &1.instrument)))
+  end
+
+  @doc """
+  The latest live trades, open and closed, newest first: one row each for the
+  Journal's trade list, with the strategy's name and why it closed. Only
+  `strategy_id`'s trades when one is given.
+  """
+  @spec recent_trades(pos_integer(), String.t() | nil) :: [map()]
+  def recent_trades(limit \\ 30, strategy_id \\ nil) do
+    trades =
+      trades_query()
+      |> for_strategy(strategy_id && Ecto.UUID.cast(strategy_id))
+      |> order_by([t], desc: t.entry_time)
+      |> limit(^limit)
+      |> Repo.all()
+
+    names = strategy_names(Enum.map(trades, & &1.live_strategy_id))
+
+    Enum.map(trades, fn t ->
+      Map.merge(t, %{
+        strategy: Map.get(names, t.live_strategy_id, "—"),
+        why_closed: TradeStory.exit_label(t)
+      })
+    end)
+  end
+
+  @doc """
+  One live trade told in plain words (`Opus.Journal.TradeStory`), with its
+  strategy's name and how many live trades the strategy has closed. `nil`
+  for an unknown id.
+  """
+  @spec trade(String.t()) :: map() | nil
+  def trade(id) do
+    with {:ok, uuid} <- Ecto.UUID.cast(id),
+         %{} = t <- trades_query() |> where([t], t.id == type(^uuid, Ecto.UUID)) |> Repo.one() do
+      strategy = t.live_strategy_id && Repo.get(LiveStrategy, t.live_strategy_id)
+
+      Map.merge(t, %{
+        strategy: strategy && Strategies.display_name(strategy),
+        story: TradeStory.tell(t, %{parameters: strategy && strategy.parameters}),
+        strategy_closed_trades: closed_count(t.live_strategy_id)
+      })
+    else
+      _ -> nil
+    end
+  end
+
+  defp for_strategy(query, {:ok, uuid}),
+    do: where(query, [t], t.live_strategy_id == type(^uuid, Ecto.UUID))
+
+  defp for_strategy(query, _all), do: query
+
+  defp trades_query do
+    from(t in "live_trades",
+      select: %{
+        id: type(t.id, Ecto.UUID),
+        live_strategy_id: type(t.live_strategy_id, Ecto.UUID),
+        instrument: t.instrument,
+        direction: t.direction,
+        units: t.units,
+        status: t.status,
+        entry_price: t.entry_price,
+        exit_price: t.exit_price,
+        entry_time: type(t.entry_time, :utc_datetime_usec),
+        exit_time: type(t.exit_time, :utc_datetime_usec),
+        stop_loss_price: t.stop_loss_price,
+        pnl: t.pnl,
+        pnl_percent: t.pnl_percent,
+        entry_reason: t.entry_reason,
+        exit_reason: t.exit_reason,
+        indicators_at_entry: type(t.indicators_at_entry, :map),
+        mfe_pct: t.mfe_pct,
+        mae_pct: t.mae_pct,
+        sizing_metadata: type(t.sizing_metadata, :map),
+        expected_entry_price: t.expected_entry_price,
+        entry_spread: t.entry_spread,
+        expected_exit_price: t.expected_exit_price,
+        exit_spread: t.exit_spread
+      }
+    )
+  end
+
+  defp strategy_names(ids) do
+    ids = ids |> Enum.reject(&is_nil/1) |> Enum.uniq()
+
+    from(s in LiveStrategy, where: s.id in ^ids)
+    |> Repo.all()
+    |> Map.new(&{&1.id, Strategies.display_name(&1)})
+  end
+
+  defp closed_count(nil), do: 0
+
+  defp closed_count(strategy_id),
+    do:
+      Repo.aggregate(
+        from(t in LiveTrade, where: t.live_strategy_id == ^strategy_id and t.status == "closed"),
+        :count
+      )
 
   defp strategy_labels do
     from(ls in "live_strategies",

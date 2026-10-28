@@ -155,10 +155,12 @@ defmodule Opus.Options do
   The strikes of one kind at one expiry from the latest snapshot, the
   nearest to the spot price either side, each with the quote the page
   shows, the spot and capture time they were taken at, and `at_the_money`
-  on the strike closest to the spot.
+  on the strike closest to the spot. `each_side: :all` keeps every strike.
   """
-  @spec chain(String.t(), Date.t(), String.t()) :: [map()]
-  def chain(symbol, %Date{} = expiration, kind) do
+  @spec chain(String.t(), Date.t(), String.t(), keyword()) :: [map()]
+  def chain(symbol, %Date{} = expiration, kind, opts \\ []) do
+    each_side = Keyword.get(opts, :each_side, @strikes_each_side)
+
     rows =
       symbol
       |> latest_quotes()
@@ -185,11 +187,14 @@ defmodule Opus.Options do
         nearest =
           rows |> Enum.map(&abs(&1.strike - spot)) |> Enum.with_index() |> Enum.min() |> elem(1)
 
-        first = max(nearest - @strikes_each_side, 0)
+        {first, count} =
+          if each_side == :all,
+            do: {0, length(rows)},
+            else: {max(nearest - each_side, 0), 2 * each_side + 1}
 
         rows
         |> Enum.with_index()
-        |> Enum.slice(first, 2 * @strikes_each_side + 1)
+        |> Enum.slice(first, count)
         |> Enum.map(fn {row, i} -> Map.put(row, :at_the_money, i == nearest) end)
     end
   end

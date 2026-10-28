@@ -13,7 +13,9 @@ use crate::brokers::questrade::models::{EquityCandle, OptionQuote, QuoteResult, 
 use crate::brokers::questrade::options::{select_contracts, SelectedContract};
 use crate::db::repositories::candles as candles_repo;
 use crate::db::repositories::instruments as instruments_repo;
-use crate::db::repositories::options::{self as options_repo, OptionQuoteRow, StoredContract};
+use crate::db::repositories::options::{
+    self as options_repo, ContractRow, OptionQuoteRow, StoredContract,
+};
 use crate::engine::instrument::Instrument;
 use crate::engine::options::ContractSpec;
 use crate::engine::types::{Candle, CandleRow, Granularity};
@@ -449,6 +451,109 @@ pub async fn snapshot_option_chain(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct QuoteContracts {
+    pub underlying: String,
+    /// `option_contracts` ids, all on `underlying`.
+    pub contract_ids: Vec<i64>,
+}
+
+/// Quote only the stored contracts asked for (the paper books' open legs)
+/// and store the quotes in `option_quotes`, without touching the rest of
+/// the chain: one underlying quote, one chain listing and one option
+/// quotes call. A contract no longer in Questrade's chain is reported in
+/// `missing`, not an error.
+pub async fn quote_option_contracts(
+    State(state): State<AppState>,
+    Json(body): Json<QuoteContracts>,
+) -> AppResult<Json<Value>> {
+    let Some(qt) = state.questrade.as_ref() else {
+        return Err(AppError::Internal("Questrade not configured".into()));
+    };
+    let underlying = body.underlying.trim().to_uppercase();
+    let instrument = require_instrument(&state, &underlying).await?;
+    let contracts = options_repo::contracts_by_ids(&state.db, instrument.id, &body.contract_ids)
+        .await
+        .map_err(AppError::Database)?;
+    let (Some(first), Some(last)) = (contracts.first(), contracts.last()) else {
+        return Ok(Json(
+            json!({ "underlying": underlying, "quotes_stored": 0, "missing": body.contract_ids }),
+        ));
+    };
+    let expiries = (first.expiration_date, last.expiration_date);
+    let strikes = contracts.iter().fold((f64::MAX, f64::MIN), |(lo, hi), c| {
+        (lo.min(c.strike), hi.max(c.strike))
+    });
+    let captured_at = Utc::now();
+
+    let mut client = qt.lock().await;
+    let symbol_id = identity::resolve_symbol_id(&mut client, &state.db, &instrument).await?;
+    let spot = client
+        .get_quotes(&[symbol_id])
+        .await?
+        .first()
+        .and_then(quote_price)
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "Questrade has no price for {underlying} (symbolId={symbol_id})"
+            ))
+        })?;
+    let chain = client.get_option_chain(symbol_id).await?;
+    let in_window = select_contracts(&chain, &instrument.symbol, expiries, strikes)?;
+    let (selected, stored) = match_contracts(&in_window, &contracts);
+    let option_ids: Vec<i64> = selected.iter().map(|c| c.option_id).collect();
+    let quotes = if option_ids.is_empty() {
+        Vec::new()
+    } else {
+        client.get_option_quotes(&option_ids).await?
+    };
+    drop(client);
+
+    let rows = quote_rows(&selected, &stored, &quotes, spot, captured_at);
+    let quotes_stored = options_repo::insert_quotes(&state.db, &rows)
+        .await
+        .map_err(AppError::Database)?;
+    let quoted: Vec<i64> = rows.iter().map(|r| r.contract_id).collect();
+    let missing: Vec<i64> = body
+        .contract_ids
+        .iter()
+        .copied()
+        .filter(|id| !quoted.contains(id))
+        .collect();
+
+    Ok(Json(json!({
+        "underlying": underlying,
+        "spot": spot,
+        "captured_at": captured_at,
+        "quotes_stored": quotes_stored,
+        "missing": missing,
+    })))
+}
+
+/// The chain contracts that are the stored ones, matched on expiry, strike
+/// and kind, each paired with its stored id under the chain's ticker (the
+/// label `quote_rows` joins on).
+fn match_contracts(
+    chain: &[SelectedContract],
+    stored: &[ContractRow],
+) -> (Vec<SelectedContract>, Vec<StoredContract>) {
+    chain
+        .iter()
+        .filter_map(|c| {
+            let row = stored.iter().find(|r| {
+                r.expiration_date == c.spec.expiration
+                    && r.strike == c.spec.strike
+                    && r.contract_type == c.spec.kind.as_str()
+            })?;
+            let label = StoredContract {
+                id: row.id,
+                ticker: c.spec.ticker.clone(),
+            };
+            Some((c.clone(), label))
+        })
+        .unzip()
+}
+
 /// Join the quotes back to the contracts they were requested for, by the
 /// ids the upsert handed back. A contract Questrade returned no quote for
 /// is left out, not stored empty.
@@ -591,6 +696,51 @@ mod tests {
             delay: Some(900),
             is_halted: Some(false),
         }
+    }
+
+    fn chain_contract(kind: OptionKind, strike: f64, option_id: i64) -> SelectedContract {
+        SelectedContract {
+            spec: ContractSpec {
+                ticker: format!("O:SPY261120{}{strike}", kind.as_str()),
+                underlying: "SPY".into(),
+                kind,
+                expiration: NaiveDate::from_ymd_opt(2026, 11, 20).unwrap(),
+                strike,
+                shares_per_contract: 100,
+                exercise_style: None,
+                primary_exchange: None,
+            },
+            option_id,
+        }
+    }
+
+    #[test]
+    fn match_contracts_keeps_only_the_stored_ones_with_their_ids() {
+        let chain = vec![
+            chain_contract(OptionKind::Put, 640.0, 41),
+            chain_contract(OptionKind::Call, 640.0, 42),
+            chain_contract(OptionKind::Put, 650.0, 43),
+        ];
+        let stored = vec![ContractRow {
+            id: 7,
+            ticker: "SPY 640 P".into(),
+            underlying_instrument_id: crate::engine::instrument::InstrumentId(1),
+            underlying: "SPY".into(),
+            contract_type: "put".into(),
+            expiration_date: NaiveDate::from_ymd_opt(2026, 11, 20).unwrap(),
+            strike: 640.0,
+            shares_per_contract: 100,
+        }];
+        let (selected, labels) = match_contracts(&chain, &stored);
+        assert_eq!(
+            selected.iter().map(|c| c.option_id).collect::<Vec<_>>(),
+            vec![41]
+        );
+        assert_eq!(labels.len(), 1);
+        assert_eq!(
+            (labels[0].id, labels[0].ticker.as_str()),
+            (7, "O:SPY261120put640")
+        );
     }
 
     #[test]
