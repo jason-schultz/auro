@@ -78,6 +78,22 @@ impl Signaler for MacdParams {
         Some(ports)
     }
 
+    fn series(&self, candles: &[Candle]) -> HashMap<String, f64> {
+        indicators::macd(
+            candles,
+            self.fast_period,
+            self.slow_period,
+            self.signal_period,
+        )
+        .map(|m| {
+            HashMap::from([
+                ("macd".to_string(), m.macd_line),
+                ("signal".to_string(), m.signal_line),
+            ])
+        })
+        .unwrap_or_default()
+    }
+
     fn entry_reason(&self, candles: &[Candle], _direction: Direction) -> EntryReason {
         let out = indicators::macd(
             candles,

@@ -62,7 +62,10 @@ defmodule OpusWeb.StrategyBuilderLiveTest do
     {:ok, view, html} = live(conn, ~p"/strategies/new")
 
     assert html =~ "New strategy"
-    assert html =~ "Add a block below."
+    assert html =~ "A block watches one thing about the price"
+    assert html =~ "Start from an example"
+    assert html =~ "Trend"
+    assert html =~ "Is it going up or down?"
 
     html = view |> element("button", "+ RSI") |> render_click()
     assert html =~ "RSI(2) is below 20"
@@ -76,6 +79,23 @@ defmodule OpusWeb.StrategyBuilderLiveTest do
     view |> form("#builder", form: %{name: "Dip test"}) |> render_change()
     html = view |> form("#builder") |> render_submit(%{"then" => "draft"})
     assert html =~ "The engine checks the rules before saving"
+  end
+
+  test "a block explains itself and each setting, and an example fills the whole form", %{
+    conn: conn
+  } do
+    {:ok, view, _html} = live(conn, ~p"/strategies/new")
+
+    html = view |> element("button", "+ RSI") |> render_click()
+    assert html =~ "How hard the price has been pushed one way lately"
+    assert html =~ "Lower means fewer, more extreme dips count."
+
+    {:ok, view, _html} = live(conn, ~p"/strategies/new")
+    html = view |> element(~s(button[phx-value-id="dip_in_uptrend"])) |> render_click()
+
+    assert html =~ ~s(value="Buy dips in an uptrend")
+    assert html =~ ~s(name="form[rules][entry_long][refs][]" value="t.above")
+    refute html =~ "Start from an example"
   end
 
   test "conditions are picked from a list and show as removable lines", %{conn: conn} do

@@ -340,7 +340,6 @@ defmodule OpusWeb.StrategyLive do
               definition={@s.recipe.definition}
               granularity={@s.granularity}
               focus={@focus}
-              overlay_period={@s.overlay_period}
               label={"#{@s.granularity} candles for #{@s.instrument} with buy and sell signals"}
             />
           <% else %>

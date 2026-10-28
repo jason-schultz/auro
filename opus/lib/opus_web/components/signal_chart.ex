@@ -2,8 +2,10 @@ defmodule OpusWeb.SignalChart do
   @moduledoc """
   The signal chart section shared by a strategy's page and the builder's
   preview: candles with every buy (▲) and sell (▼) the rules made, the
-  rule strips that say why, the trades in the window as buttons, and the
-  chosen trade told as a sentence. Data from `Opus.Trading.SignalChart`.
+  indicators themselves (lines on the candles, oscillators in panels with
+  their threshold levels), the rule strips that say why, the trades in the
+  window as buttons, and the chosen trade told as a sentence. Data from
+  `Opus.Trading.SignalChart`.
   """
   use Phoenix.Component
 
@@ -20,7 +22,6 @@ defmodule OpusWeb.SignalChart do
   attr :label, :string, required: true
   attr :focus, :integer, default: nil
   attr :pick_event, :string, default: "pick_trade"
-  attr :overlay_period, :integer, default: nil
 
   def signal_chart(assigns) do
     assigns =
@@ -39,15 +40,10 @@ defmodule OpusWeb.SignalChart do
           aria-hidden="true"
           class="mr-1.5 inline-block h-3 w-4 bg-info/15 align-middle"
         ></span><.t s="Time in a trade" wsb="Holding the bag" /></span>
-        <span :if={@overlay_period}><span
-          aria-hidden="true"
-          class="mr-1.5 inline-block w-4 border-t-2 border-accent align-middle"
-        ></span>SMA {@overlay_period}</span>
       </div>
       <.candle_chart
         candles={@chart.candles}
         signals={@chart}
-        overlay_period={@overlay_period}
         marker_event={@pick_event}
         focus={@chosen && @chosen.id}
         label={@label}

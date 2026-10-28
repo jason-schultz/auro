@@ -22,6 +22,13 @@ defmodule OpusWeb.CandleChart do
   @height 280
   @pad 8
   @axis 80
+  @panel_height 70
+
+  @line_colors [
+    "var(--color-accent)",
+    "var(--color-secondary)",
+    "var(--color-neutral-content)"
+  ]
 
   attr :candles, :list, required: true, doc: "oldest first: %{time, open, high, low, close}"
   attr :lines, :list, default: [], doc: "%{price, label, kind: :entry | :stop | :target | :now}"
@@ -102,6 +109,15 @@ defmodule OpusWeb.CandleChart do
               fill={candle.color}
             />
           </g>
+          <g :for={o <- @overlays}>
+            <polyline
+              :for={points <- o.lines}
+              points={points}
+              fill="none"
+              stroke={o.color}
+              stroke-width="1.5"
+            />
+          </g>
           <polyline
             :if={@overlay}
             points={@overlay}
@@ -173,6 +189,60 @@ defmodule OpusWeb.CandleChart do
           <path d={marker.path} fill={marker.color} />
         </g>
       </svg>
+      <div
+        :if={@overlays != []}
+        class="flex min-w-[640px] flex-wrap gap-x-4 gap-y-1 pt-1 text-[12px] text-muted"
+      >
+        <span :for={o <- @overlays} class="inline-flex items-center gap-1.5">
+          <span aria-hidden="true" class="inline-block h-0.5 w-4" style={"background: #{o.color}"}></span>
+          {o.label}
+        </span>
+      </div>
+      <div :for={p <- @panels} class="flex min-w-[640px] flex-col gap-1 pt-3">
+        <span class="text-[13px]">
+          {p.label}
+          <span :if={p.levels != []} class="text-muted">
+            · dashed at {Enum.map_join(p.levels, ", ", &level_text(&1.value))}
+          </span>
+        </span>
+        <svg
+          role="img"
+          aria-label={"#{p.label} over the same bars"}
+          viewBox={"0 0 #{@width} #{p.height}"}
+          preserveAspectRatio="none"
+          class="block w-full"
+          style={"height: #{p.height}px"}
+        >
+          <rect x="0" y="0" width={@plot_width} height={p.height} rx="3" class="fill-base-100" />
+          <line
+            :for={l <- p.levels}
+            x1="0"
+            y1={l.y}
+            x2={@plot_width}
+            y2={l.y}
+            stroke="var(--color-neutral-content)"
+            stroke-opacity="0.6"
+            stroke-dasharray="4 4"
+            vector-effect="non-scaling-stroke"
+          />
+          <polyline
+            :for={points <- p.also}
+            points={points}
+            fill="none"
+            stroke="var(--color-secondary)"
+            stroke-width="1.5"
+            vector-effect="non-scaling-stroke"
+          />
+          <polyline
+            :for={points <- p.lines}
+            points={points}
+            fill="none"
+            stroke="var(--color-accent)"
+            stroke-width="1.5"
+            vector-effect="non-scaling-stroke"
+          />
+        </svg>
+      </div>
       <div :if={@lanes != []} class="flex min-w-[640px] flex-col gap-2.5 pt-3">
         <div :for={lane <- @lanes} class="flex flex-col gap-1">
           <span class="text-[13px] leading-snug">{lane.label}</span>
@@ -209,9 +279,10 @@ defmodule OpusWeb.CandleChart do
     body = max(2.0, step * 0.55)
 
     {low, high} =
-      Enum.reduce(shown, {nil, nil}, fn c, {lo, hi} ->
-        {min_nil(lo, c.low), max_nil(hi, c.high)}
-      end)
+      shown
+      |> Enum.flat_map(&[&1.low, &1.high])
+      |> Kernel.++(overlay_values(signals, length(candles) - n))
+      |> Enum.min_max()
 
     span = max(high - low, high * 0.001)
     lo = low - span * 0.04
@@ -274,7 +345,7 @@ defmodule OpusWeb.CandleChart do
   end
 
   defp signal_layout(nil, _offset, _shown, _step, _x, _y, _focus),
-    do: %{markers: [], spans: [], lanes: [], ring: nil}
+    do: %{markers: [], spans: [], lanes: [], ring: nil, overlays: [], panels: []}
 
   defp signal_layout(signals, offset, shown, step, x, y, focus) do
     n = length(shown)
@@ -344,18 +415,77 @@ defmodule OpusWeb.CandleChart do
         }
       end)
 
+    overlays =
+      signals
+      |> Map.get(:overlays, [])
+      |> Enum.with_index()
+      |> Enum.map(fn {o, k} ->
+        %{
+          label: o.label,
+          color: Enum.at(@line_colors, rem(k, length(@line_colors))),
+          lines: o.values |> Enum.drop(offset) |> Enum.take(n) |> polylines(x, y)
+        }
+      end)
+
     %{
       markers: markers,
       spans: spans,
       lanes: lanes,
-      ring: ring && %{x: ring.x, y: ring.y}
+      ring: ring && %{x: ring.x, y: ring.y},
+      overlays: overlays,
+      panels: signals |> Map.get(:panels, []) |> Enum.map(&panel(&1, offset, n, x))
     }
   end
 
-  defp min_nil(nil, v), do: v
-  defp min_nil(a, b), do: min(a, b)
-  defp max_nil(nil, v), do: v
-  defp max_nil(a, b), do: max(a, b)
+  # Indicator lines drawn on the candles widen the price scale so they
+  # aren't cut off.
+  defp overlay_values(nil, _offset), do: []
+
+  defp overlay_values(%{overlays: overlays}, offset),
+    do: for(o <- overlays, v <- Enum.drop(o.values, offset), is_number(v), do: v)
+
+  defp overlay_values(_signals, _offset), do: []
+
+  # A line through the values that exist; a gap where a value is missing.
+  defp polylines(values, x, y) do
+    values
+    |> Enum.with_index()
+    |> Enum.chunk_by(fn {v, _i} -> is_number(v) end)
+    |> Enum.filter(fn [{v, _} | _] -> is_number(v) end)
+    |> Enum.map(fn run -> Enum.map_join(run, " ", fn {v, i} -> "#{x.(i)},#{y.(v)}" end) end)
+  end
+
+  # An indicator in its own small chart: its scale is its fixed range, or
+  # the spread of its values and reference levels.
+  defp panel(p, offset, n, x) do
+    values = p.values |> Enum.drop(offset) |> Enum.take(n)
+    also = if p.also, do: p.also |> Enum.drop(offset) |> Enum.take(n)
+
+    {lo, hi} =
+      case p.range do
+        {lo, hi} ->
+          {lo, hi}
+
+        nil ->
+          (values ++ (also || []) ++ p.levels)
+          |> Enum.filter(&is_number/1)
+          |> Enum.min_max(fn -> {0.0, 1.0} end)
+      end
+
+    span = if hi == lo, do: 1.0, else: hi - lo
+    y = fn v -> Float.round(4 + (hi - v) / span * (@panel_height - 8), 1) end
+
+    %{
+      label: p.label,
+      lines: polylines(values, x, y),
+      also: if(also, do: polylines(also, x, y), else: []),
+      levels: Enum.map(p.levels, &%{y: y.(&1), value: &1}),
+      height: @panel_height
+    }
+  end
+
+  defp level_text(v) when v == trunc(v), do: Integer.to_string(trunc(v))
+  defp level_text(v), do: :erlang.float_to_binary(v, decimals: 1)
 
   defp style(:entry), do: %{color: "var(--color-neutral-content)", width: 1, dash: "5 4"}
   defp style(:stop), do: %{color: "var(--color-error)", width: 1.5, dash: "none"}

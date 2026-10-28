@@ -16,115 +16,10 @@ defmodule Opus.Trading.RecipeForm do
   (`from_definition/2` says `:too_complex`). Keys the form doesn't know
   (`version`, `strategy_id`, …) are kept from the original definition.
 
-  `catalog/0` lists the signal blocks with their settings and what each
-  one's outputs mean; the settings and defaults mirror the Rust components
-  (`auro_be/src/engine/<component>.rs`).
+  The blocks themselves, their settings and defaults are `Opus.Trading.Blocks`.
   """
 
-  @catalog [
-    %{
-      type: "RsiReversion",
-      name: "RSI",
-      hint: "How stretched the last few bars were, 0 to 100",
-      key: "r",
-      params: [
-        %{key: "rsi_period", label: "Bars to look at", kind: :int, default: 2},
-        %{key: "oversold", label: "Oversold below", kind: :float, default: 20},
-        %{key: "overbought", label: "Overbought above", kind: :float, default: 80}
-      ],
-      ports: ~w(long short exit_long exit_short)
-    },
-    %{
-      type: "MaFilter",
-      name: "Moving average",
-      hint: "Is the price above or below its average?",
-      key: "t",
-      params: [
-        %{key: "period", label: "Bars", kind: :int, default: 100},
-        %{
-          key: "ma_type",
-          label: "Kind",
-          kind: {:select, [{"Simple", "sma"}, {"Exponential", "ema"}]},
-          default: "sma"
-        }
-      ],
-      ports: ~w(above below)
-    },
-    %{
-      type: "NoiseArea",
-      name: "Noise band",
-      hint: "Breaks out of the usual range from the US open (intraday)",
-      key: "na",
-      params: [
-        %{key: "lookback_sessions", label: "Sessions to average", kind: :int, default: 14},
-        %{key: "band_mult", label: "Band width ×", kind: :float, default: 1.0}
-      ],
-      ports: ~w(long short exit_long exit_short session_close)
-    },
-    %{
-      type: "Donchian",
-      name: "Breakout channel",
-      hint: "A new high or low over the last N bars",
-      key: "dc",
-      params: [
-        %{key: "entry_period", label: "Breakout over (bars)", kind: :int, default: 20},
-        %{key: "exit_period", label: "Exit over (bars)", kind: :int, default: 10}
-      ],
-      ports: ~w(breakout_long breakout_short exit_long exit_short)
-    },
-    %{
-      type: "TrendFollowing",
-      name: "Average crossover",
-      hint: "A fast average crossing a slow one",
-      key: "tf",
-      params: [
-        %{key: "fast_period", label: "Fast (bars)", kind: :int, default: 50},
-        %{key: "slow_period", label: "Slow (bars)", kind: :int, default: 200},
-        %{
-          key: "ma_type",
-          label: "Kind",
-          kind: {:select, [{"Simple", "sma"}, {"Exponential", "ema"}]},
-          default: "sma"
-        }
-      ],
-      ports: ~w(bullish bearish bullish_cross bearish_cross)
-    },
-    %{
-      type: "Macd",
-      name: "MACD",
-      hint: "MACD crossing its signal line",
-      key: "m",
-      params: [
-        %{key: "fast_period", label: "Fast", kind: :int, default: 12},
-        %{key: "slow_period", label: "Slow", kind: :int, default: 26},
-        %{key: "signal_period", label: "Signal", kind: :int, default: 9}
-      ],
-      ports: ~w(bullish bearish bullish_cross bearish_cross)
-    },
-    %{
-      type: "Momentum",
-      name: "Momentum",
-      hint: "Higher or lower than N bars ago",
-      key: "mo",
-      params: [%{key: "lookback", label: "Bars back", kind: :int, default: 20}],
-      ports: ~w(up down)
-    },
-    %{
-      type: "MeanReversion",
-      name: "Stretch from average",
-      hint: "Mean reversion: far from the average and RSI agrees",
-      key: "mr",
-      params: [
-        %{key: "ma_period", label: "Average over (bars)", kind: :int, default: 20},
-        %{key: "entry_z_threshold", label: "Deviations to enter", kind: :float, default: 2.0},
-        %{key: "stop_z_threshold", label: "Deviations to stop", kind: :float, default: 3.0},
-        %{key: "rsi_period", label: "RSI bars", kind: :int, default: 14},
-        %{key: "rsi_oversold", label: "RSI oversold", kind: :float, default: 30},
-        %{key: "rsi_overbought", label: "RSI overbought", kind: :float, default: 70}
-      ],
-      ports: ~w(long short exit_long exit_short)
-    }
-  ]
+  alias Opus.Trading.Blocks
 
   @rules ~w(entry_long entry_short exit_long exit_short)
   @paths %{
@@ -136,14 +31,6 @@ defmodule Opus.Trading.RecipeForm do
 
   # Components that can place their own stop (`StopConfig::FromComponent`).
   @own_stop ~w(NoiseArea MeanReversion)
-
-  @doc "The signal blocks the builder offers."
-  @spec catalog() :: [map()]
-  def catalog, do: @catalog
-
-  @doc "The block for a component type, or nil."
-  @spec block(String.t()) :: map() | nil
-  def block(type), do: Enum.find(@catalog, &(&1.type == type))
 
   @doc "The rule slots, in order: entry_long, entry_short, exit_long, exit_short."
   @spec rules() :: [String.t()]
@@ -167,10 +54,102 @@ defmodule Opus.Trading.RecipeForm do
     }
   end
 
+  @doc """
+  Ready-made strategies to start from, each a complete form a beginner can
+  open, look at and change: `[%{id, name, description, form}]`.
+  """
+  @spec templates() :: [map()]
+  def templates do
+    [
+      %{
+        id: "dip_in_uptrend",
+        name: "Buy dips in an uptrend",
+        description:
+          "Waits until the price has dropped hard for a couple of days while the longer trend is still up, " <>
+            "buys, and sells when it bounces back. Daily bars.",
+        form:
+          starter("Buy dips in an uptrend", "D", [{"RsiReversion", %{}}, {"MaFilter", %{}}], %{
+            "entry_long" => {"and", ["r.long", "t.above"]},
+            "exit_long" => {"and", ["r.exit_long"]}
+          })
+          |> Map.put("hold", "10")
+      },
+      %{
+        id: "breakout",
+        name: "Ride a breakout",
+        description:
+          "Buys when the price breaks above its 20-day high and sells short when it breaks below its 20-day low; " <>
+            "each trade closes when the price breaks the 10-day range the other way. Daily bars.",
+        form:
+          starter("Ride a breakout", "D", [{"Donchian", %{}}], %{
+            "entry_long" => {"and", ["dc.breakout_long"]},
+            "exit_long" => {"and", ["dc.exit_long"]},
+            "entry_short" => {"and", ["dc.breakout_short"]},
+            "exit_short" => {"and", ["dc.exit_short"]}
+          })
+      },
+      %{
+        id: "trend_cross",
+        name: "Follow the trend",
+        description:
+          "Buys when a fast average crosses above a slow one and sells short when it crosses below; " <>
+            "it stays in until the averages cross back. Daily bars.",
+        form:
+          starter(
+            "Follow the trend",
+            "D",
+            [{"TrendFollowing", %{"fast_period" => "20", "slow_period" => "100"}}],
+            %{
+              "entry_long" => {"and", ["tf.bullish_cross"]},
+              "exit_long" => {"and", ["tf.bearish_cross"]},
+              "entry_short" => {"and", ["tf.bearish_cross"]},
+              "exit_short" => {"and", ["tf.bullish_cross"]}
+            }
+          )
+      },
+      %{
+        id: "intraday_breakout",
+        name: "Intraday breakout (US indices)",
+        description:
+          "Buys or sells short when the price moves further from the US open than it usually does by that time, " <>
+            "and is always out by the 16:00 close. 5-minute bars.",
+        form:
+          starter("Intraday breakout", "M5", [{"NoiseArea", %{}}], %{
+            "entry_long" => {"and", ["na.long"]},
+            "exit_long" => {"or", ["na.exit_long", "na.session_close"]},
+            "entry_short" => {"and", ["na.short"]},
+            "exit_short" => {"or", ["na.exit_short", "na.session_close"]}
+          })
+          |> Map.put("stop", %{"type" => "FromComponent", "params" => %{"component" => "na"}})
+      }
+    ]
+  end
+
+  @doc "A template's form by id, or nil."
+  @spec template(String.t()) :: map() | nil
+  def template(id), do: Enum.find_value(templates(), &(&1.id == id && &1.form))
+
+  defp starter(name, granularity, blocks, rules) do
+    form =
+      Enum.reduce(
+        blocks,
+        Map.merge(new(), %{"name" => name, "granularity" => granularity}),
+        fn {type, params}, form ->
+          form
+          |> add_component(type)
+          |> update_in(["components", Access.at(-1), "params"], &Map.merge(&1, params))
+        end
+      )
+
+    Enum.reduce(rules, form, fn {slot, {mode, refs}}, form ->
+      put_in(form, ["rules", slot], %{"mode" => mode, "refs" => refs})
+    end)
+  end
+
   @doc "A block of `type` added to the form under a key no other block uses."
   @spec add_component(map(), String.t()) :: map()
   def add_component(form, type) do
-    %{key: base, params: params} = block(type)
+    %{key: base, params: params} = Blocks.get(type)
     taken = MapSet.new(form["components"], & &1["key"])
 
     key =
@@ -210,7 +189,7 @@ defmodule Opus.Trading.RecipeForm do
   def choices(form) do
     definition = to_definition(form, %{})
 
-    for c <- form["components"], %{ports: ports} <- [block(c["type"])], port <- ports do
+    for c <- form["components"], %{ports: ports} <- [Blocks.get(c["type"])], port <- ports do
       ref = "#{c["key"]}.#{port}"
       {ref, Opus.Trading.StrategyWords.phrase(definition, ref, form["granularity"])}
     end
@@ -221,7 +200,7 @@ defmodule Opus.Trading.RecipeForm do
   """
   @spec grouped_choices(map()) :: [{String.t(), [{String.t(), String.t()}]}]
   def grouped_choices(form) do
-    by_key = Map.new(form["components"], &{&1["key"], block(&1["type"]).name})
+    by_key = Map.new(form["components"], &{&1["key"], Blocks.get(&1["type"]).name})
 
     form
     |> choices()
@@ -271,7 +250,7 @@ defmodule Opus.Trading.RecipeForm do
     components
     |> Enum.sort_by(&elem(&1, 0))
     |> Enum.reduce_while({:ok, []}, fn {key, %{"type" => type} = c}, {:ok, acc} ->
-      case block(type) do
+      case Blocks.get(type) do
         nil ->
           {:halt, {:error, :too_complex}}
 
@@ -358,7 +337,7 @@ defmodule Opus.Trading.RecipeForm do
   defp expression(_), do: nil
 
   defp cast_params(type, params) do
-    case block(type) do
+    case Blocks.get(type) do
       nil ->
         params
 

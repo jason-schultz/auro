@@ -211,6 +211,96 @@ defmodule Opus.Trading.StrategyWords do
     end
   end
 
+  defp port("Bollinger", port, %{"period" => n} = p, g) do
+    average = "its average over #{bars(g, n)}"
+
+    case port do
+      "below_band" ->
+        "the price closes below its lower Bollinger band (#{num(p["std_dev_mult"])} normal wobbles under #{average})"
+
+      "above_band" ->
+        "the price closes above its upper Bollinger band (#{num(p["std_dev_mult"])} normal wobbles over #{average})"
+
+      "above_middle" ->
+        "the price is back up to #{average}"
+
+      "below_middle" ->
+        "the price is back down to #{average}"
+
+      _ ->
+        nil
+    end
+  end
+
+  defp port("Stochastic", port, %{"period" => n} = p, g) do
+    stochastic = "the stochastic (where the price sits in its #{bars(g, n)} range)"
+
+    case port do
+      "oversold" -> "#{stochastic} is below #{num(p["oversold"])}"
+      "overbought" -> "#{stochastic} is above #{num(p["overbought"])}"
+      "cross_up" -> "#{stochastic} crosses above its smoothed line"
+      "cross_down" -> "#{stochastic} crosses below its smoothed line"
+      _ -> nil
+    end
+  end
+
+  defp port("AdxFilter", port, %{"threshold" => t}, _g) do
+    case port do
+      "trending" -> "there's a strong trend (ADX at #{num(t)} or more)"
+      "ranging" -> "there's no strong trend (ADX below #{num(t)})"
+      _ -> nil
+    end
+  end
+
+  defp port("Volatility", port, %{"period" => n, "baseline" => b}, g) do
+    compared = "the last #{bars(g, n)} compared with the last #{bars(g, b)}"
+
+    case port do
+      "quieter" -> "the market is calmer than usual (#{compared})"
+      "busier" -> "the market is wilder than usual (#{compared})"
+      _ -> nil
+    end
+  end
+
+  defp port("Vwap", port, _p, _g) do
+    case port do
+      "above" -> "the price is above the day's average price (VWAP)"
+      "below" -> "the price is below the day's average price (VWAP)"
+      _ -> nil
+    end
+  end
+
+  defp port("OpeningRange", port, %{"minutes" => m}, _g) do
+    range = "the first #{num(m)} minutes after the US open"
+
+    case port do
+      "breakout_long" -> "the price breaks above the high of #{range}"
+      "breakout_short" -> "the price breaks below the low of #{range}"
+      "inside" -> "the price is still inside the range of #{range}"
+      "session_close" -> "the US session ends (16:00 New York)"
+      _ -> nil
+    end
+  end
+
+  defp port("PivotPoints", port, _p, _g) do
+    case port do
+      "above_pivot" ->
+        "the price is above the pivot (from the previous session's high, low and close)"
+
+      "below_pivot" ->
+        "the price is below the pivot (from the previous session's high, low and close)"
+
+      "above_r1" ->
+        "the price is above the first resistance level (R1)"
+
+      "below_s1" ->
+        "the price is below the first support level (S1)"
+
+      _ ->
+        nil
+    end
+  end
+
   defp port(_type, _port, _params, _g), do: nil
 
   defp stop(%{"type" => "AtrMultiple", "params" => %{"k" => k} = p}, _components, g) do

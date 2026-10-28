@@ -23,18 +23,16 @@
 
 use std::collections::HashMap;
 
-use chrono::{Datelike, Duration, NaiveDate, Timelike, Weekday};
-use chrono_tz::America::New_York;
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::indicators;
+use crate::engine::session::{
+    in_regular_session, ny_open, BarClock, SESSION_CLOSE_MIN, SESSION_OPEN_MIN,
+};
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
 
 /// Minutes after midnight New York time.
-const SESSION_OPEN_MIN: i64 = 9 * 60 + 30;
-const SESSION_CLOSE_MIN: i64 = 16 * 60;
-const EARLY_CLOSE_MIN: i64 = 13 * 60;
 const FIRST_DECISION_MIN: i64 = 10 * 60;
 const DECISION_INTERVAL_MIN: i64 = 30;
 
@@ -63,56 +61,12 @@ struct Bands {
     price: f64,
 }
 
-/// Where the newest bar sits in the New York session.
-struct BarClock {
-    bar_minutes: i64,
-    /// New York minute-of-day at which the newest bar closes.
-    close_min: i64,
-    /// That day's session close, in the same minutes.
-    session_close_min: i64,
-}
-
-impl BarClock {
-    fn of(candles: &[Candle]) -> Option<Self> {
-        let bar_minutes = indicators::bar_minutes(candles)?;
-        let close =
-            (candles.last()?.time + Duration::minutes(bar_minutes)).with_timezone(&New_York);
-        Some(Self {
-            bar_minutes,
-            close_min: i64::from(close.hour()) * 60 + i64::from(close.minute()),
-            session_close_min: session_close_min(close.date_naive()),
-        })
-    }
-
-    fn is_decision(&self) -> bool {
-        DECISION_INTERVAL_MIN % self.bar_minutes == 0
-            && (FIRST_DECISION_MIN..self.session_close_min).contains(&self.close_min)
-            && (self.close_min - FIRST_DECISION_MIN) % DECISION_INTERVAL_MIN == 0
-    }
-
-    fn is_session_close(&self) -> bool {
-        self.close_min >= self.session_close_min || self.close_min <= SESSION_OPEN_MIN
-    }
-}
-
-/// NYSE closes at 13:00 on the day after Thanksgiving, and on July 3 and
-/// December 24 when they fall Monday–Thursday (a Friday July 3 / December 24
-/// is itself the observed holiday). Early-close sessions never count as
-/// complete, so they are left out of the noise-area lookback.
-fn session_close_min(date: NaiveDate) -> i64 {
-    let weekday = date.weekday();
-    let mon_to_thu = weekday.number_from_monday() <= 4;
-    let early = match (date.month(), date.day()) {
-        (7, 3) | (12, 24) => mon_to_thu,
-        // Fourth Thursday of November is day 22–28, so the Friday is 23–29.
-        (11, day) => weekday == Weekday::Fri && (23..=29).contains(&day),
-        _ => false,
-    };
-    if early {
-        EARLY_CLOSE_MIN
-    } else {
-        SESSION_CLOSE_MIN
-    }
+/// Decisions happen at bar closes on the half-hour from 10:00 until the
+/// last one before the close.
+fn is_decision(clock: &BarClock) -> bool {
+    DECISION_INTERVAL_MIN % clock.bar_minutes == 0
+        && (FIRST_DECISION_MIN..clock.session_close_min).contains(&clock.close_min)
+        && (clock.close_min - FIRST_DECISION_MIN) % DECISION_INTERVAL_MIN == 0
 }
 
 /// Regular-session bars of one New York date, indexed by slot from the open.
@@ -192,12 +146,10 @@ impl NoiseAreaParams {
     ) -> Option<Vec<Session>> {
         let mut sessions: Vec<Session> = Vec::new();
         for candle in candles.iter().rev() {
-            let ny = candle.time.with_timezone(&New_York);
-            let start_min = i64::from(ny.hour()) * 60 + i64::from(ny.minute());
-            if !(SESSION_OPEN_MIN..SESSION_CLOSE_MIN).contains(&start_min) {
+            let (date, start_min) = ny_open(candle);
+            if !in_regular_session(start_min) {
                 continue;
             }
-            let date = ny.date_naive();
             if sessions.last().is_none_or(|s| s.date != date) {
                 let complete_prior = sessions.iter().skip(1).filter(|s| s.is_complete()).count();
                 if complete_prior >= self.lookback_sessions {
@@ -214,13 +166,13 @@ impl NoiseAreaParams {
             }
         }
 
-        let today = candles.last()?.time.with_timezone(&New_York).date_naive();
+        let (today, _) = ny_open(candles.last()?);
         (sessions.first()?.date == today).then_some(sessions)
     }
 
     fn bands_at_decision(&self, candles: &[Candle]) -> Option<Bands> {
         let clock = BarClock::of(candles)?;
-        if !clock.is_decision() {
+        if !is_decision(&clock) {
             return None;
         }
         self.bands(candles, &clock)
@@ -247,7 +199,7 @@ impl Signaler for NoiseAreaParams {
             ("exit_short".to_string(), false),
             ("session_close".to_string(), clock.is_session_close()),
         ]);
-        if !clock.is_decision() {
+        if !is_decision(&clock) {
             return Some(ports);
         }
 
@@ -259,6 +211,20 @@ impl Signaler for NoiseAreaParams {
         ports.insert("exit_long".to_string(), b.price < b.upper.max(b.vwap));
         ports.insert("exit_short".to_string(), b.price > b.lower.min(b.vwap));
         Some(ports)
+    }
+
+    /// The band and the day's average price at decision bars, where the
+    /// strategy looks at them.
+    fn series(&self, candles: &[Candle]) -> HashMap<String, f64> {
+        self.bands_at_decision(candles)
+            .map(|b| {
+                HashMap::from([
+                    ("upper".to_string(), b.upper),
+                    ("lower".to_string(), b.lower),
+                    ("vwap".to_string(), b.vwap),
+                ])
+            })
+            .unwrap_or_default()
     }
 
     fn entry_reason(&self, candles: &[Candle], _direction: Direction) -> EntryReason {
@@ -291,7 +257,7 @@ impl Signaler for NoiseAreaParams {
 mod tests {
     use super::*;
     use crate::engine::types::OHLC;
-    use chrono::{DateTime, TimeZone, Utc};
+    use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
 
     /// 2026-01-05 is a Monday in EST (UTC−5): 09:30 New York = 14:30 UTC.
     fn session_start(day: i64) -> DateTime<Utc> {
@@ -399,17 +365,6 @@ mod tests {
         let candles = history(14, &[100.0; 78]);
         let ports = params().compute(&candles).expect("computes");
         assert!(ports["session_close"]);
-    }
-
-    #[test]
-    fn early_close_days_follow_nyse_rules() {
-        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
-        assert_eq!(session_close_min(d(2025, 11, 28)), EARLY_CLOSE_MIN); // Black Friday
-        assert_eq!(session_close_min(d(2024, 12, 24)), EARLY_CLOSE_MIN); // Tuesday
-        assert_eq!(session_close_min(d(2025, 7, 3)), EARLY_CLOSE_MIN); // Thursday
-        assert_eq!(session_close_min(d(2026, 7, 3)), SESSION_CLOSE_MIN); // Friday: holiday
-        assert_eq!(session_close_min(d(2021, 12, 24)), SESSION_CLOSE_MIN); // Friday: holiday
-        assert_eq!(session_close_min(d(2025, 11, 21)), SESSION_CLOSE_MIN); // a week early
     }
 
     #[test]

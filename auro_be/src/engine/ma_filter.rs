@@ -28,6 +28,12 @@ impl Signaler for MaFilterParams {
         Some(ports)
     }
 
+    fn series(&self, candles: &[Candle]) -> HashMap<String, f64> {
+        indicators::moving_average(candles, self.period, self.ma_type)
+            .map(|ma| HashMap::from([("ma".to_string(), ma)]))
+            .unwrap_or_default()
+    }
+
     fn entry_reason(&self, candles: &[Candle], direction: Direction) -> EntryReason {
         let close = candles.last().map(|c| c.mid.close).unwrap_or(0.0);
         let ma = indicators::moving_average(candles, self.period, self.ma_type).unwrap_or(0.0);
@@ -87,5 +93,22 @@ mod tests {
             ma_type: MaType::Sma,
         };
         assert!(params.compute(&candles).is_none());
+    }
+
+    #[test]
+    fn series_reports_the_average_to_draw() {
+        let params = MaFilterParams {
+            period: 3,
+            ma_type: MaType::Sma,
+        };
+        let candles = vec![
+            candle(1.0, 0),
+            candle(2.0, 1),
+            candle(3.0, 2),
+            candle(4.0, 3),
+        ];
+
+        assert_eq!(params.series(&candles)["ma"], 3.0);
+        assert!(params.series(&candles[..2]).is_empty());
     }
 }
