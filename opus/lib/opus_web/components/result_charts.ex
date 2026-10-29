@@ -153,6 +153,125 @@ defmodule OpusWeb.ResultCharts do
     }
   end
 
+  attr :with_rules, :map, default: nil, doc: "Together.run/1 outcome, or nil without limits"
+  attr :without_rules, :map, required: true, doc: "Together.run/1 outcome"
+  attr :from, :any, required: true
+  attr :to, :any, required: true
+
+  @doc """
+  Several strategies on one account: its running return with the safety
+  rules (solid) and without them (dashed), on one time axis, and how far it
+  fell from its best with the rules.
+  """
+  def account_curve(assigns) do
+    main = assigns.with_rules || assigns.without_rules
+    series = Enum.reject([assigns.with_rules, assigns.without_rules], &is_nil/1)
+    values = series |> Enum.flat_map(& &1.points) |> Enum.map(& &1.equity)
+    {lo, hi} = Enum.min_max([0.0 | values])
+    span = if hi == lo, do: 1.0, else: hi - lo
+    t0 = DateTime.to_unix(assigns.from)
+    width_s = max(DateTime.to_unix(assigns.to) - t0, 1)
+    x = fn at -> Float.round((DateTime.to_unix(at) - t0) / width_s * @width, 1) end
+    y = fn v -> Float.round(6 + (hi - v) / span * (@height - 12), 1) end
+
+    # A step line: the account only moves when a trade closes.
+    line = fn %{points: points} ->
+      points
+      |> Enum.chunk_every(2, 1)
+      |> Enum.map_join(" ", fn
+        [a, b] -> "#{x.(a.time)},#{y.(a.equity)} #{x.(b.time)},#{y.(a.equity)}"
+        [a] -> "#{x.(a.time)},#{y.(a.equity)} #{@width},#{y.(a.equity)}"
+      end)
+    end
+
+    worst = main.points |> Enum.map(& &1.drawdown) |> Enum.min(fn -> 0.0 end)
+    dd_span = if worst == 0, do: 1.0, else: abs(worst)
+
+    assigns =
+      assign(assigns,
+        width: @width,
+        height: @height,
+        dd_height: @dd_height,
+        zero: y.(0.0),
+        solid: line.(main),
+        dashed: assigns.with_rules && line.(assigns.without_rules),
+        drawdown:
+          "0,0 " <>
+            Enum.map_join(main.points, " ", fn p ->
+              "#{x.(p.time)},#{Float.round(abs(p.drawdown) / dd_span * (@dd_height - 2), 1)}"
+            end) <> " #{@width},0"
+      )
+
+    ~H"""
+    <div class="flex flex-col gap-2">
+      <svg
+        role="img"
+        aria-label="The account's running return with all the chosen strategies"
+        viewBox={"0 0 #{@width} #{@height}"}
+        preserveAspectRatio="none"
+        class="block h-[150px] w-full"
+      >
+        <line
+          x1="0"
+          x2={@width}
+          y1={@zero}
+          y2={@zero}
+          stroke="var(--color-base-300)"
+          vector-effect="non-scaling-stroke"
+        />
+        <polyline
+          :if={@dashed}
+          points={@dashed}
+          fill="none"
+          stroke="var(--color-neutral-content)"
+          stroke-width="1.5"
+          stroke-dasharray="5 4"
+          vector-effect="non-scaling-stroke"
+        />
+        <polyline
+          points={@solid}
+          fill="none"
+          stroke="var(--color-primary)"
+          stroke-width="2"
+          vector-effect="non-scaling-stroke"
+        />
+      </svg>
+      <div class="flex flex-wrap justify-between gap-x-4 gap-y-1 text-[12px] text-muted">
+        <span class="flex flex-wrap gap-x-4">
+          <span class="inline-flex items-center gap-1.5">
+            <span aria-hidden="true" class="inline-block h-0.5 w-4 bg-primary"></span>
+            {if @with_rules, do: "With your safety rules", else: "Together"} {signed_pct(
+              (@with_rules || @without_rules).total_return,
+              0
+            )}
+          </span>
+          <span :if={@with_rules} class="inline-flex items-center gap-1.5">
+            <span
+              aria-hidden="true"
+              class="inline-block w-4 border-t border-dashed border-neutral-content"
+            ></span>
+            Without them {signed_pct(@without_rules.total_return, 0)}
+          </span>
+        </span>
+        <span>{date(@from)} – {date(@to)}</span>
+      </div>
+      <svg
+        role="img"
+        aria-label="How far the account fell from its best"
+        viewBox={"0 0 #{@width} #{@dd_height}"}
+        preserveAspectRatio="none"
+        class="block h-[34px] w-full"
+      >
+        <polygon points={@drawdown} fill="var(--color-error)" fill-opacity="0.45" />
+      </svg>
+      <p class="m-0 text-[12px] text-muted">
+        Red: how far the account was below its best. Each trade is sized the way the live engine sizes it
+        (its risk per trade against its stop), on one account.
+      </p>
+    </div>
+    """
+  end
+
   attr :grid, :map, required: true, doc: "Fragility.shape/3"
   attr :x_label, :string, required: true
   attr :y_label, :string, default: nil

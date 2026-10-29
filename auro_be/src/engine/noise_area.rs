@@ -35,6 +35,7 @@ use crate::engine::types::{Candle, Direction, EntryReason};
 /// Minutes after midnight New York time.
 const FIRST_DECISION_MIN: i64 = 10 * 60;
 const DECISION_INTERVAL_MIN: i64 = 30;
+const M5_BARS_PER_DAY: usize = 24 * 60 / 5;
 
 fn default_lookback_sessions() -> usize {
     14
@@ -180,11 +181,13 @@ impl NoiseAreaParams {
 }
 
 impl Signaler for NoiseAreaParams {
-    /// Lower bound in M5 regular-session bars. The real requirement — enough
-    /// complete prior sessions — is checked at each decision bar, since CFD
-    /// candles also cover the overnight session.
+    /// Whole days of M5 bars, not regular-session bars: CFD candles also
+    /// cover the overnight session, so a window sized to 6½ hours a day
+    /// holds only about a third of the sessions the band needs. The real
+    /// requirement — enough complete prior sessions — is still checked at
+    /// each decision bar.
     fn warmup(&self) -> usize {
-        (self.lookback_sessions + 1) * ((SESSION_CLOSE_MIN - SESSION_OPEN_MIN) / 5) as usize
+        (self.lookback_sessions + 1) * M5_BARS_PER_DAY
     }
 
     /// Non-decision bars always compute (all signal ports false) so the
@@ -379,6 +382,33 @@ mod tests {
             .compute(&candles)
             .expect("non-decision bars compute");
         assert!(ports["session_close"]);
+    }
+
+    #[test]
+    fn warmup_window_holds_enough_sessions_of_round_the_clock_bars() {
+        // CFD candles run around the clock: 288 bars a weekday, then today
+        // from midnight UTC to the 10:00 New York decision bar. The history
+        // runs longer than the warmup, as the live buffer and backtests do.
+        let mut candles = Vec::new();
+        for day in 0..=20 {
+            let midnight = session_start(day) - Duration::minutes(14 * 60 + 30);
+            let open = session_start(day);
+            let bars = if day == 20 { 180 } else { 288 };
+            for slot in 0..bars {
+                let time = midnight + Duration::minutes(5 * slot);
+                let close = if day == 20 && time >= open {
+                    100.5
+                } else {
+                    100.1
+                };
+                candles.push(bar(time, 100.0, close));
+            }
+        }
+
+        let p = params();
+        let window = &candles[candles.len() - p.warmup()..];
+        let ports = p.compute(window).expect("warmup window holds 14 sessions");
+        assert!(ports["long"]);
     }
 
     #[test]
