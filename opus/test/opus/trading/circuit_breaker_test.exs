@@ -178,6 +178,39 @@ defmodule Opus.Trading.CircuitBreakerTest do
     end)
   end
 
+  test "standing counts the current losing streak and the window's losses" do
+    strategy_id = "33333333-3333-3333-3333-333333333333"
+    now = DateTime.utc_now()
+
+    Repo.insert!(%LiveStrategy{
+      id: strategy_id,
+      strategy_type: "composite",
+      instrument: "SPX500_USD",
+      granularity: "D",
+      parameters: %{},
+      enabled: true,
+      created_at: now,
+      updated_at: now
+    })
+
+    # Newest first: two losses, then a win, then a loss 40 days ago.
+    for {pnl, days} <- [{-0.01, 1}, {-0.02, 2}, {0.04, 3}, {-0.05, 40}] do
+      Repo.insert!(%LiveTrade{
+        live_strategy_id: strategy_id,
+        status: "closed",
+        pnl_percent: pnl,
+        exit_time: DateTime.add(now, -days * 86_400, :second),
+        created_at: now,
+        updated_at: now
+      })
+    end
+
+    standing = CircuitBreaker.standing(strategy_id, Opus.Trading.AccountLimits.get())
+    assert standing.streak == 2
+    assert standing.window_trades == 3
+    assert_in_delta standing.window_sum, 0.01, 1.0e-12
+  end
+
   defp active_suspension_count(strategy_id) do
     from(s in Suspension,
       where: s.live_strategy_id == ^strategy_id and is_nil(s.cleared_at),

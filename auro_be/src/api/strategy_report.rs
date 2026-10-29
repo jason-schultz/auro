@@ -6,6 +6,7 @@
 //!
 //! - `POST /api/strategy/report`: the strategy's running return against just
 //!   holding the instrument, and its drawdown (`engine::report::equity`).
+//! - `POST /api/strategy/trades`: every trade the backtest made.
 //! - `POST /api/strategy/sensitivity`: the strategy re-run at a grid of
 //!   nearby settings (up to 49), each judged by the backtest thresholds the
 //!   pipeline uses, so a sturdy result shows as a neighbourhood that passes
@@ -35,7 +36,7 @@ const MAX_CELLS: usize = 49;
 
 /// Threads a sensitivity grid uses: half the cores on the 8-core machine it
 /// runs on, so the live price stream is never starved.
-const WORKERS: usize = 4;
+pub(super) const WORKERS: usize = 4;
 
 #[derive(Deserialize)]
 pub struct ReportRequest {
@@ -73,6 +74,35 @@ pub async fn equity_report(
     .await?;
 
     Ok(Json(json!({ "report": report })))
+}
+
+/// `POST /api/strategy/trades`: every trade the backtest made, oldest
+/// first, for comparing a strategy's live trades with what its backtest
+/// calls normal (Opus's drift check).
+pub async fn backtest_trades(
+    State(state): State<AppState>,
+    Json(req): Json<ReportRequest>,
+) -> AppResult<Json<Value>> {
+    let config = config_of(req.parameters)?;
+    let candles = pipeline::load_exploration_candles(&state.db, &config).await?;
+    let financing = pipeline::load_financing(&state.db).await?;
+
+    let body = blocking(move || {
+        let trades = run_strategy(&candles, &config, &financing)?;
+        let (from, to) = pipeline::span(&candles);
+        Ok(json!({
+            "from": from,
+            "to": to,
+            "trades": trades.iter().map(|t| json!({
+                "entry_time": t.entry_time,
+                "exit_time": t.exit_time,
+                "pnl_percent": t.pnl_percent,
+            })).collect::<Vec<_>>(),
+        }))
+    })
+    .await?;
+
+    Ok(Json(body))
 }
 
 pub async fn sensitivity(
@@ -169,7 +199,7 @@ pub async fn sensitivity(
 }
 
 /// The pipeline's view of a strategy JSON: its instrument and timeframe.
-fn config_of(parameters: Value) -> AppResult<StrategyConfig> {
+pub(super) fn config_of(parameters: Value) -> AppResult<StrategyConfig> {
     let field = |key: &str| {
         parameters
             .get(key)
@@ -191,7 +221,7 @@ fn config_of(parameters: Value) -> AppResult<StrategyConfig> {
     })
 }
 
-async fn blocking<T, F>(work: F) -> AppResult<T>
+pub(super) async fn blocking<T, F>(work: F) -> AppResult<T>
 where
     F: FnOnce() -> AppResult<T> + Send + 'static,
     T: Send + 'static,

@@ -557,6 +557,7 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
                     exit_time: candles[j].time,
                     pnl_percent: pnl,
                     entry_reason,
+                    stop_price,
                     exit_reason: ExitReason::StopLoss,
                 });
                 exited = true;
@@ -579,6 +580,7 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
                         exit_time: candles[j].time,
                         pnl_percent: pnl,
                         entry_reason,
+                        stop_price,
                         exit_reason: ExitReason::TimeStop,
                     });
                     exited = true;
@@ -609,6 +611,7 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
                     exit_time: candles[j].time,
                     pnl_percent: pnl,
                     entry_reason,
+                    stop_price,
                     exit_reason: ExitReason::TrendReversal,
                 });
                 exited = true;
@@ -633,6 +636,7 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
                 exit_time: last.time,
                 pnl_percent: pnl,
                 entry_reason,
+                stop_price,
                 exit_reason: ExitReason::EndOfData,
             });
             break;

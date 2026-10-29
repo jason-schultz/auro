@@ -118,6 +118,17 @@ pub fn calculate_backtest_stats(
 /// √252. Days out of the market count, so a strategy that trades rarely
 /// isn't flattered. 0 with under two days or no variation.
 pub fn annual_sharpe(trades: &[Trade], from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
+    let returns = trades.iter().map(|t| (t.exit_time, t.pnl_percent));
+    annual_sharpe_of(&daily_returns(returns, from, to))
+}
+
+/// Returns booked on the UTC day they close, every weekday from `from` to
+/// `to` present (0 when nothing closed that day).
+pub fn daily_returns(
+    returns: impl IntoIterator<Item = (DateTime<Utc>, f64)>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> BTreeMap<NaiveDate, f64> {
     let mut days: BTreeMap<NaiveDate, f64> = BTreeMap::new();
     let (first, last) = (from.date_naive(), to.date_naive());
     let mut day = first;
@@ -127,10 +138,14 @@ pub fn annual_sharpe(trades: &[Trade], from: DateTime<Utc>, to: DateTime<Utc>) -
         }
         day += Duration::days(1);
     }
-    for trade in trades {
-        *days.entry(trade.exit_time.date_naive()).or_insert(0.0) += trade.pnl_percent;
+    for (at, r) in returns {
+        *days.entry(at.date_naive()).or_insert(0.0) += r;
     }
+    days
+}
 
+/// The annual Sharpe of a daily return series (`daily_returns`).
+pub fn annual_sharpe_of(days: &BTreeMap<NaiveDate, f64>) -> f64 {
     let n = days.len() as f64;
     if n < 2.0 {
         return 0.0;
@@ -165,6 +180,7 @@ mod tests {
                 slow_ma: 0.0,
             },
             exit_reason: ExitReason::TrendReversal,
+            stop_price: 0.0,
         }
     }
 

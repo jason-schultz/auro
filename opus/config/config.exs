@@ -55,6 +55,9 @@ config :opus, Oban,
        {"30 20 * * 1-5", Opus.MarketData.FinancingSnapshotWorker},
        # Daily; also keeps newly created event strategies current within a day.
        {"15 0 * * *", Opus.MarketData.EventWindowSyncWorker},
+       # 17:15 New York on trading days, after the close: each live strategy
+       # against its backtest (Opus.Trading.DriftWorker).
+       {"15 17 * * 1-5", Opus.Trading.DriftWorker, timezone: "America/New_York"},
        # Monday 12:00 UTC (08:00 ET): snapshot last week's forward-test numbers.
        {"0 12 * * 1", Opus.Journal.DigestWorker},
        # Dashboard alerts to Discord: new ones every 5 minutes, and a check-in

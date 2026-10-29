@@ -836,6 +836,7 @@ mod tests {
                 slow_ma: 0.0,
             },
             exit_reason: ExitReason::TrendReversal,
+            stop_price: 0.0,
         }
     }
 

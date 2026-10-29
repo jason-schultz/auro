@@ -163,6 +163,16 @@ defmodule Opus.Trading.Strategies do
   end
 
   @doc """
+  An assignment's full strategy JSON as the engine runs it: its recipe with
+  its instrument, the recipe's timeframe and its sizing (`compose/4`).
+  """
+  @spec engine_parameters(LiveStrategy.t()) :: map()
+  def engine_parameters(%LiveStrategy{} = strategy) do
+    %{recipe: recipe} = strategy = Repo.preload(strategy, :recipe)
+    compose(recipe.definition, strategy.instrument, recipe.granularity, strategy.sizing)
+  end
+
+  @doc """
   Where the recipe would have bought and sold over the last `count` bars of
   `instrument`, shaped for a chart (`Opus.Trading.SignalChart`). Needs the
   engine, which also checks the rules: a recipe it can't read comes back

@@ -161,7 +161,7 @@ defmodule Opus.Trading.RulesEngine do
       enabled: enabled,
       reason: reason,
       regime_inputs: to_structured_regime_inputs(composite, inputs),
-      risk_pct: risk_pct(strategy.sizing),
+      risk_pct: AccountLimits.risk_pct(strategy.sizing),
       computed_at: DateTime.utc_now()
     }
   end
@@ -174,11 +174,6 @@ defmodule Opus.Trading.RulesEngine do
   defp safety(nil, %{trigger_detail: detail}), do: {false, "circuit_breaker: #{detail}"}
   defp safety(nil, nil), do: {true, "clear: no safety rule is holding it"}
 
-  # The share of NAV each of a strategy's trades risks, for the engine's
-  # account risk budget.
-  defp risk_pct(%{"type" => "RiskPct", "params" => %{"pct" => pct}}) when is_number(pct), do: pct
-  defp risk_pct(_sizing), do: nil
-
   # The limits the engine checks when a trade opens (`AccountLimits`), with
   # each instrument's group. Nil before the limits exist: nothing is checked.
   defp limits(strategies) do
@@ -190,22 +185,9 @@ defmodule Opus.Trading.RulesEngine do
         %{
           risk_budget: budget / 100,
           max_open_per_group: per_group,
-          groups: groups(Enum.map(strategies, & &1.instrument))
+          groups: AccountLimits.groups(Enum.map(strategies, & &1.instrument))
         }
     end
-  end
-
-  # Asset class per instrument; FX majors and crosses are one group.
-  defp groups(instruments) do
-    from(i in "instruments",
-      where: i.oanda_symbol in ^Enum.uniq(instruments),
-      select: {i.oanda_symbol, i.asset_class}
-    )
-    |> Repo.all()
-    |> Map.new(fn
-      {symbol, "fx_" <> _} -> {symbol, "fx"}
-      {symbol, class} -> {symbol, class}
-    end)
   end
 
   defp regime_inputs_for_strategy(strategy, regimes) do

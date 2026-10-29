@@ -206,38 +206,88 @@ impl Rules {
         open: impl IntoIterator<Item = &'a OpenPosition>,
     ) -> Option<String> {
         let limits = self.limits.as_ref()?;
-        let group_of = |i: &'a str| limits.groups.get(i).map_or(i, String::as_str);
-        let group = limits
-            .groups
-            .get(instrument)
-            .map_or(instrument, String::as_str);
-
-        let (open_risk, in_group) = open.into_iter().fold((0.0, 0), |(risk, n), p| {
-            let p_risk = self
+        let open = open.into_iter().map(|p| {
+            let risk = self
                 .by_strategy_id
                 .get(&p.strategy_id)
                 .and_then(|r| r.risk_pct)
                 .unwrap_or(DEFAULT_POSITION_RISK);
-            (
-                risk + p_risk,
-                n + usize::from(group_of(&p.instrument) == group),
-            )
+            (p.instrument.as_str(), risk)
         });
+        limits
+            .breach(instrument, new_risk, open)
+            .map(|b| b.to_string())
+    }
+}
 
-        if in_group >= limits.max_open_per_group {
-            return Some(format!(
-                "concentration_cap: {in_group} {group} trades open, the limit is {}",
-                limits.max_open_per_group
-            ));
-        }
-        // A whisker of slack so 5 × 1% doesn't fail a 5% budget on rounding.
-        if open_risk + new_risk > limits.risk_budget + 1e-9 {
-            return Some(format!(
+/// Which account limit a new trade would break.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Breach {
+    GroupCap {
+        group: String,
+        open: usize,
+        limit: usize,
+    },
+    RiskBudget {
+        open_risk: f64,
+        new_risk: f64,
+        budget: f64,
+    },
+}
+
+impl std::fmt::Display for Breach {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Breach::GroupCap { group, open, limit } => write!(
+                f,
+                "concentration_cap: {open} {group} trades open, the limit is {limit}"
+            ),
+            Breach::RiskBudget {
+                open_risk,
+                new_risk,
+                budget,
+            } => write!(
+                f,
                 "risk_budget: {:.1}% of NAV at risk plus {:.1}% is over the {:.1}% budget",
                 open_risk * 100.0,
                 new_risk * 100.0,
-                limits.risk_budget * 100.0
-            ));
+                budget * 100.0
+            ),
+        }
+    }
+}
+
+impl AccountLimits {
+    /// The limit a new trade on `instrument` risking `new_risk` of NAV would
+    /// break, given the open trades as `(instrument, risk)`, or None when it
+    /// fits. The one check both live entries and the combined backtest use.
+    pub fn breach<'a>(
+        &self,
+        instrument: &str,
+        new_risk: f64,
+        open: impl IntoIterator<Item = (&'a str, f64)>,
+    ) -> Option<Breach> {
+        let group_of = |i: &str| self.groups.get(i).cloned().unwrap_or_else(|| i.to_string());
+        let group = group_of(instrument);
+
+        let (open_risk, in_group) = open.into_iter().fold((0.0, 0), |(risk, n), (i, r)| {
+            (risk + r, n + usize::from(group_of(i) == group))
+        });
+
+        if in_group >= self.max_open_per_group {
+            return Some(Breach::GroupCap {
+                group,
+                open: in_group,
+                limit: self.max_open_per_group,
+            });
+        }
+        // A whisker of slack so 5 × 1% doesn't fail a 5% budget on rounding.
+        if open_risk + new_risk > self.risk_budget + 1e-9 {
+            return Some(Breach::RiskBudget {
+                open_risk,
+                new_risk,
+                budget: self.risk_budget,
+            });
         }
         None
     }

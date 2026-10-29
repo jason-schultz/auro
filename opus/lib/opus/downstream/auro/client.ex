@@ -318,6 +318,42 @@ defmodule Opus.Auro.Client do
   end
 
   @doc """
+  Every trade a strategy's backtest made over the history the pipeline
+  backtests (POST /api/strategy/trades). Answers
+  `%{"from", "to", "trades" => [%{"entry_time", "exit_time", "pnl_percent"}]}`.
+  """
+  @spec backtest_trades(map()) :: {:ok, map()} | {:error, any()}
+  def backtest_trades(parameters) when is_map(parameters) do
+    client()
+    |> Req.post(
+      url: "/api/strategy/trades",
+      json: %{parameters: parameters},
+      receive_timeout: 60_000,
+      retry: false
+    )
+    |> handle_response(:quiet)
+  end
+
+  @doc """
+  Strategies backtested together on one account, with the account limits
+  (`limits`, or nil for none) applied as live (POST /api/strategy/portfolio).
+  `plays` are `%{key, parameters, breaker_exempt}`. With `base` (a play's
+  key) it answers each other play paired with that one instead. Slow: every
+  play is backtested, so a long list of 5-minute strategies takes a minute.
+  """
+  @spec portfolio([map()], map() | nil, String.t() | nil) :: {:ok, map()} | {:error, any()}
+  def portfolio(plays, limits, base \\ nil) when is_list(plays) do
+    client()
+    |> Req.post(
+      url: "/api/strategy/portfolio",
+      json: %{plays: plays, limits: limits, base: base},
+      receive_timeout: 300_000,
+      retry: false
+    )
+    |> handle_response(:quiet)
+  end
+
+  @doc """
   The strategy re-run at a grid of nearby settings, each judged by the
   backtest standard (POST /api/strategy/sensitivity). `x` and `y` are
   `%{component, param, values}`; `y` may be nil for a single row. Answers

@@ -381,6 +381,9 @@ pub struct Trade {
     pub pnl_percent: f64,
     pub entry_reason: EntryReason,
     pub exit_reason: ExitReason,
+    /// The stop-loss price set at entry: with the entry price it gives the
+    /// distance a risk-based size is measured against.
+    pub stop_price: f64,
 }
 
 #[cfg(test)]

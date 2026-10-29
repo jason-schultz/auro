@@ -9,6 +9,7 @@ mod live_strategies;
 mod massive;
 mod options;
 mod pipeline;
+mod portfolio;
 mod positions;
 mod questrade;
 mod rules;
@@ -45,6 +46,11 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/strategy/sensitivity",
             post(strategy_report::sensitivity),
+        )
+        .route("/api/strategy/portfolio", post(portfolio::portfolio))
+        .route(
+            "/api/strategy/trades",
+            post(strategy_report::backtest_trades),
         )
         .route("/api/open-trades", get(account::get_open_trades))
         .route(

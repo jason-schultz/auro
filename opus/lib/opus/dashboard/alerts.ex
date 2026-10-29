@@ -21,6 +21,7 @@ defmodule Opus.Dashboard.Alerts do
       puts aside: losing their premium is their plan).
 
   **Check soon (`:check`)**
+    * A live strategy isn't behaving like its backtest (`Opus.Trading.Drift`).
     * A paper short leg is within 2% of its strike.
     * A paper trade's 21-day check is 0–3 days away.
     * A paper trade is within 10% of its take-profit.
@@ -86,6 +87,7 @@ defmodule Opus.Dashboard.Alerts do
       suspensions(input),
       failed_jobs(input),
       stale_candles(input),
+      drift(input),
       offline_brokers(input),
       paper_in_the_money(input),
       paper_deliveries(input),
@@ -340,6 +342,22 @@ defmodule Opus.Dashboard.Alerts do
   defp losing_big?(_trade), do: false
 
   # --- check -------------------------------------------------------------
+
+  defp drift(%{drift: rows}) do
+    for d <- rows do
+      alert(
+        :check,
+        "drift:#{d.id}",
+        "#{d.name} on #{d.instrument} isn't behaving like its backtest",
+        d.detail,
+        "Read the check on its page. If it still looks wrong after a few more trades, " <>
+          "switch it off; if it's a slow patch, leave it: the circuit breaker still watches it.",
+        "/strategies/#{d.id}"
+      )
+    end
+  end
+
+  defp drift(_input), do: []
 
   defp paper_near_strike(%{paper: trades}) do
     for t <- trades,

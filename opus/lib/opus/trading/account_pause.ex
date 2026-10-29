@@ -50,6 +50,24 @@ defmodule Opus.Trading.AccountPause do
     end
   end
 
+  @doc """
+  How far the account is below the peak the pause measures from, for the
+  Safety page: `%{peak, nav, drawdown, from}`, or nil before there's an
+  account snapshot (or before the limits exist).
+  """
+  @spec standing() :: %{peak: float(), nav: float(), drawdown: float(), from: DateTime.t()} | nil
+  def standing do
+    with %{since: since} <- AccountLimits.get(),
+         from = baseline(since),
+         %{peak: peak, nav: nav} when is_number(peak) and is_number(nav) <- nav_since(from) do
+      # The newest snapshot can be the peak's only point; never above it.
+      peak = max(peak, nav)
+      %{peak: peak, nav: nav, drawdown: drawdown(peak, nav), from: from}
+    else
+      _ -> nil
+    end
+  end
+
   @doc "Whether NAV is `limit_pct` percent or more below `peak`."
   @spec tripped?(number(), number(), number()) :: boolean()
   def tripped?(peak, nav, limit_pct) when peak > 0, do: drawdown(peak, nav) >= limit_pct / 100

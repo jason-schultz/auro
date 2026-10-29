@@ -41,6 +41,8 @@ defmodule OpusWeb.Layouts do
         <nav class="flex min-w-0 items-center gap-5 overflow-x-auto whitespace-nowrap text-sm">
           <.link navigate={~p"/"} class="py-2 text-muted hover:text-base-content"><.t {copy("Dashboard")} /></.link>
           <.link navigate={~p"/strategies"} class="py-2 text-muted hover:text-base-content"><.t {copy("Strategies")} /></.link>
+          <.link navigate={~p"/together"} class="py-2 text-muted hover:text-base-content"><.t {copy("Together")} /></.link>
+          <.link navigate={~p"/safety"} class="py-2 text-muted hover:text-base-content"><.t {copy("Safety")} /></.link>
           <.link navigate={~p"/journal"} class="py-2 text-muted hover:text-base-content"><.t {copy("Journal")} /></.link>
           <.link navigate={~p"/accounts"} class="py-2 text-muted hover:text-base-content"><.t {copy("Accounts")} /></.link>
           <.link navigate={~p"/options"} class="py-2 text-muted hover:text-base-content"><.t {copy("Options")} /></.link>

@@ -4,11 +4,13 @@ defmodule Opus.Trading.CircuitBreaker do
   go badly, until a person resets it (`Opus.Trading.Strategies.reset_suspension/1`).
   An open suspension makes `Opus.Trading.RulesEngine` hold the strategy back.
 
-  The same limits for every strategy:
+  The same limits for every strategy, set on the Safety page
+  (`Opus.Trading.AccountLimits`):
 
-  - `@consecutive_losses` losing trades in a row, or
-  - its trades' returns summing below `@rolling_drawdown` over the last
-    `@rolling_window_days` days, once it has at least `@rolling_min_sample`.
+  - `breaker_losses` losing trades in a row, or
+  - its trades' returns summing below minus `breaker_drawdown_pct` over the
+    last `breaker_window_days` days, once it has at least `@min_trades`
+    trades in that window.
 
   Only trades closed since the strategy's last reset count, so a reset
   gives it a fresh start instead of tripping again on the same losses.
@@ -21,6 +23,7 @@ defmodule Opus.Trading.CircuitBreaker do
   require Logger
 
   alias Opus.Repo
+  alias Opus.Trading.AccountLimits
   alias Opus.Trading.LiveStrategy
   alias Opus.Trading.LiveTrade
   alias Opus.Trading.RulesEngine
@@ -31,10 +34,7 @@ defmodule Opus.Trading.CircuitBreaker do
 
   @poll_interval :timer.minutes(20)
   @initial_delay :timer.seconds(30)
-  @consecutive_losses 5
-  @rolling_drawdown -0.08
-  @rolling_window_days 30
-  @rolling_min_sample 5
+  @min_trades 5
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -50,17 +50,42 @@ defmodule Opus.Trading.CircuitBreaker do
     GenServer.call(__MODULE__, :last_run)
   end
 
+  @doc "Trades a strategy needs in the window before the drawdown limit applies."
+  @spec min_trades() :: pos_integer()
+  def min_trades, do: @min_trades
+
+  @doc """
+  Where a strategy stands against the breaker: its current losing streak
+  and its trades' summed return over the window, both since its last reset.
+  """
+  @spec standing(Ecto.UUID.t(), AccountLimits.t()) :: %{
+          streak: non_neg_integer(),
+          window_sum: float(),
+          window_trades: non_neg_integer()
+        }
+  def standing(strategy_id, limits) do
+    trades = trades_since_reset(strategy_id)
+    window = in_window(trades, limits)
+
+    %{
+      streak: Enum.take_while(trades, &(&1.pnl < 0)) |> length(),
+      window_sum: Enum.sum_by(window, & &1.pnl) / 1,
+      window_trades: length(window)
+    }
+  end
+
   @doc "Runs one circuit-breaker evaluation cycle immediately."
   @spec run_cycle() :: %{evaluated: non_neg_integer(), triggered: non_neg_integer()}
   def run_cycle do
     strategies = list_enabled_strategies()
     open_ids = open_suspension_ids(strategies)
     candidates = Enum.reject(strategies, &MapSet.member?(open_ids, &1.id))
+    limits = AccountLimits.get()
 
     triggered =
       candidates
       |> Enum.reduce(0, fn strategy, acc ->
-        case maybe_suspend(strategy) do
+        case maybe_suspend(strategy, limits) do
           :inserted -> acc + 1
           _ -> acc
         end
@@ -127,42 +152,48 @@ defmodule Opus.Trading.CircuitBreaker do
     |> MapSet.new()
   end
 
-  defp maybe_suspend(strategy) do
+  # Nothing to check against before the limits exist.
+  defp maybe_suspend(_strategy, nil), do: :ok
+
+  defp maybe_suspend(strategy, limits) do
     trades = trades_since_reset(strategy.id)
 
     cond do
-      losing_streak?(trades) ->
+      losing_streak?(trades, limits.breaker_losses) ->
         create_suspension(
           strategy.id,
           "consecutive_losses",
-          "#{@consecutive_losses} losing trades in a row"
+          "#{limits.breaker_losses} losing trades in a row"
         )
 
-      rolling = rolling_drawdown(trades) ->
-        create_suspension(strategy.id, "rolling_drawdown", rolling_detail(rolling))
+      rolling = rolling_drawdown(trades, limits) ->
+        create_suspension(strategy.id, "rolling_drawdown", rolling_detail(rolling, limits))
 
       true ->
         :ok
     end
   end
 
-  defp losing_streak?(trades) do
-    latest = Enum.take(trades, @consecutive_losses)
-    length(latest) == @consecutive_losses and Enum.all?(latest, &(&1.pnl < 0))
+  defp losing_streak?(trades, losses) do
+    latest = Enum.take(trades, losses)
+    length(latest) == losses and Enum.all?(latest, &(&1.pnl < 0))
   end
 
   # The window's trades when they sum below the limit, else nil.
-  defp rolling_drawdown(trades) do
-    window_start = DateTime.add(DateTime.utc_now(), -@rolling_window_days, :day)
-    window = Enum.filter(trades, &(DateTime.compare(&1.exit_time, window_start) != :lt))
+  defp rolling_drawdown(trades, limits) do
+    window = in_window(trades, limits)
     sum = Enum.sum_by(window, & &1.pnl)
 
-    if length(window) >= @rolling_min_sample and sum < @rolling_drawdown,
+    if length(window) >= @min_trades and sum < -limits.breaker_drawdown_pct / 100,
       do: %{count: length(window), sum: sum}
   end
 
-  # Closed trades since the strategy's last reset, newest first. Only the
-  # last `@rolling_window_days` matter, plus enough for a losing streak.
+  defp in_window(trades, %{breaker_window_days: days}) do
+    window_start = DateTime.add(DateTime.utc_now(), -days, :day)
+    Enum.filter(trades, &(DateTime.compare(&1.exit_time, window_start) != :lt))
+  end
+
+  # Closed trades since the strategy's last reset, newest first.
   defp trades_since_reset(strategy_id) do
     since =
       from(s in Suspension,
@@ -209,7 +240,7 @@ defmodule Opus.Trading.CircuitBreaker do
     end
   end
 
-  defp rolling_detail(%{count: count, sum: sum}) do
-    "#{Float.round(sum * 100, 1)}% over #{@rolling_window_days}d across #{count} trades"
+  defp rolling_detail(%{count: count, sum: sum}, limits) do
+    "#{Float.round(sum * 100, 1)}% over #{limits.breaker_window_days}d across #{count} trades"
   end
 end

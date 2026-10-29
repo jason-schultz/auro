@@ -10,8 +10,9 @@ defmodule OpusWeb.StrategyLive do
   in plain words, the indicator scalars right now, the test results (how it
   did against just holding the instrument over its whole test history, an
   on-demand "is it fragile?" check at nearby settings, and the evidence
-  ladder: backtest, walk-forward, Monte Carlo, holdout, live), its trades
-  and its signal log.
+  ladder: backtest, walk-forward, Monte Carlo, holdout, live), whether its
+  live trades still behave like its backtest (`Opus.Trading.DriftCheck`,
+  daily or on demand), its trades and its signal log.
 
   Everything but the statistics and indicator scalars comes from Opus's own
   tables, so the page stands when the engine is down and says so.
@@ -25,7 +26,8 @@ defmodule OpusWeb.StrategyLive do
 
   alias Opus.Auro.Client
   alias Opus.Journal.TradeStory
-  alias Opus.Trading.Strategies
+  alias Opus.Repo
+  alias Opus.Trading.{DriftCheck, LiveStrategy, Strategies}
   alias OpusWeb.WholeHistory
 
   @impl true
@@ -38,7 +40,10 @@ defmodule OpusWeb.StrategyLive do
         page_title: "Strategy",
         signals: nil,
         focus: nil,
-        preview_error: nil
+        preview_error: nil,
+        drift: nil,
+        drift_running: false,
+        drift_error: nil
       )
       |> WholeHistory.init()
 
@@ -67,6 +72,15 @@ defmodule OpusWeb.StrategyLive do
          y
        )
      end)}
+  end
+
+  def handle_event("check_drift", _params, socket) do
+    id = socket.assigns.s.id
+
+    {:noreply,
+     socket
+     |> assign(drift_running: true, drift_error: nil)
+     |> start_async(:drift, fn -> DriftCheck.run(Repo.get!(LiveStrategy, id)) end)}
   end
 
   def handle_event("pick_trade", %{"trade" => trade}, socket),
@@ -110,7 +124,7 @@ defmodule OpusWeb.StrategyLive do
     case Strategies.get(socket.assigns.id) do
       {:ok, s} ->
         socket
-        |> assign(s: s, page_title: s.recipe.name)
+        |> assign(s: s, page_title: s.recipe.name, drift: DriftCheck.latest([s.id])[s.id])
         |> WholeHistory.assign_axes(s.recipe.definition)
         |> start_async(:preview, fn ->
           Strategies.preview(s.recipe.definition, s.instrument, s.granularity, s.sizing_params)
@@ -133,6 +147,15 @@ defmodule OpusWeb.StrategyLive do
 
   def handle_async(:preview, {:exit, _reason}, socket),
     do: {:noreply, assign(socket, preview_error: "The signal preview didn't finish.")}
+
+  def handle_async(:drift, {:ok, {:ok, check}}, socket),
+    do: {:noreply, assign(socket, drift: check, drift_running: false)}
+
+  def handle_async(:drift, {:ok, {:error, reason}}, socket),
+    do: {:noreply, assign(socket, drift_running: false, drift_error: describe(reason))}
+
+  def handle_async(:drift, {:exit, _reason}, socket),
+    do: {:noreply, assign(socket, drift_running: false, drift_error: "The check didn't finish.")}
 
   def handle_async(name, result, socket) when name in [:report, :fragility],
     do: {:noreply, WholeHistory.put_result(socket, name, result)}
@@ -446,6 +469,27 @@ defmodule OpusWeb.StrategyLive do
         </section>
 
         <section
+          id="drift"
+          aria-label="Live against its backtest"
+          class="flex scroll-mt-24 flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4"
+        >
+          <div class="flex flex-wrap items-baseline justify-between gap-3">
+            <span class="text-[15px] font-semibold">
+              <.t {copy("Live against its backtest")} />
+            </span>
+            <button
+              type="button"
+              phx-click="check_drift"
+              disabled={@drift_running}
+              class="min-h-11 rounded-field border border-base-300 px-3 text-[13px] font-medium hover:border-primary disabled:opacity-50"
+            >
+              {if @drift_running, do: "Checking…", else: "Check now"}
+            </button>
+          </div>
+          <.drift_check check={@drift} error={@drift_error} />
+        </section>
+
+        <section
           aria-label="Trades"
           class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4"
         >
@@ -623,4 +667,49 @@ defmodule OpusWeb.StrategyLive do
   defp pct_points(v), do: "#{num(v)}%"
 
   defp action(action), do: action |> String.replace("_", " ") |> String.capitalize()
+
+  attr :check, :any, required: true
+  attr :error, :string, default: nil
+
+  defp drift_check(%{check: nil} = assigns) do
+    ~H"""
+    <p class="m-0 text-[14px] text-muted">
+      {@error ||
+        "Not checked yet. It runs after the US close each trading day while the strategy is switched on, or press Check now."}
+    </p>
+    """
+  end
+
+  defp drift_check(assigns) do
+    ~H"""
+    <p class={["m-0 text-[15px] font-medium", verdict_class(@check.verdict)]}>
+      {verdict_words(@check.verdict)}
+    </p>
+    <ul class="m-0 flex list-none flex-col gap-2 p-0 text-[14px]">
+      <li :for={f <- @check.findings} class="flex gap-2">
+        <span class={["shrink-0 font-medium", verdict_class(f["verdict"])]}>
+          {check_name(f["check"])}
+        </span>
+        <span>{f["words"]}</span>
+      </li>
+    </ul>
+    <p class="m-0 text-[12px] text-muted">
+      Checked {stamp(@check.checked_at)}. {@error}
+    </p>
+    """
+  end
+
+  defp verdict_words("off"), do: "It isn't behaving like its backtest."
+  defp verdict_words("watch"), do: "Mostly like its backtest, with something to watch."
+  defp verdict_words("fine"), do: "It's behaving like its backtest."
+  defp verdict_words(_too_early), do: "Too early to tell: it needs more live trades."
+
+  defp verdict_class("off"), do: "text-error"
+  defp verdict_class("watch"), do: "text-warning"
+  defp verdict_class("fine"), do: "text-success"
+  defp verdict_class(_too_early), do: "text-muted"
+
+  defp check_name("returns"), do: "Returns"
+  defp check_name("frequency"), do: "How often"
+  defp check_name("fills"), do: "Fills"
 end

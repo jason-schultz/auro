@@ -19,7 +19,7 @@ defmodule Opus.Dashboard do
   alias Opus.Journal.TradeStory
   alias Opus.Options
   alias Opus.Options.Paper
-  alias Opus.Trading.AccountPause
+  alias Opus.Trading.{AccountPause, DriftCheck}
   alias Opus.Options.Paper.{Legs, Wheel}
   alias Opus.Repo
   alias Opus.Trading.Strategies
@@ -45,6 +45,7 @@ defmodule Opus.Dashboard do
       engine: engine(health),
       candle_age: candle_age(health),
       suspensions: suspensions(),
+      drift: drift(),
       account_pause: account_pause(),
       failed_jobs: failed_jobs(now),
       offline_brokers: [],
@@ -118,6 +119,22 @@ defmodule Opus.Dashboard do
           nav: p.nav,
           limit: p.limit_pct
         }
+    end
+  end
+
+  # Switched-on strategies whose latest check says they aren't behaving
+  # like their backtest.
+  defp drift do
+    rows = Enum.filter(Strategies.list(), & &1.enabled)
+    checks = DriftCheck.latest(Enum.map(rows, & &1.id))
+
+    for row <- rows, %{verdict: "off"} = check <- [checks[row.id]] do
+      %{
+        id: row.id,
+        name: row.name,
+        instrument: row.instrument,
+        detail: check.findings |> Enum.find(&(&1["verdict"] == "off")) |> Map.fetch!("words")
+      }
     end
   end
 
