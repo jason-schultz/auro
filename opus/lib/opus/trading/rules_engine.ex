@@ -1,71 +1,30 @@
 defmodule Opus.Trading.RulesEngine do
   @moduledoc """
-  Computes per-strategy enable/disable decisions from regime state and pushes
-  them to Rust.
+  The account-level safety layer: decides, for every strategy in the
+  universe, whether it may open new trades, and pushes the result to Rust.
 
-  Per Decision #23, this is the active side of the rules engine: persists each
-  decision to the `rules` table AND pushes the full payload to Rust via
-  `Opus.Auro.Client.push_rules/1`. Rust holds the result in `Arc<RwLock<Rules>>`
-  and consults it on every entry signal.
+  Each decision is persisted to the `rules` table and the full map is pushed
+  via `Opus.Auro.Client.push_rules/1`. Rust holds it in `Arc<RwLock<Rules>>`
+  and consults it on every entry signal; it only enforces the boolean.
 
-  Per Decision #18, the *condition* (e.g. "ADX > 25") lives here. Rust never
-  decides — it only enforces the boolean.
+  A strategy decides for itself whether conditions suit it (trend strength,
+  calm or wild markets are blocks inside the strategy, tested by the
+  pipeline). This layer never switches a strategy by regime. It holds a
+  strategy back only for account safety, each cleared only by a person:
 
-  Polls every 5 minutes by default. Same cadence as RegimeDetector since rules
-  derive from regimes — running more often than the source of truth wastes work.
+  - an account drawdown pause (`Opus.Trading.AccountPause`): every strategy;
+  - an open circuit-breaker suspension (`Opus.Trading.CircuitBreaker`): that one.
 
-  Per-granularity regimes come from `Opus.Trading.RegimeDetector`, which
-  classifies the ADX scalar at each timeframe: trending if ADX >= 30, choppy
-  if ADX < 20, uncertain in between, unknown if the buffer is too short.
+  Each push also carries the account risk budget and per-group cap
+  (`Opus.Trading.AccountLimits`), each strategy's risk per trade and each
+  instrument's group; the engine checks those when a trade opens, since
+  two strategies can fire in the same minute.
+  Each rule row also records the regime around the strategy's instrument at
+  decision time (`regime_inputs`, from `Opus.Trading.RegimeDetector`). That
+  is a readout for screens, not an input to the decision.
 
-    Regime classification is strategy-granularity aware (dual-frame by default):
-
-      | Entry granularity | Context frame | Execution frame |
-      | ----------------- | ------------- | --------------- |
-      | M1                | M5            | M1              |
-      | M5                | M15           | M5              |
-      | M15               | H1            | M15             |
-      | H1                | H4            | H1              |
-      | H4                | D             | H4              |
-
-    Classification rule for dual-frame inputs:
-
-      | Context | Execution | Composite |
-      | ------- | --------- | --------- |
-      | same trend state    | same      | that state |
-      | mismatch            | mismatch  | uncertain  |
-      | any unknown         | any       | unknown    |
-
-    Legacy 3-frame majority (H4/H1/M15) remains available in
-    `RegimeClassifier.classify_mtf/3` for back-compat tests and optional callers.
-
-      | H4 regime  | H1 regime  | M15 regime    | composite |
-      | ---------- | ---------- | ------------- | --------- |
-      | trending   | trending   | not :choppy   | trending  |
-      | trending   | trending   | :choppy       | uncertain |
-      | choppy     | choppy     | not :trending | choppy    |
-      | choppy     | choppy     | :trending     | uncertain |
-      | H4 and H1 disagree                       | uncertain |
-      | :unknown in H4 or H1                     | unknown   |
-
-  H4 anchors the trend; H1 confirms; M15 is the ripple that can veto. D is
-  polled by `RegimeDetector` for diagnostic visibility (its ADX shows up in
-  rule reason strings) but does NOT gate decisions — D as a hard anchor for
-  H1-timeframe strategies is too far away from the strategy's holding period
-  and produces excessive false uncertain classifications. Future use of D
-  belongs in position sizing or sector-context features, not entry gating.
-
-  Strategy-type × composite regime → decision (the policy):
-
-      | strategy_type    | trending  | choppy    | uncertain | unknown   |
-      | ---------------- | --------- | --------- | --------- | --------- |
-        | trend_following  | enabled   | disabled  | disabled  | disabled  |
-        | mean_reversion   | disabled  | enabled   | disabled  | disabled  |
-
-  `:unknown` fails closed — missing regime data is treated as no signal.
-  Rust's `Rules::decision` fails open on an empty rules map as the bootstrap
-  safety net, but once Opus has computed and pushed any rules, the policy
-  defined here is authoritative.
+  Polls every 5 minutes, and recomputes at once when a suspension opens or
+  clears.
   """
 
   use GenServer
@@ -76,11 +35,11 @@ defmodule Opus.Trading.RulesEngine do
   alias Opus.Support.Polling
 
   alias Opus.Trading.{
+    AccountLimits,
+    AccountPause,
     LiveStrategy,
     RegimeClassifier,
     RegimeDetector,
-    RegimeGate,
-    RiskMood,
     Rule,
     Suspension
   }
@@ -109,10 +68,10 @@ defmodule Opus.Trading.RulesEngine do
     strategies = list_live_strategies()
     regimes = RegimeDetector.get_all_regimes()
     open_suspensions = open_suspensions_by_strategy(strategies)
-    market = market_state(strategies)
-    decisions = Enum.map(strategies, &decide(&1, regimes, open_suspensions, market))
+    pause = AccountPause.check()
+    decisions = Enum.map(strategies, &decide(&1, regimes, open_suspensions, pause))
 
-    case persist_and_push(decisions) do
+    case persist_and_push(decisions, limits(strategies)) do
       :ok -> {:ok, decisions}
       {:error, reason} -> {:error, reason}
     end
@@ -153,8 +112,8 @@ defmodule Opus.Trading.RulesEngine do
     # Skeleton of the cycle. Each step is a defp — fill in the bodies in order.
     #
     # 1. Read all live_strategies rows in the universe.
-    # 2. Read current regime map from RegimeDetector.
-    # 3. For each strategy, derive a decision (enabled?, reason).
+    # 2. Read the regime map from RegimeDetector (a readout, recorded per rule).
+    # 3. For each strategy, derive a decision (enabled?, reason) from the safety rules.
     # 4. Persist each decision to the `rules` table (upsert).
     # 5. Push the full map to Rust via Auro.Client.push_rules/1.
     # 6. Log a one-line summary.
@@ -184,74 +143,70 @@ defmodule Opus.Trading.RulesEngine do
         strategy_type: s.strategy_type,
         instrument: s.instrument,
         granularity: s.granularity,
-        parameters: s.parameters
+        sizing: s.sizing
       }
     )
     |> Repo.all()
   end
 
-  # Market-wide regime inputs for opt-in gates, fetched once per cycle and only
-  # when some strategy declares a gate (no HTTP call otherwise).
-  defp market_state(strategies) do
-    if Enum.any?(strategies, &regime_gate/1),
-      do: %{risk_mood: RiskMood.current()},
-      else: %{risk_mood: :unknown}
-  end
-
-  defp regime_gate(%{parameters: %{"regime_gate" => gate}}) when map_size(gate) > 0, do: gate
-  defp regime_gate(_strategy), do: nil
-
-  # Derive a single decision from a strategy and the current regime map.
-  # Returns a map: `%{live_strategy_id, enabled, reason, computed_at}`.
-  defp decide(strategy, regimes, open_suspensions, market) do
+  # One strategy's decision: held back by an account pause or its own open
+  # suspension. The regime around its instrument is recorded for screens.
+  defp decide(strategy, regimes, open_suspensions, pause) do
     inputs = regime_inputs_for_strategy(strategy, regimes)
     composite = RegimeClassifier.classify_for_inputs(inputs)
-    regime_inputs = to_structured_regime_inputs(composite, inputs)
-
-    case Map.get(open_suspensions, strategy.id) do
-      %{trigger_detail: trigger_detail} ->
-        %{
-          live_strategy_id: strategy.id,
-          enabled: false,
-          reason: "circuit_breaker: #{trigger_detail}",
-          regime_inputs: regime_inputs,
-          computed_at: DateTime.utc_now()
-        }
-
-      nil ->
-        decide_from_regime(strategy, inputs, composite, regime_inputs, market)
-    end
-  end
-
-  defp decide_from_regime(strategy, inputs, composite, regime_inputs, market) do
-    {enabled, reason} =
-      strategy.strategy_type
-      |> RegimeClassifier.policy_for_inputs(composite, inputs)
-      |> apply_regime_gate(strategy, market)
+    {enabled, reason} = safety(pause, Map.get(open_suspensions, strategy.id))
 
     %{
       live_strategy_id: strategy.id,
       enabled: enabled,
       reason: reason,
-      regime_inputs: regime_inputs,
+      regime_inputs: to_structured_regime_inputs(composite, inputs),
+      risk_pct: risk_pct(strategy.sizing),
       computed_at: DateTime.utc_now()
     }
   end
 
-  # Composites may opt into a market-regime gate; it can only narrow the
-  # policy decision, never re-enable what the policy disabled.
-  defp apply_regime_gate({enabled, reason}, %{strategy_type: "composite"} = strategy, market) do
-    case regime_gate(strategy) do
-      nil ->
-        {enabled, reason}
+  defp safety(%AccountPause{} = p, _suspension) do
+    down = Float.round(AccountPause.drawdown(p.peak_nav, p.nav) * 100, 1)
+    {false, "account_pause: NAV fell #{down}% from its peak of #{round(p.peak_nav)}"}
+  end
 
-      gate ->
-        {open, gate_reason} = RegimeGate.evaluate(gate, market)
-        {enabled and open, reason <> "; " <> gate_reason}
+  defp safety(nil, %{trigger_detail: detail}), do: {false, "circuit_breaker: #{detail}"}
+  defp safety(nil, nil), do: {true, "clear: no safety rule is holding it"}
+
+  # The share of NAV each of a strategy's trades risks, for the engine's
+  # account risk budget.
+  defp risk_pct(%{"type" => "RiskPct", "params" => %{"pct" => pct}}) when is_number(pct), do: pct
+  defp risk_pct(_sizing), do: nil
+
+  # The limits the engine checks when a trade opens (`AccountLimits`), with
+  # each instrument's group. Nil before the limits exist: nothing is checked.
+  defp limits(strategies) do
+    case AccountLimits.get() do
+      nil ->
+        nil
+
+      %{risk_budget_pct: budget, max_open_per_group: per_group} ->
+        %{
+          risk_budget: budget / 100,
+          max_open_per_group: per_group,
+          groups: groups(Enum.map(strategies, & &1.instrument))
+        }
     end
   end
 
-  defp apply_regime_gate(decision, _strategy, _market), do: decision
+  # Asset class per instrument; FX majors and crosses are one group.
+  defp groups(instruments) do
+    from(i in "instruments",
+      where: i.oanda_symbol in ^Enum.uniq(instruments),
+      select: {i.oanda_symbol, i.asset_class}
+    )
+    |> Repo.all()
+    |> Map.new(fn
+      {symbol, "fx_" <> _} -> {symbol, "fx"}
+      {symbol, class} -> {symbol, class}
+    end)
+  end
 
   defp regime_inputs_for_strategy(strategy, regimes) do
     strategy.granularity
@@ -294,7 +249,7 @@ defmodule Opus.Trading.RulesEngine do
   # Persist all decisions to the rules table, then push the full map to Rust.
   # Returns `:ok` or `{:error, reason}`. If persistence succeeds but push fails,
   # return error — the next tick will re-push with whatever's in the DB.
-  defp persist_and_push(decisions) do
+  defp persist_and_push(decisions, limits) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     rows =
@@ -319,11 +274,13 @@ defmodule Opus.Trading.RulesEngine do
 
     rules_map =
       Enum.into(decisions, %{}, fn d ->
-        {Ecto.UUID.cast!(d.live_strategy_id), %{enabled: d.enabled, reason: d.reason}}
+        {Ecto.UUID.cast!(d.live_strategy_id),
+         %{enabled: d.enabled, reason: d.reason, risk_pct: d.risk_pct}}
       end)
 
     payload = %{
       rules: rules_map,
+      limits: limits,
       computed_at: DateTime.utc_now()
     }
 

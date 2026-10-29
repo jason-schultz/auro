@@ -26,8 +26,9 @@ the testing, the forward-testing and the alerting.
 - **Signal charts.** Candles with ▲ buy and ▼ sell markers, shaded trades, one
   strip per rule showing when it was true, and each trade explained in a sentence.
 - **Live forward-testing.** Strategies that pass trade on an OANDA practice
-  account, with position sizing by risk, stops, circuit breakers and a regime
-  rules engine.
+  account, with position sizing by risk, stops and circuit breakers. Each
+  strategy decides when to trade through its own blocks (trend strength, calm
+  or wild, and so on), so its tests cover that too.
 - **Options paper trading.** Paper books for the wheel, put spreads, iron
   condors, call ideas and crash puts, priced from Questrade option chains with
   intraday quotes and take-profits.
@@ -45,7 +46,7 @@ Two services share one PostgreSQL database:
 | Service | What it does | Port |
 |---|---|---|
 | **`auro_be/`** (Rust: axum, tokio, sqlx) | The engine: OANDA prices and candles, strategy evaluation, order execution, trade management, backtests and the testing pipeline's maths, broker clients (OANDA, Questrade, Wealthsimple, Massive) | 3000 |
-| **`opus/`** (Elixir: Phoenix 1.8, LiveView, Ecto, Oban) | The brain and the web app: every page, scheduling, the rules engine and regime detection, the strategy builder, options paper books, alerts, and every database migration | 4321 |
+| **`opus/`** (Elixir: Phoenix 1.8, LiveView, Ecto, Oban) | The brain and the web app: every page, scheduling, the strategy builder and testing pipeline, account-level safety rules, options paper books, alerts, and every database migration | 4321 |
 
 Opus tells the engine what to do over HTTP; the engine never calls Opus. OANDA is
 the source of truth for trades. `auro_fe/` (Vue 3) is the older frontend, kept as

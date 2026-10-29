@@ -452,32 +452,6 @@ pub async fn toggle_live_strategy(
     }
 }
 
-pub async fn reset_live_strategy_curator_auto(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> AppResult<Json<Value>> {
-    let row = live_strategies_repo::set_live_strategy_curator_auto(&state.db, id)
-        .await
-        .map_err(AppError::Database)?;
-
-    match row {
-        Some(row) => {
-            tracing::info!(
-                "Strategy {} ({} on {}) set to curator_mode=auto (enabled={})",
-                id,
-                row.strategy_type,
-                row.instrument,
-                row.enabled
-            );
-
-            Ok(Json(
-                json!({ "id": id, "enabled": row.enabled, "curator_mode": row.curator_mode }),
-            ))
-        }
-        None => Err(AppError::NotFound("Strategy not found".into())),
-    }
-}
-
 pub async fn delete_live_strategy(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,

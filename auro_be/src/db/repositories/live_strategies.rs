@@ -232,22 +232,6 @@ pub(crate) async fn toggle_live_strategy(
     .await
 }
 
-pub(crate) async fn set_live_strategy_curator_auto(
-    pool: &PgPool,
-    id: Uuid,
-) -> Result<Option<ToggledStrategyRow>, sqlx::Error> {
-    sqlx::query_as(
-        "UPDATE live_strategies
-         SET curator_mode = 'auto',
-             updated_at = NOW()
-         WHERE id = $1
-         RETURNING enabled, curator_mode, strategy_type, instrument",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-}
-
 pub(crate) async fn delete_live_strategy_returning_instrument(
     pool: &PgPool,
     id: Uuid,

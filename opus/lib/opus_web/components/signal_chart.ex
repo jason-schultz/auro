@@ -11,7 +11,7 @@ defmodule OpusWeb.SignalChart do
 
   import OpusWeb.CandleChart
   import OpusWeb.Format
-  import OpusWeb.Copy, only: [t: 1]
+  import OpusWeb.Copy, only: [t: 1, copy: 1]
 
   alias Opus.Clock
   alias Opus.Trading.StrategyWords
@@ -34,12 +34,12 @@ defmodule OpusWeb.SignalChart do
     ~H"""
     <div class="flex flex-col gap-3">
       <div class="flex flex-wrap gap-x-5 gap-y-1 text-[13px] text-muted">
-        <span><span aria-hidden="true" class="text-info">▲</span> <.t s="Buy" wsb="Load up" /></span>
-        <span><span aria-hidden="true" class="text-warning">▼</span> <.t s="Sell" wsb="Cash out" /></span>
+        <span><span aria-hidden="true" class="text-info">▲</span> <.t {copy("Buy")} /></span>
+        <span><span aria-hidden="true" class="text-warning">▼</span> <.t {copy("Sell")} /></span>
         <span><span
           aria-hidden="true"
           class="mr-1.5 inline-block h-3 w-4 bg-info/15 align-middle"
-        ></span><.t s="Time in a trade" wsb="Holding the bag" /></span>
+        ></span><.t {copy("Time in a trade")} /></span>
       </div>
       <.candle_chart
         candles={@chart.candles}
@@ -49,22 +49,16 @@ defmodule OpusWeb.SignalChart do
         label={@label}
       />
       <p :if={@chart.lanes != []} class="text-[13px] text-muted">
-        <.t
-          s="Each strip under the chart is one rule, lit on the bars it was true. A signal fires where its rules line up."
-          wsb="Each strip is one rule, lit when it was true. When the strips line up, the bot sends it."
-        />
+        <.t {copy("Each strip under the chart is one rule, lit on the bars it was true. A signal fires where its rules line up.")} />
       </p>
       <%= if @chart.trades == [] do %>
         <p class="text-[14px] text-muted">
-          <.t
-            s="No trades in this window: the rules never lined up."
-            wsb="Zero plays in this window. The rules never lined up. Theta gang would be proud."
-          />
+          <.t {copy("No trades in this window: the rules never lined up.")} />
         </p>
       <% else %>
         <div class="flex flex-col gap-2 rounded-field bg-base-100 px-4 py-3">
           <span class="text-[13px] font-medium text-muted">
-            <.t s="Selected trade" wsb="This play" />
+            <.t {copy("Selected trade")} />
           </span>
           <p class="m-0 text-[14px]">
             {story(@chosen, @definition, @granularity)}

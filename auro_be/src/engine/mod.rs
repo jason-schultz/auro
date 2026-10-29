@@ -16,6 +16,7 @@ pub mod opening_range;
 pub mod options;
 pub mod pipeline;
 pub mod pivot_points;
+pub mod report;
 pub mod rsi_reversion;
 pub mod rules;
 pub mod session;

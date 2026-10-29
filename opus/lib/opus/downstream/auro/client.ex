@@ -206,19 +206,11 @@ defmodule Opus.Auro.Client do
   @doc """
   Flip a live strategy's enabled switch. Rust owns the switch because it
   loads or unloads the instrument's candle buffers as a side effect.
-  Returns `%{"id" => id, "enabled" => bool, "curator_mode" => mode}`.
+  Returns `%{"id" => id, "enabled" => bool}` (and the pin flag it records).
   """
   @spec toggle_live_strategy(String.t()) :: {:ok, map()} | {:error, any()}
   def toggle_live_strategy(id) when is_binary(id) do
     client() |> Req.post(url: "/api/live/strategies/#{id}/toggle", json: %{}) |> handle_response()
-  end
-
-  @doc "Hand a pinned strategy back to the curator (`curator_mode` → auto)."
-  @spec set_live_strategy_curator_auto(String.t()) :: {:ok, map()} | {:error, any()}
-  def set_live_strategy_curator_auto(id) when is_binary(id) do
-    client()
-    |> Req.post(url: "/api/live/strategies/#{id}/curator/auto", json: %{})
-    |> handle_response()
   end
 
   @doc """
@@ -302,6 +294,43 @@ defmodule Opus.Auro.Client do
       url: "/api/strategy/signal-preview",
       json: %{parameters: parameters, count: count},
       receive_timeout: 30_000,
+      retry: false
+    )
+    |> handle_response(:quiet)
+  end
+
+  @doc """
+  A strategy's running return against just holding its instrument, and its
+  drawdown, over the same history the pipeline backtests
+  (POST /api/strategy/report). `parameters` is the full strategy JSON.
+  Answers `%{"report" => %{"points" => [...], "summary" => %{...}}}`.
+  """
+  @spec strategy_report(map()) :: {:ok, map()} | {:error, any()}
+  def strategy_report(parameters) when is_map(parameters) do
+    client()
+    |> Req.post(
+      url: "/api/strategy/report",
+      json: %{parameters: parameters},
+      receive_timeout: 60_000,
+      retry: false
+    )
+    |> handle_response(:quiet)
+  end
+
+  @doc """
+  The strategy re-run at a grid of nearby settings, each judged by the
+  backtest standard (POST /api/strategy/sensitivity). `x` and `y` are
+  `%{component, param, values}`; `y` may be nil for a single row. Answers
+  `%{"cells" => [%{"x", "y", "total_return", "num_trades", "t_stat", "passed"}]}`.
+  Slow on intraday history (about 40 s for 25 cells on 5-minute bars).
+  """
+  @spec strategy_sensitivity(map(), map(), map() | nil) :: {:ok, map()} | {:error, any()}
+  def strategy_sensitivity(parameters, x, y) when is_map(parameters) and is_map(x) do
+    client()
+    |> Req.post(
+      url: "/api/strategy/sensitivity",
+      json: %{parameters: parameters, x: x, y: y},
+      receive_timeout: 180_000,
       retry: false
     )
     |> handle_response(:quiet)

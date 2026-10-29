@@ -39,34 +39,13 @@ defmodule OpusWeb.Layouts do
       <div class="mx-auto flex w-full max-w-7xl items-center justify-between gap-6 px-4 pt-[max(2.5rem,env(safe-area-inset-top))] pb-3 sm:px-6">
         <.link navigate={~p"/"} class="py-2 text-base font-semibold tracking-tight">Auro</.link>
         <nav class="flex min-w-0 items-center gap-5 overflow-x-auto whitespace-nowrap text-sm">
-          <.link navigate={~p"/"} class="py-2 text-muted hover:text-base-content"><.t
-            s="Dashboard"
-            wsb="War room"
-          /></.link>
-          <.link navigate={~p"/strategies"} class="py-2 text-muted hover:text-base-content"><.t
-            s="Strategies"
-            wsb="Plays"
-          /></.link>
-          <.link navigate={~p"/journal"} class="py-2 text-muted hover:text-base-content"><.t
-            s="Journal"
-            wsb="Loss porn"
-          /></.link>
-          <.link navigate={~p"/accounts"} class="py-2 text-muted hover:text-base-content"><.t
-            s="Accounts"
-            wsb="The bag"
-          /></.link>
-          <.link navigate={~p"/options"} class="py-2 text-muted hover:text-base-content"><.t
-            s="Options"
-            wsb="Casino"
-          /></.link>
-          <.link navigate={~p"/instruments"} class="py-2 text-muted hover:text-base-content"><.t
-            s="Instruments"
-            wsb="Tickers"
-          /></.link>
-          <.link navigate={~p"/research"} class="py-2 text-muted hover:text-base-content"><.t
-            s="Research"
-            wsb="DD"
-          /></.link>
+          <.link navigate={~p"/"} class="py-2 text-muted hover:text-base-content"><.t {copy("Dashboard")} /></.link>
+          <.link navigate={~p"/strategies"} class="py-2 text-muted hover:text-base-content"><.t {copy("Strategies")} /></.link>
+          <.link navigate={~p"/journal"} class="py-2 text-muted hover:text-base-content"><.t {copy("Journal")} /></.link>
+          <.link navigate={~p"/accounts"} class="py-2 text-muted hover:text-base-content"><.t {copy("Accounts")} /></.link>
+          <.link navigate={~p"/options"} class="py-2 text-muted hover:text-base-content"><.t {copy("Options")} /></.link>
+          <.link navigate={~p"/instruments"} class="py-2 text-muted hover:text-base-content"><.t {copy("Instruments")} /></.link>
+          <.link navigate={~p"/research"} class="py-2 text-muted hover:text-base-content"><.t {copy("Research")} /></.link>
           <.theme_toggle />
         </nav>
       </div>

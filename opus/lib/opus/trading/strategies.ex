@@ -17,6 +17,7 @@ defmodule Opus.Trading.Strategies do
   alias Opus.Repo
 
   alias Opus.Trading.{
+    Fragility,
     LiveStrategy,
     Recipe,
     Rule,
@@ -34,7 +35,7 @@ defmodule Opus.Trading.Strategies do
           instrument: String.t(),
           granularity: String.t(),
           enabled: boolean(),
-          curator_mode: String.t(),
+          circuit_breaker_exempt: boolean(),
           created_at: DateTime.t(),
           rule: map() | nil,
           suspension: map() | nil,
@@ -177,6 +178,68 @@ defmodule Opus.Trading.Strategies do
     end
   end
 
+  @doc """
+  How the strategy did over its whole test history against just holding the
+  instrument (`Opus.Auro.Client.strategy_report/1`): `%{points, summary}`
+  with each point `%{time, strategy, hold, drawdown}` (shares of one) and
+  the summary's returns, worst drops, time in the market and trade count.
+  `{:ok, nil}` when there's no history to test on.
+  """
+  @spec report(map(), String.t(), String.t(), map() | nil) ::
+          {:ok, map() | nil} | {:error, term()}
+  def report(definition, instrument, granularity, sizing) do
+    params = compose(definition, instrument, granularity, sizing || @default_sizing)
+
+    with {:ok, %{"report" => report}} <- Client.strategy_report(params) do
+      {:ok, report && report_view(report)}
+    end
+  end
+
+  defp report_view(%{"points" => points, "summary" => s}) do
+    %{
+      points:
+        Enum.map(points, fn p ->
+          %{
+            time: at(p["time"]),
+            strategy: p["strategy"],
+            hold: p["hold"],
+            drawdown: p["drawdown"]
+          }
+        end),
+      summary: %{
+        strategy_return: s["strategy_return"],
+        hold_return: s["hold_return"],
+        strategy_max_drawdown: s["strategy_max_drawdown"],
+        hold_max_drawdown: s["hold_max_drawdown"],
+        time_in_market: s["time_in_market"],
+        num_trades: s["num_trades"],
+        from: at(s["from"]),
+        to: at(s["to"])
+      }
+    }
+  end
+
+  defp at(text) do
+    {:ok, at, _} = DateTime.from_iso8601(text)
+    at
+  end
+
+  @doc """
+  Re-run the strategy at settings near its own on two of its settings (or
+  one), judged by the backtest standard: the "Is it fragile?" grid, shaped by
+  `Opus.Trading.Fragility.shape/3`.
+  """
+  @spec fragility(map(), String.t(), String.t(), map() | nil, map(), map() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def fragility(definition, instrument, granularity, sizing, x, y) do
+    params = compose(definition, instrument, granularity, sizing || @default_sizing)
+    axis = fn a -> a && %{component: a.component, param: a.param, values: Fragility.values(a)} end
+
+    with {:ok, %{"cells" => cells}} <- Client.strategy_sensitivity(params, axis.(x), axis.(y)) do
+      {:ok, Fragility.shape(cells, x, y)}
+    end
+  end
+
   @doc "Instruments with bars at `granularity` in the last 30 days: what a preview can run on."
   @spec preview_instruments(String.t()) :: [String.t()]
   def preview_instruments(granularity) do
@@ -313,10 +376,6 @@ defmodule Opus.Trading.Strategies do
   @doc "Flip a strategy's enabled switch in Rust (which loads or unloads its buffers)."
   @spec toggle(String.t()) :: {:ok, map()} | {:error, term()}
   def toggle(id) when is_binary(id), do: Client.toggle_live_strategy(id)
-
-  @doc "Hand a pinned strategy back to the curator: Rust sets `curator_mode` to auto."
-  @spec hand_back_to_curator(String.t()) :: {:ok, map()} | {:error, term()}
-  def hand_back_to_curator(id) when is_binary(id), do: Client.set_live_strategy_curator_auto(id)
 
   @doc "Delete a strategy through Rust, which refuses while it has open trades."
   @spec delete(String.t()) :: {:ok, map()} | {:error, term()}
@@ -500,7 +559,7 @@ defmodule Opus.Trading.Strategies do
       instrument: strategy.instrument,
       granularity: strategy.granularity,
       enabled: strategy.enabled,
-      curator_mode: strategy.curator_mode,
+      circuit_breaker_exempt: strategy.circuit_breaker_exempt,
       created_at: strategy.created_at,
       rule: Map.get(context.rules, strategy.id),
       suspension: Map.get(context.suspensions, strategy.id),

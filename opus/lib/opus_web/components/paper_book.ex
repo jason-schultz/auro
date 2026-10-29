@@ -20,45 +20,66 @@ defmodule OpusWeb.Components.PaperBook do
   import OpusWeb.PayoffChart
   import OpusWeb.Components.PaperParts
 
-  alias Opus.Options.Paper
   alias Opus.Options.Paper.Wheel
   alias OpusWeb.Components.PaperTrades
 
-  # Each book: its key and what it does in both voices (names: `Paper.book_name/1`).
-  @books [
-    {"wheel",
-     "The wheel: sell puts, take the shares if assigned, sell calls on them. Paper US$, nothing real.",
-     "Selling puts to degens every morning. Paper money, real copium."},
-    {"put_spread",
-     "The wheel's put with a cheaper put bought below it: the crash risk capped. Paper US$.",
-     "Selling puts with a seatbelt on. Paper money, capped copium."},
-    {"iron_condor",
-     "A put spread and a call spread around the price: paid if it goes nowhere. Paper US$.",
-     "Betting the market does nothing. Theta and a prayer."},
-    {"ideas",
-     "Buys the calls the morning scan flags on dips; sells at double, half, or 21 days. Paper US$.",
-     "Buying the dip with calls. YOLO, but with rules."},
-    {"ideas_half",
-     "The same calls, two at a time: half sold at double to pay back the cost, the rest rides. Paper US$.",
-     "Same dip YOLOs, but take the house's money back at a double and let the rest ride."},
-    {"crash_puts",
-     "A SPY put about 10% below the price, rolled monthly: what crash insurance costs. Paper US$.",
-     "Doomsday insurance. Pays when everything burns."},
-    {"crash_puts_half",
-     "The same crash puts, two at a time: half sold at double, the rest held to the roll. Paper US$.",
-     "Doomsday puts, but cash half at a double and let the rest burn with the market."}
-  ]
+  # The books, in the order the selector shows them (names: `book_name/1`).
+  @books ~w(wheel put_spread iron_condor ideas ideas_half crash_puts crash_puts_half)
+
+  # What each book does.
+  defp about("wheel"),
+    do:
+      copy(
+        "The wheel: sell puts, take the shares if assigned, sell calls on them. Paper US$, nothing real."
+      )
+
+  defp about("put_spread"),
+    do:
+      copy(
+        "The wheel's put with a cheaper put bought below it: the crash risk capped. Paper US$."
+      )
+
+  defp about("iron_condor"),
+    do:
+      copy("A put spread and a call spread around the price: paid if it goes nowhere. Paper US$.")
+
+  defp about("ideas"),
+    do:
+      copy(
+        "Buys the calls the morning scan flags on dips; sells at double, half, or 21 days. Paper US$."
+      )
+
+  defp about("ideas_half"),
+    do:
+      copy(
+        "The same calls, two at a time: half sold at double to pay back the cost, the rest rides. Paper US$."
+      )
+
+  defp about("crash_puts"),
+    do:
+      copy(
+        "A SPY put about 10% below the price, rolled monthly: what crash insurance costs. Paper US$."
+      )
+
+  defp about("crash_puts_half"),
+    do:
+      copy(
+        "The same crash puts, two at a time: half sold at double, the rest held to the roll. Paper US$."
+      )
 
   attr :current, :string, required: true
   attr :counts, :map, required: true
 
   defp book_nav(assigns) do
-    assigns = assign(assigns, books: [{"all", "All books", "All the bags"} | book_names()])
+    assigns =
+      assign(assigns,
+        books: [{"all", copy("All books")} | Enum.map(@books, &{&1, book_name(&1)})]
+      )
 
     ~H"""
     <nav aria-label="Paper books" class="flex flex-wrap gap-1.5">
       <.link
-        :for={{key, name, meme} <- @books}
+        :for={{key, name} <- @books}
         patch={
           if key == "all", do: ~p"/options?view=paper", else: ~p"/options?view=paper&book=#{key}"
         }
@@ -71,20 +92,13 @@ defmodule OpusWeb.Components.PaperBook do
           )
         ]}
       >
-        <.t s={name} wsb={meme} />
+        <.t {name} />
         <span :if={@counts[key]} class="rounded-full bg-base-300 px-1.5 text-[11px] text-base-content">
           {@counts[key]}
         </span>
       </.link>
     </nav>
     """
-  end
-
-  defp book_names do
-    for {key, _about, _wsb} <- @books do
-      {name, meme} = Paper.book_name(key)
-      {key, name, meme}
-    end
   end
 
   # How long a forward test runs before its numbers say more than luck.
@@ -103,7 +117,6 @@ defmodule OpusWeb.Components.PaperBook do
 
     assigns =
       assign(assigns,
-        names: Map.new(book_names(), fn {key, name, meme} -> {key, {name, meme}} end),
         pnl: Enum.sum_by(started, & &1.pnl),
         value: Enum.sum_by(started, & &1.value),
         open: assigns.counts |> Map.values() |> Enum.sum(),
@@ -127,19 +140,18 @@ defmodule OpusWeb.Components.PaperBook do
       <.priced_at at={@priced_at} />
 
       <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <.stat label="Value, all books" wsb="Net worth" value={money(@value)} />
+        <.stat label={copy("Value, all books")} value={money(@value)} />
         <.stat
-          label="P&L, all books"
-          wsb="Gains (or loss porn)"
+          label={copy("P&L, all books")}
           value={money(@pnl)}
           tone={tone(@pnl)}
         />
-        <.stat label="Open trades" wsb="Bags held" value={to_string(@open)} />
-        <.stat label="Running for" wsb="Days of copium" value={"#{@days} days"} />
+        <.stat label={copy("Open trades")} value={to_string(@open)} />
+        <.stat label={copy("Running for")} value={"#{@days} days"} />
       </div>
 
       <p class="text-[13px]">
-        <span class="font-medium"><.t s="What to take from it:" wsb="The play:" /></span>
+        <span class="font-medium"><.t {copy("What to take from it:")} /></span>
         {verdict(@days)}
       </p>
 
@@ -164,7 +176,7 @@ defmodule OpusWeb.Components.PaperBook do
                   patch={~p"/options?view=paper&book=#{book.strategy}"}
                   class="hover:text-primary"
                 >
-                  <.t s={elem(@names[book.strategy], 0)} wsb={elem(@names[book.strategy], 1)} />
+                  <.t {book_name(book.strategy)} />
                 </.link>
               </td>
               <%= if book.started_on do %>
@@ -207,10 +219,10 @@ defmodule OpusWeb.Components.PaperBook do
   defp priced_at(assigns) do
     ~H"""
     <p :if={@at} class="text-[12px] text-muted">
-      <.t
-        s={"Priced at #{clock(Opus.Clock.local(@at))} New York. Open trades update every 15 minutes while the market is open, and a take-profit fills as soon as a quote reaches it."}
-        wsb={"Marked at #{clock(Opus.Clock.local(@at))} NY. Refreshes every 15 min; take-profits fill the second they print."}
-      />
+      <.t {copy(
+        "Priced at %{time} New York. Open trades update every 15 minutes while the market is open, and a take-profit fills as soon as a quote reaches it.",
+        time: clock(Opus.Clock.local(@at))
+      )} />
     </p>
     """
   end
@@ -223,8 +235,7 @@ defmodule OpusWeb.Components.PaperBook do
   attr :analysis, :map, default: nil
 
   def paper_book(assigns) do
-    {_key, about, about_wsb} = List.keyfind(@books, assigns.book.strategy, 0)
-    assigns = assign(assigns, about: about, about_wsb: about_wsb)
+    assigns = assign(assigns, about: about(assigns.book.strategy))
 
     ~H"""
     <section
@@ -233,43 +244,36 @@ defmodule OpusWeb.Components.PaperBook do
     >
       <.book_nav current={@book.strategy} counts={@counts} />
 
-      <p class="text-[12px] text-muted"><.t s={@about} wsb={@about_wsb} /></p>
+      <p class="text-[12px] text-muted"><.t {@about} /></p>
       <.priced_at at={@book.priced_at} />
 
       <p :if={@book.started_on == nil} class="text-[13px] text-muted">
-        <.t
-          s="Nothing yet: the first trades open at the next 10:30 New York check."
-          wsb="No bags yet. The first trades open at the next 10:30 check."
-        />
+        <.t {copy("Nothing yet: the first trades open at the next 10:30 New York check.")} />
       </p>
 
       <div :if={@book.started_on} class="grid grid-cols-2 gap-3 sm:grid-cols-5">
-        <.stat label="Value" wsb="Net worth" value={money(@book.value)} />
+        <.stat label={copy("Value")} value={money(@book.value)} />
         <.stat
-          label="P&L"
-          wsb="Gains (or loss porn)"
+          label={copy("P&L")}
           value={"#{money(@book.pnl)} · #{signed_pct(@book.return)}"}
           tone={tone(@book.pnl)}
         />
         <.stat
-          label={"Just holding #{Enum.join(@underlyings, "/")}"}
-          wsb="Boring index guy"
+          label={copy("Just holding %{symbols}", symbols: Enum.join(@underlyings, "/"))}
           value={signed_pct(@book.hold_return)}
           tone={tone(@book.hold_return)}
         />
         <.stat
           :if={@book.premium >= 0}
-          label="Net premium sold"
-          wsb="Theta collected"
+          label={copy("Net premium sold")}
           value={money(@book.premium)}
         />
         <.stat
           :if={@book.premium < 0}
-          label="Premium paid"
-          wsb="Lit on fire (so far)"
+          label={copy("Premium paid")}
           value={money(-@book.premium)}
         />
-        <.stat label="Cash" wsb="Dry powder" value={money(@book.cash)} />
+        <.stat label={copy("Cash")} value={money(@book.cash)} />
       </div>
 
       <PaperTrades.body
@@ -292,7 +296,7 @@ defmodule OpusWeb.Components.PaperBook do
               if(@trade, do: "text-muted hover:text-base-content", else: "bg-base-300 font-medium")
             ]}
           >
-            <.t s="Overview" wsb="The whole degenerate book" />
+            <.t {copy("Overview")} />
           </.link>
           <div :for={trade <- @book.trades} class="flex flex-col">
             <.link
@@ -469,7 +473,7 @@ defmodule OpusWeb.Components.PaperBook do
     <section aria-label="Leg detail" class="flex flex-col gap-3">
       <span class="text-[15px] font-semibold">
         {@leg.position.quantity} {@leg.position.symbol}
-        <.t s="shares from an assignment" wsb="shares (bagholding)" />
+        <.t {copy("shares from an assignment")} />
       </span>
       <p class="text-[13px] text-muted">
         Bought at {money(@leg.position.open_price)} a share on {day(@leg.position.opened_on)}, when a
@@ -545,7 +549,7 @@ defmodule OpusWeb.Components.PaperBook do
 
       <div :if={@p.status == "open"} class="flex flex-col gap-1.5">
         <span class="text-[13px] font-medium">
-          <.t s="What happens next" wsb="The plan, regard" />
+          <.t {copy("What happens next")} />
         </span>
         <ol class="m-0 flex list-none flex-col gap-1.5 p-0 text-[13px]">
           <li>
@@ -614,7 +618,7 @@ defmodule OpusWeb.Components.PaperBook do
     ~H"""
     <div class="grid gap-3 sm:grid-cols-2">
       <.play_card tone="success">
-        <:title><.t s="If it goes well" wsb="If it prints (first one is free)" /></:title>
+        <:title><.t {copy("If it goes well")} /></:title>
         <li>
           {@p.symbol} stays above {money(@p.strike)} or rises, and the put loses value every day.
         </li>
@@ -632,7 +636,7 @@ defmodule OpusWeb.Components.PaperBook do
         <li>At the same check a new put is sold the same way: 30–45 days, delta near −0.25.</li>
       </.play_card>
       <.play_card tone="error">
-        <:title><.t s="If it goes wrong" wsb="If it goes GUH" /></:title>
+        <:title><.t {copy("If it goes wrong")} /></:title>
         <li>
           {@p.symbol} falls toward {money(@p.strike)}. The put gains value, so the paper P&L goes
           red. Nothing is done: there is no stop-loss and no rolling in this version. Closing in a
@@ -673,7 +677,7 @@ defmodule OpusWeb.Components.PaperBook do
     ~H"""
     <div class="grid gap-3 sm:grid-cols-2">
       <.play_card tone="success">
-        <:title><.t s="If it goes well" wsb="If it prints (first one is free)" /></:title>
+        <:title><.t {copy("If it goes well")} /></:title>
         <li>
           {@p.symbol} stays below {money(@p.strike)}: the call loses value and is bought back for {money(
             @take_profit
@@ -687,7 +691,7 @@ defmodule OpusWeb.Components.PaperBook do
         </li>
       </.play_card>
       <.play_card tone="error">
-        <:title><.t s="If it goes wrong" wsb="If it goes GUH" /></:title>
+        <:title><.t {copy("If it goes wrong")} /></:title>
         <li>
           {@p.symbol} keeps falling. The call expires worthless and its {money(@premium)} is kept,
           but the shares lose more than that.
@@ -716,14 +720,14 @@ defmodule OpusWeb.Components.PaperBook do
     ~H"""
     <div class="grid gap-3 sm:grid-cols-2">
       <.play_card tone="success">
-        <:title><.t s="If it goes well" wsb="If it prints (first one is free)" /></:title>
+        <:title><.t {copy("If it goes well")} /></:title>
         <li>
           {@p.symbol} recovers above {money(@p.open_price)}: the next covered call gets called away
           at or above cost, and the cycle starts again with a new put.
         </li>
       </.play_card>
       <.play_card tone="error">
-        <:title><.t s="If it goes wrong" wsb="If it goes GUH" /></:title>
+        <:title><.t {copy("If it goes wrong")} /></:title>
         <li>
           {@p.symbol} stays below {money(@p.open_price)}: hold, and keep selling monthly calls at
           or above cost. Never sell the shares at a loss.

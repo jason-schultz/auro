@@ -64,7 +64,7 @@ defmodule OpusWeb.AccountsLive do
     <Layouts.app flash={@flash}>
       <div class="flex flex-col gap-10">
         <header class="flex flex-wrap items-baseline justify-between gap-3">
-          <h1 class="text-[22px] font-semibold tracking-tight"><.t s="Accounts" wsb="The bag" /></h1>
+          <h1 class="text-[22px] font-semibold tracking-tight"><.t {copy("Accounts")} /></h1>
           <div class="flex items-baseline gap-4 text-[13px] text-muted">
             <span :if={@as_of}>Updated {clock(@as_of)}</span>
             <button
@@ -96,7 +96,7 @@ defmodule OpusWeb.AccountsLive do
           </p>
         <% else %>
           <p :if={!@error} class="text-[13px] text-muted">
-            <.t s="Loading balances…" wsb="Counting tendies…" />
+            <.t {copy("Loading balances…")} />
           </p>
         <% end %>
       </div>
@@ -111,14 +111,13 @@ defmodule OpusWeb.AccountsLive do
     <section class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 rounded-box border border-base-300 bg-base-200 px-5 py-4">
       <div class="flex flex-col gap-0.5">
         <span class="text-[13px] text-muted">
-          <.t
-            s={"Index exposure for #{Calendar.strftime(Date.shift(@exposure.month, month: 1), "%B")}"}
-            wsb={"How much to YOLO into the index in #{Calendar.strftime(Date.shift(@exposure.month, month: 1), "%B")}"}
-          />
+          <.t {copy("Index exposure for %{month}",
+            month: Calendar.strftime(Date.shift(@exposure.month, month: 1), "%B")
+          )} />
         </span>
         <span class="text-[15px]">
           {@exposure.label}: <span class="font-semibold">{pct(@exposure.exposure)}</span>
-          <.t s="invested, the rest in cash" wsb="sent, the rest on the sidelines" />
+          <.t {copy("invested, the rest in cash")} />
         </span>
       </div>
       <span class="text-[13px] text-muted">
@@ -134,10 +133,7 @@ defmodule OpusWeb.AccountsLive do
     ~H"""
     <section class="flex flex-col gap-[18px]">
       <div class="flex flex-col gap-1">
-        <span class="text-[13px] text-muted"><.t
-          s="Everything, in CAD"
-          wsb="Net worth in maple tendies (CAD)"
-        /></span>
+        <span class="text-[13px] text-muted"><.t {copy("Everything, in CAD")} /></span>
         <span class="text-5xl font-semibold leading-[1.05] tracking-tight">
           {money(@overview.total_cad)}
         </span>
@@ -164,10 +160,10 @@ defmodule OpusWeb.AccountsLive do
     ~H"""
     <section class="flex flex-col">
       <div class="grid grid-cols-[minmax(0,2.2fr)_minmax(0,1.2fr)_repeat(2,minmax(0,1fr))] gap-4 border-b border-base-300 pb-2.5 text-xs text-muted">
-        <span><.t s="Account" wsb="Bag" /></span>
-        <span><.t s="Source" wsb="Source" /></span>
-        <span class="text-right"><.t s="Cash" wsb="Dry powder" /></span>
-        <span class="text-right"><.t s="Value" wsb="Worth" /></span>
+        <span><.t {copy("Account")} /></span>
+        <span><.t {copy("Source")} /></span>
+        <span class="text-right"><.t {copy("Cash")} /></span>
+        <span class="text-right"><.t {pcopy("account", "Value")} /></span>
       </div>
       <div
         :for={account <- @accounts}
@@ -204,28 +200,28 @@ defmodule OpusWeb.AccountsLive do
   defp positions(assigns) do
     ~H"""
     <section class="flex flex-col gap-3">
-      <span class="text-[15px] font-semibold">{@table.account} <.t s="positions" wsb="bags" /></span>
+      <span class="text-[15px] font-semibold">{@table.account} <.t {copy("positions")} /></span>
       <div class="overflow-x-auto rounded-box border border-base-300 bg-base-200 px-4 py-1.5">
         <table class="w-full min-w-[560px] border-collapse text-sm">
           <thead>
             <tr class="text-left text-xs text-muted">
               <th class="border-b border-base-300 py-2.5 font-medium">
-                <.t s="Symbol" wsb="Ticker" />
+                <.t {copy("Symbol")} />
               </th>
               <th class="border-b border-base-300 py-2.5 text-right font-medium">
-                <.t s="Shares" wsb="Shares" />
+                <.t {copy("Shares")} />
               </th>
               <th class="border-b border-base-300 py-2.5 text-right font-medium">
-                <.t s="Avg cost" wsb="Cost basis" />
+                <.t {copy("Avg cost")} />
               </th>
               <th class="border-b border-base-300 py-2.5 text-right font-medium">
-                <.t s="Price" wsb="Price" />
+                <.t {copy("Price")} />
               </th>
               <th class="border-b border-base-300 py-2.5 text-right font-medium">
-                <.t s="Value" wsb="Worth" />
+                <.t {pcopy("account", "Value")} />
               </th>
               <th class="border-b border-base-300 py-2.5 text-right font-medium">
-                <.t s="Gain" wsb="Tendies" />
+                <.t {copy("Gain")} />
               </th>
             </tr>
           </thead>

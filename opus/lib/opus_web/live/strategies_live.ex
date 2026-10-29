@@ -20,7 +20,7 @@ defmodule OpusWeb.StrategiesLive do
   import OpusWeb.StrategyParts
 
   alias Opus.Auro.Client
-  alias Opus.Trading.Strategies
+  alias Opus.Trading.{AccountPause, RulesEngine, Strategies}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -33,6 +33,7 @@ defmodule OpusWeb.StrategiesLive do
         sparks: %{},
         stats: %{},
         engine_error: nil,
+        pause: nil,
         as_of: nil
       )
 
@@ -57,6 +58,12 @@ defmodule OpusWeb.StrategiesLive do
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Could not flip the switch: #{describe(reason)}")}
     end
+  end
+
+  def handle_event("resume", _params, socket) do
+    AccountPause.clear()
+    RulesEngine.recompute()
+    {:noreply, socket |> put_flash(:info, "Trading resumed; rules recomputing.") |> load()}
   end
 
   def handle_event("reset", %{"id" => id}, socket) do
@@ -88,6 +95,7 @@ defmodule OpusWeb.StrategiesLive do
       recipes: recipes,
       stats: stats,
       engine_error: engine_error,
+      pause: AccountPause.open(),
       as_of: DateTime.utc_now()
     )
   end
@@ -139,11 +147,11 @@ defmodule OpusWeb.StrategiesLive do
         <header class="flex flex-wrap items-end justify-between gap-4">
           <div class="flex flex-col gap-1">
             <h1 class="text-[24px] font-semibold tracking-tight">
-              <.t s="Strategies" wsb="Plays" />
+              <.t {copy("Strategies")} />
             </h1>
             <span class="text-[13px] text-muted">
               {length(@recipes)} recipes · {Enum.count(@rows, & &1.enabled)} of {length(@rows)}
-              <.t s="enabled" wsb="sending it" />
+              <.t {copy("enabled")} />
               <span :if={@as_of}>· updated {clock(@as_of)}</span>
               <button
                 type="button"
@@ -159,9 +167,34 @@ defmodule OpusWeb.StrategiesLive do
             class="inline-flex min-h-11 items-center gap-2 rounded-field bg-primary px-4 text-[14px] font-semibold text-primary-content hover:brightness-110"
           >
             <.icon name="hero-plus-mini" class="size-4" />
-            <.t s="New strategy" wsb="New play" />
+            <.t {copy("New strategy")} />
           </.link>
         </header>
+
+        <section
+          :if={@pause}
+          role="alert"
+          class="flex flex-wrap items-center justify-between gap-4 rounded-box border border-error/50 bg-base-200 px-5 py-4"
+        >
+          <div class="flex flex-col gap-1">
+            <span class="text-[15px] font-semibold text-error">
+              <.t {copy("Trading is paused: the account fell %{down} from its peak",
+                down: pct(AccountPause.drawdown(@pause.peak_nav, @pause.nav))
+              )} />
+            </span>
+            <span class="text-[13px] text-muted">
+              NAV {money(@pause.nav)} against a peak of {money(@pause.peak_nav)}; the limit is {@pause.limit_pct}%.
+              No strategy opens a trade until you resume. Open trades keep their stops and exits.
+            </span>
+          </div>
+          <button
+            type="button"
+            phx-click="resume"
+            class="min-h-11 rounded-field border border-base-300 px-4 text-[14px] font-medium hover:border-primary"
+          >
+            <.t {copy("Resume trading")} />
+          </button>
+        </section>
 
         <p
           :if={@engine_error}
@@ -172,32 +205,29 @@ defmodule OpusWeb.StrategiesLive do
         </p>
 
         <div role="group" aria-label="Show" class="flex flex-wrap gap-2">
-          <.filter_pill filter={@filter} to={:all} count={length(@recipes)} label="All" wsb="All" />
+          <.filter_pill filter={@filter} to={:all} count={length(@recipes)} label={copy("All")} />
           <.filter_pill
             filter={@filter}
             to={:trading}
             count={count(@recipes, :trading)}
-            label="Trading"
-            wsb="Sending it"
+            label={copy("Trading")}
           />
           <.filter_pill
             filter={@filter}
             to={:off}
             count={count(@recipes, :off)}
-            label="Off"
-            wsb="Benched"
+            label={copy("Off")}
           />
           <.filter_pill
             filter={@filter}
             to={:draft}
             count={count(@recipes, :draft)}
-            label="Drafts"
-            wsb="Napkin math"
+            label={copy("Drafts")}
           />
         </div>
 
         <p :if={@as_of && @shown == []} class="text-[13px] text-muted">
-          <.t s="Nothing here." wsb="Nothing here. Sir, this is a Wendy's." />
+          <.t {copy("Nothing here.")} />
         </p>
 
         <div class="grid grid-cols-[repeat(auto-fit,minmax(min(100%,540px),1fr))] gap-5">
@@ -240,9 +270,9 @@ defmodule OpusWeb.StrategiesLive do
                 label={"Where it bought and sold on #{elem(@sparks[recipe.id], 0)}"}
               />
               <figcaption class="flex flex-wrap gap-x-4 text-[12px] text-muted">
-                <span><span aria-hidden="true" class="text-info">▲</span> <.t s="buy" wsb="load up" /></span>
+                <span><span aria-hidden="true" class="text-info">▲</span> <.t {copy("buy")} /></span>
                 <span><span aria-hidden="true" class="text-warning">▼</span>
-                <.t s="sell" wsb="cash out" /></span>
+                <.t {copy("sell")} /></span>
                 <span>last 120 bars on {elem(@sparks[recipe.id], 0)}, from the rules</span>
               </figcaption>
             </figure>
@@ -251,15 +281,12 @@ defmodule OpusWeb.StrategiesLive do
               :if={recipe.assignments == [] and recipe.runs == []}
               class="m-0 text-[14px] text-muted"
             >
-              <.t
-                s="Not running on any instrument yet, and not tested. Open it to test it on one."
-                wsb="Not riding anything yet. Open it and backtest it before you YOLO."
-              />
+              <.t {copy("Not running on any instrument yet, and not tested. Open it to test it on one.")} />
             </p>
 
             <div :if={recipe.runs != []} class="flex flex-col gap-1">
               <span class="text-[13px] text-muted">
-                <.t s="Also tested on" wsb="Also backtested on" />
+                <.t {copy("Also tested on")} />
               </span>
               <ul class="m-0 flex list-none flex-wrap gap-x-5 gap-y-1 p-0">
                 <li :for={run <- recipe.runs} class="flex items-baseline gap-2 text-[14px]">
@@ -310,8 +337,7 @@ defmodule OpusWeb.StrategiesLive do
   attr :filter, :atom, required: true
   attr :to, :atom, required: true
   attr :count, :integer, required: true
-  attr :label, :string, required: true
-  attr :wsb, :string, required: true
+  attr :label, :map, required: true, doc: "copy/1"
 
   defp filter_pill(assigns) do
     ~H"""
@@ -328,7 +354,7 @@ defmodule OpusWeb.StrategiesLive do
         )
       ]}
     >
-      <.t s={@label} wsb={@wsb} /> · {@count}
+      <.t {@label} /> · {@count}
     </button>
     """
   end
@@ -360,7 +386,7 @@ defmodule OpusWeb.StrategiesLive do
 
   defp status(%{row: %{suspension: suspension}} = assigns) when not is_nil(suspension) do
     ~H"""
-    <span class="text-[14px] font-medium text-error"><.t s="Suspended" wsb="In timeout" /></span>
+    <span class="text-[14px] font-medium text-error"><.t {copy("Suspended")} /></span>
     <span class="text-[13px] text-muted">
       {@row.suspension.trigger_detail} ·
       <button
@@ -369,7 +395,7 @@ defmodule OpusWeb.StrategiesLive do
         phx-value-id={@row.id}
         class="font-medium text-primary hover:brightness-110"
       >
-        <.t s="Reset" wsb="Un-bench" />
+        <.t {copy("Reset")} />
       </button>
     </span>
     """
@@ -377,35 +403,33 @@ defmodule OpusWeb.StrategiesLive do
 
   defp status(%{row: %{enabled: false}} = assigns) do
     ~H"""
-    <span class="text-[14px] font-medium text-muted"><.t s="Off" wsb="Benched" /></span>
-    <span class="text-[13px] text-muted">{curator(@row.curator_mode)}</span>
+    <span class="text-[14px] font-medium text-muted"><.t {copy("Off")} /></span>
     """
   end
 
   defp status(%{row: %{rule: nil}} = assigns) do
     ~H"""
-    <span class="text-[14px] font-medium"><.t s="On, no decision yet" wsb="On, jury's out" /></span>
-    <span class="text-[13px] text-muted">{curator(@row.curator_mode)}</span>
+    <span class="text-[14px] font-medium"><.t {copy("On, no decision yet")} /></span>
     """
   end
 
   defp status(%{row: %{rule: %{enabled: true}}} = assigns) do
     ~H"""
     <span class="text-[14px] font-medium text-success">
-      <.t s="Trading" wsb="Sending it" /><span
+      <.t {copy("Trading")} /><span
         :if={@row.open_trades > 0}
         class="font-normal text-base-content"
       > · {@row.open_trades} open</span>
     </span>
     <span class="text-[13px] text-muted">
-      <.t s={live_line(@stats, @row, :serious)} wsb={live_line(@stats, @row, :wsb)} />
+      <.t {live_line(@stats, @row)} />
     </span>
     """
   end
 
   defp status(assigns) do
     ~H"""
-    <span class="text-[14px] font-medium text-warning"><.t s="Held" wsb="Hands tied" /></span>
+    <span class="text-[14px] font-medium text-warning"><.t {copy("Held")} /></span>
     <span class="truncate text-[13px] text-muted" title={@row.rule.reason}>{@row.rule.reason}</span>
     """
   end
@@ -430,29 +454,28 @@ defmodule OpusWeb.StrategiesLive do
         aria-hidden="true"
         class={["size-2 rounded-full", if(@row.enabled, do: "bg-success", else: "bg-base-300")]}
       />
-      <.t :if={@row.enabled} s="Enabled" wsb="Sending it" />
-      <.t :if={!@row.enabled} s="Disabled" wsb="Benched" />
+      <.t :if={@row.enabled} {copy("Enabled")} />
+      <.t :if={!@row.enabled} {copy("Disabled")} />
     </button>
     """
   end
 
-  defp live_line(%{live: %{"num_trades" => n} = live}, _row, voice)
-       when is_integer(n) and n > 0 do
-    noun = if voice == :wsb, do: "plays", else: "live trades"
-    hit = if voice == :wsb, do: "hit", else: "win"
-    "#{n} #{noun} · #{pct(live["win_rate"])} #{hit} · #{signed_pct(live["total_return"])}"
+  defp live_line(%{live: %{"num_trades" => n} = live}, _row) when is_integer(n) and n > 0 do
+    copy_n(
+      "%{count} live trade · %{win} win · %{return}",
+      "%{count} live trades · %{win} win · %{return}",
+      n,
+      win: pct(live["win_rate"]),
+      return: signed_pct(live["total_return"])
+    )
   end
 
-  defp live_line(_stats, %{last_signal: %{action: action, at: at}}, voice) do
-    verb = if voice == :wsb, do: "last move", else: "last signal"
-    "#{verb} #{String.replace(action, "_", " ")} · #{stamp(at)}"
+  defp live_line(_stats, %{last_signal: %{action: action, at: at}}) do
+    copy("last signal %{action} · %{at}",
+      action: String.replace(action, "_", " "),
+      at: stamp(at)
+    )
   end
 
-  defp live_line(_stats, _row, :wsb), do: "no plays yet, positions or ban"
-  defp live_line(_stats, _row, _voice), do: "no trades yet"
-
-  defp curator("auto"), do: "curator decides"
-  defp curator("pinned_on"), do: "pinned on by hand"
-  defp curator("pinned_off"), do: "pinned off by hand"
-  defp curator(other), do: other
+  defp live_line(_stats, _row), do: copy("no trades yet")
 end

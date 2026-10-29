@@ -1,0 +1,1200 @@
+## "msgid"s in this file come from POT (.pot) files.
+###
+### Do not add, change, or remove "msgid"s manually here as
+### they're tied to the ones in the corresponding POT file
+### (with the same domain).
+###
+### Use "mix gettext.extract --merge" or "mix gettext.merge"
+### to merge POT files into PO files.
+msgid ""
+msgstr ""
+"Language: en\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: lib/opus_web/live/strategies_live.ex:464
+msgid "%{count} live trade · %{win} win · %{return}"
+msgid_plural "%{count} live trades · %{win} win · %{return}"
+msgstr[0] "%{count} play · %{win} hit · %{return}"
+msgstr[1] "%{count} plays · %{win} hit · %{return}"
+
+#: lib/opus_web/live/dashboard_live.ex:388
+msgid "%{count} thing needs you"
+msgid_plural "%{count} things need you"
+msgstr[0] "%{count} thing needs you, regard"
+msgstr[1] "%{count} things need you, regard"
+
+#: lib/opus_web/live/options_live.ex:610
+msgid "%{day} scan · %{count} idea"
+msgid_plural "%{day} scan · %{count} ideas"
+msgstr[0] "%{day} scan · %{count} play · the regards have assembled"
+msgstr[1] "%{day} scan · %{count} plays · the regards have assembled"
+
+#: lib/opus_web/live/options_live.ex:616
+msgid "%{day} scan · %{count} idea · chains captured %{at} UTC"
+msgid_plural "%{day} scan · %{count} ideas · chains captured %{at} UTC"
+msgstr[0] "%{day} scan · %{count} play · the regards have assembled · chains captured %{at} UTC"
+msgstr[1] "%{day} scan · %{count} plays · the regards have assembled · chains captured %{at} UTC"
+
+#: lib/opus_web/live/options_live.ex:1255
+msgid "%{gain} best case"
+msgstr "%{gain} max tendies, no moon for you"
+
+#: lib/opus_web/live/options_live.ex:1229
+#: lib/opus_web/live/options_live.ex:1248
+msgid "+%{premium} kept"
+msgstr "+%{premium} tendies"
+
+#: lib/opus_web/live/options_live.ex:1267
+#: lib/opus_web/live/options_live.ex:1285
+msgid "-%{loss} lost"
+msgstr "−%{loss} · GUH"
+
+#: lib/opus_web/components/paper_book.ex:60
+msgid "A SPY put about 10% below the price, rolled monthly: what crash insurance costs. Paper US$."
+msgstr "Doomsday insurance. Pays when everything burns."
+
+#: lib/opus_web/components/paper_book.ex:44
+msgid "A put spread and a call spread around the price: paid if it goes nowhere. Paper US$."
+msgstr "Betting the market does nothing. Theta and a prayer."
+
+#: lib/opus_web/live/strategy_live.ex:386
+msgid "ADX 14"
+msgstr ""
+
+#: lib/opus_web/live/strategy_live.ex:388
+msgid "ATR 14"
+msgstr ""
+
+#: lib/opus_web/live/accounts_live.ex:163
+msgid "Account"
+msgstr "Bag"
+
+#: lib/opus_web/components/layouts.ex:45
+#: lib/opus_web/live/accounts_live.ex:67
+#: lib/opus_web/live/dashboard_live.ex:332
+msgid "Accounts"
+msgstr "The bag"
+
+#: lib/opus_web/live/dashboard_live.ex:257
+msgid "Act now"
+msgstr "GUH alert"
+
+#: lib/opus_web/live/instruments_live.ex:223
+msgid "Active"
+msgstr "Alive"
+
+#: lib/opus_web/live/strategy_builder_live.ex:784
+msgid "Add a block"
+msgstr "Add a crayon"
+
+#: lib/opus_web/components/whole_history.ex:89
+msgid "Against just holding %{instrument}"
+msgstr "Vs. just buying %{instrument} and touching grass"
+
+#: lib/opus_web/live/strategies_live.ex:208
+msgid "All"
+msgstr ""
+
+#: lib/opus_web/live/options_live.ex:662
+msgid "All %{count}"
+msgstr ""
+
+#: lib/opus_web/components/paper_book.ex:76
+msgid "All books"
+msgstr "All the bags"
+
+#: lib/opus_web/live/dashboard_live.ex:385
+msgid "All clear"
+msgstr "No GUH today"
+
+#: lib/opus_web/live/strategies_live.ex:289
+msgid "Also tested on"
+msgstr "Also backtested on"
+
+#: lib/opus_web/live/strategy_live.ex:442
+msgid "Also tested on (not running there)"
+msgstr "Also backtested on (benched there)"
+
+#: lib/opus_web/live/accounts_live.ex:215
+msgid "Avg cost"
+msgstr "Cost basis"
+
+#: lib/opus_web/components/strategy_parts.ex:55
+msgid "Backtest"
+msgstr "Backtest (hopium)"
+
+#: lib/opus_web/live/strategy_live.ex:400
+msgid "Bollinger width"
+msgstr ""
+
+#: lib/opus_web/live/options_live.ex:1326
+msgid "Breakeven"
+msgstr "Breakeven, where you stop being poor"
+
+#: lib/opus_web/live/strategy_builder_live.ex:560
+msgid "Build the signal from blocks, say when to act on it, and see where it would have bought and sold."
+msgstr "Stack the indicators, say when to send it, and see where it would've printed (or not)."
+
+#: lib/opus_web/components/signal_chart.ex:37
+msgid "Buy"
+msgstr "Load up"
+
+#: lib/opus_web/live/options_live.ex:979
+msgid "Buy it instead"
+msgstr "🚀 Long it instead"
+
+#: lib/opus_web/components/paper_book.ex:48
+msgid "Buys the calls the morning scan flags on dips; sells at double, half, or 21 days. Paper US$."
+msgstr "Buying the dip with calls. YOLO, but with rules."
+
+#: lib/opus_web/live/options_live.ex:664
+msgid "Calls"
+msgstr "Calls 🚀"
+
+#: lib/opus_web/components/paper_book.ex:276
+#: lib/opus_web/live/accounts_live.ex:165
+msgid "Cash"
+msgstr "Dry powder"
+
+#: lib/opus_web/live/options_live.ex:1201
+msgid "Cash-secured put"
+msgstr "Theta gang · cash-secured put"
+
+#: lib/opus_web/live/options_live.ex:479
+msgid "Chain"
+msgstr "The menu"
+
+#: lib/opus_web/live/options_live.ex:1332
+msgid "Chance it pays"
+msgstr "Prints?"
+
+#: lib/opus_web/live/options_live.ex:1338
+msgid "Chance of a profit"
+msgstr "Tendies odds"
+
+#: lib/opus_web/live/options_live.ex:1332
+msgid "Chance of assignment"
+msgstr "Bagholder odds"
+
+#: lib/opus_web/live/strategy_builder_live.ex:596
+msgid "Changing these rules would change a live strategy mid-trade. Pick one:"
+msgstr "Changing the rules mid-play is how accounts die. Pick one:"
+
+#: lib/opus_web/live/dashboard_live.ex:258
+msgid "Check soon"
+msgstr "Keep an eye on it"
+
+#: lib/opus_web/live/dashboard_live.ex:128
+msgid "Checking everything…"
+msgstr "Checking the bags…"
+
+#: lib/opus_web/live/journal_live.ex:167
+msgid "Circuit-breaker suspensions awaiting a manual reset."
+msgstr "The circuit breaker benched these. A human has to un-bench them."
+
+#: lib/opus_web/live/dashboard_live.ex:280
+msgid "Clear"
+msgstr "Cope and clear"
+
+#: lib/opus_web/live/options_live.ex:888
+msgid "Click a strike and the position follows: the ask if you are buying, the bid if you are selling."
+msgstr "Tap a strike and the play follows: the ask when you go long, the bid when you join theta gang."
+
+#: lib/opus_web/live/journal_live.ex:69
+msgid "Closed trades"
+msgstr "Positions or ban"
+
+#: lib/opus_web/live/journal_live.ex:142
+msgid "Config"
+msgstr "Play"
+
+#: lib/opus_web/live/strategy_live.ex:181
+msgid "Copy as a new strategy"
+msgstr "Clone this play"
+
+#: lib/opus_web/live/strategy_builder_live.ex:542
+msgid "Copy of %{name}"
+msgstr "Cloning %{name}"
+
+#: lib/opus_web/live/options_live.ex:1202
+msgid "Covered call"
+msgstr "Theta gang · covered call"
+
+#: lib/opus_web/components/paper_parts.ex:20
+msgid "Crash puts"
+msgstr "Doomsday puts"
+
+#: lib/opus_web/components/paper_parts.ex:21
+msgid "Crash puts · half at double"
+msgstr "Doomsday puts · house money"
+
+#: lib/opus_web/components/layouts.ex:42
+#: lib/opus_web/live/dashboard_live.ex:109
+msgid "Dashboard"
+msgstr "War room"
+
+#: lib/opus_web/live/strategy_builder_live.ex:556
+#: lib/opus_web/live/strategy_live.ex:228
+msgid "Delete"
+msgstr "Yeet"
+
+#: lib/opus_web/live/options_live.ex:663
+msgid "Dip-buy %{count}"
+msgstr "Buy the dip %{count}"
+
+#: lib/opus_web/live/strategies_live.ex:458
+#: lib/opus_web/live/strategy_live.ex:218
+msgid "Disabled"
+msgstr "Benched"
+
+#: lib/opus_web/live/strategy_live.ex:392
+msgid "Distance to MA 20"
+msgstr ""
+
+#: lib/opus_web/live/strategies_live.ex:225
+msgid "Drafts"
+msgstr "Napkin math"
+
+#: lib/opus_web/components/signal_chart.ex:52
+msgid "Each strip under the chart is one rule, lit on the bars it was true. A signal fires where its rules line up."
+msgstr "Each strip is one rule, lit when it was true. When the strips line up, the bot sends it."
+
+#: lib/opus_web/live/strategy_builder_live.ex:605
+msgid "Edit a copy"
+msgstr "Clone it"
+
+#: lib/opus_web/live/strategy_live.ex:192
+msgid "Edit the rules"
+msgstr "Tweak the play"
+
+#: lib/opus_web/live/strategies_live.ex:457
+#: lib/opus_web/live/strategy_live.ex:217
+msgid "Enabled"
+msgstr "Sending it"
+
+#: lib/opus_web/live/journal_live.ex:113
+msgid "Entry slip (bp)"
+msgstr "Entry clip (bp)"
+
+#: lib/opus_web/live/instruments_live.ex:130
+msgid "Every listing Auro knows and which feeds store data for it. Changes apply on the next run."
+msgstr "Every ticker Auro knows and which feeds hoard data for it. Changes land on the next run."
+
+#: lib/opus_web/live/accounts_live.ex:136
+msgid "Everything, in CAD"
+msgstr "Net worth in maple tendies (CAD)"
+
+#: lib/opus_web/live/journal_live.ex:100
+msgid "Execution quality"
+msgstr "Slippage, the hidden vol tax"
+
+#: lib/opus_web/live/journal_live.ex:114
+msgid "Exit slip (bp)"
+msgstr "Exit clip (bp)"
+
+#: lib/opus_web/live/journal_live.ex:236
+msgid "Expectancy"
+msgstr "Tendies per play"
+
+#: lib/opus_web/live/options_live.ex:1344
+msgid "Expected move"
+msgstr "The wiggle"
+
+#: lib/opus_web/live/research_live.ex:239
+msgid "Failed"
+msgstr "Rekt"
+
+#: lib/opus_web/live/journal_live.ex:102
+msgid "Fills vs the backtest's assumed fills, last %{days} days. Positive = worse than backtest."
+msgstr "Fills vs what the backtest assumed, last %{days} days. Positive = you got clipped."
+
+#: lib/opus_web/live/journal_live.ex:214
+msgid "First digest lands next Monday."
+msgstr "First one drops Monday. Positions or ban."
+
+#: lib/opus_web/live/strategy_live.ex:313
+msgid "Flat"
+msgstr "No bags"
+
+#: lib/opus_web/live/journal_live.ex:188
+msgid "Frozen every Monday 08:00 ET for the week before."
+msgstr "Frozen every Monday 08:00 ET for the week before. Screenshots welcome."
+
+#: lib/opus_web/live/accounts_live.ex:224
+msgid "Gain"
+msgstr "Tendies"
+
+#: lib/opus_web/live/strategies_live.ex:432
+#: lib/opus_web/live/strategy_live.ex:587
+msgid "Held"
+msgstr "Hands tied"
+
+#: lib/opus_web/live/journal_live.ex:136
+msgid "Holdout verdicts"
+msgstr "The DD got graded"
+
+#: lib/opus_web/live/strategy_builder_live.ex:593
+msgid "How do you want to change it?"
+msgstr "How we doing this?"
+
+#: lib/opus_web/live/strategy_live.ex:367
+msgid "How it trades"
+msgstr "The DD"
+
+#: lib/opus_web/live/options_live.ex:704
+msgid "IV / RV"
+msgstr "Vol tax"
+
+#: lib/opus_web/live/options_live.ex:766
+msgid "IV / RV over 1 means the market prices more movement than the stock has delivered. Lottery tickets are deltas under 0.15."
+msgstr "Vol tax over 1 means you pay theta gang for the privilege. YOLO is a delta under 0.15: a scratch-off with extra steps."
+
+#: lib/opus_web/live/research_live.ex:236
+msgid "Idea"
+msgstr "Napkin math"
+
+#: lib/opus_web/live/options_live.ex:478
+msgid "Ideas"
+msgstr "Plays"
+
+#: lib/opus_web/components/paper_parts.ex:19
+msgid "Ideas · half at double"
+msgstr "Dip YOLOs · house money"
+
+#: lib/opus_web/live/instruments_live.ex:199
+msgid "Identify via Questrade"
+msgstr "Ask Questrade who dis"
+
+#: lib/opus_web/components/paper_book.ex:621
+#: lib/opus_web/components/paper_book.ex:680
+#: lib/opus_web/components/paper_book.ex:723
+#: lib/opus_web/components/paper_trades.ex:397
+#: lib/opus_web/components/paper_trades.ex:446
+#: lib/opus_web/components/paper_trades.ex:497
+msgid "If it goes well"
+msgstr "If it prints (first one is free)"
+
+#: lib/opus_web/components/paper_book.ex:639
+#: lib/opus_web/components/paper_book.ex:694
+#: lib/opus_web/components/paper_book.ex:730
+#: lib/opus_web/components/paper_trades.ex:410
+#: lib/opus_web/components/paper_trades.ex:459
+#: lib/opus_web/components/paper_trades.ex:520
+msgid "If it goes wrong"
+msgstr "If it goes GUH"
+
+#: lib/opus_web/components/paper_trades.ex:580
+msgid "If it stays calm"
+msgstr "If nothing happens (insurance wasted)"
+
+#: lib/opus_web/components/paper_trades.ex:559
+msgid "If the market crashes"
+msgstr "If it all burns (the put prints)"
+
+#: lib/opus_web/live/options_live.ex:1271
+msgid "If the stock closes above %{breakeven}"
+msgstr "Tendies: stock closes above %{breakeven}"
+
+#: lib/opus_web/live/options_live.ex:1252
+msgid "If the stock closes above %{strike}"
+msgstr "Shares yoinked above %{strike}"
+
+#: lib/opus_web/live/options_live.ex:1289
+msgid "If the stock closes below %{breakeven}"
+msgstr "🌈🐻 tendies: stock closes below %{breakeven}"
+
+#: lib/opus_web/live/options_live.ex:1233
+msgid "If the stock closes below %{strike}"
+msgstr "Bagholder: stock closes below %{strike}"
+
+#: lib/opus_web/live/options_live.ex:1226
+msgid "If the stock stays above %{strike}"
+msgstr "Theta gang wins: stock stays above %{strike}"
+
+#: lib/opus_web/live/options_live.ex:1245
+msgid "If the stock stays below %{strike}"
+msgstr "Theta gang wins: stock stays below %{strike}"
+
+#: lib/opus_web/live/dashboard_live.ex:352
+msgid "Index exposure"
+msgstr "YOLO meter"
+
+#: lib/opus_web/live/accounts_live.ex:114
+msgid "Index exposure for %{month}"
+msgstr "How much to YOLO into the index in %{month}"
+
+#: lib/opus_web/components/layouts.ex:47
+#: lib/opus_web/live/instruments_live.ex:124
+msgid "Instruments"
+msgstr "Tickers"
+
+#: lib/opus_web/components/paper_parts.ex:17
+msgid "Iron condors"
+msgstr "Condor prayers"
+
+#: lib/opus_web/components/whole_history.ex:107
+msgid "Is it fragile?"
+msgstr "Is it just luck, ser?"
+
+#: lib/opus_web/components/layouts.ex:44
+#: lib/opus_web/live/journal_live.ex:67
+msgid "Journal"
+msgstr "Loss porn"
+
+#: lib/opus_web/components/paper_book.ex:262
+msgid "Just holding %{symbols}"
+msgstr "Boring index guy"
+
+#: lib/opus_web/live/strategy_builder_live.ex:628
+msgid "Keep it locked"
+msgstr "Keep diamond hands"
+
+#: lib/opus_web/live/strategy_live.ex:319
+msgid "Last signal"
+msgstr "Last move"
+
+#: lib/opus_web/live/instruments_live.ex:217
+msgid "Listing"
+msgstr "Ticker"
+
+#: lib/opus_web/live/dashboard_live.ex:232
+msgid "Live (OANDA)"
+msgstr "Live (fake) money"
+
+#: lib/opus_web/components/strategy_parts.ex:70
+msgid "Live (forward)"
+msgstr "Real life"
+
+#: lib/opus_web/live/dashboard_live.ex:290
+msgid "Live trading"
+msgstr "Live (fake) money"
+
+#: lib/opus_web/live/accounts_live.ex:99
+msgid "Loading balances…"
+msgstr "Counting tendies…"
+
+#: lib/opus_web/components/strategy_parts.ex:28
+msgid "Locked"
+msgstr "Diamond-handed"
+
+#: lib/opus_web/live/strategy_builder_live.ex:572
+msgid "Locked."
+msgstr "Diamond-handed."
+
+#: lib/opus_web/live/research_live.ex:120
+msgid "Log an idea or a result"
+msgstr "Post some DD"
+
+#: lib/opus_web/live/research_live.ex:159
+msgid "Log it"
+msgstr "Send it"
+
+#: lib/opus_web/live/options_live.ex:1203
+msgid "Long call"
+msgstr "Degen long call 🚀"
+
+#: lib/opus_web/live/options_live.ex:1204
+msgid "Long put"
+msgstr "Gay bear long put 🌈🐻"
+
+#: lib/opus_web/live/options_live.ex:739
+msgid "Lottery"
+msgstr "YOLO"
+
+#: lib/opus_web/live/journal_live.ex:241
+msgid "MFE / MAE"
+msgstr "Peak / pain"
+
+#: lib/opus_web/live/options_live.ex:1303
+msgid "Money at risk"
+msgstr "Loss porn, max"
+
+#: lib/opus_web/live/options_live.ex:1303
+msgid "Money set aside"
+msgstr "Cash parked, wife's boyfriend approved"
+
+#: lib/opus_web/live/dashboard_live.ex:134
+msgid "Needs you"
+msgstr "GUH alerts"
+
+#: lib/opus_web/live/options_live.ex:707
+msgid "Needs · gets"
+msgstr "Needs · wiggle"
+
+#: lib/opus_web/components/paper_book.ex:268
+msgid "Net premium sold"
+msgstr "Theta collected"
+
+#: lib/opus_web/live/strategies_live.ex:170
+#: lib/opus_web/live/strategy_builder_live.ex:540
+msgid "New strategy"
+msgstr "New play"
+
+#: lib/opus_web/live/strategy_live.ex:576
+msgid "No decision yet"
+msgstr "Jury's out"
+
+#: lib/opus_web/live/journal_live.ex:161
+msgid "No holdout runs yet."
+msgstr "Nothing graded yet."
+
+#: lib/opus_web/live/journal_live.ex:95
+msgid "No live trades yet."
+msgstr "No plays yet. Positions or ban."
+
+#: lib/opus_web/live/journal_live.ex:131
+msgid "No measured fills yet. Rows appear as strategies trade."
+msgstr "No fills measured yet. Rows appear once the plays play."
+
+#: lib/opus_web/live/strategy_builder_live.ex:619
+msgid "No new trades until it passes the tests again and you switch it back on. Not possible while a trade is open."
+msgstr "No new plays until it passes again and you un-bench it. Can't do it while a bag is open."
+
+#: lib/opus_web/components/signal_chart.ex:56
+msgid "No trades in this window: the rules never lined up."
+msgstr "Zero plays in this window. The rules never lined up. Theta gang would be proud."
+
+#: lib/opus_web/live/strategy_live.ex:326
+msgid "None yet"
+msgstr "Crickets"
+
+#: lib/opus_web/live/strategy_live.ex:517
+msgid "None yet."
+msgstr "Crickets."
+
+#: lib/opus_web/live/strategy_live.ex:460
+msgid "None yet. The first trade this strategy opens will appear here with why it closed."
+msgstr "No positions. Ban pending. The first play shows up here with how it died."
+
+#: lib/opus_web/live/strategies_live.ex:284
+msgid "Not running on any instrument yet, and not tested. Open it to test it on one."
+msgstr "Not riding anything yet. Open it and backtest it before you YOLO."
+
+#: lib/opus_web/components/strategy_parts.ex:20
+msgid "Not trading, so its rules can be changed"
+msgstr "Benched, so you can mess with it"
+
+#: lib/opus_web/live/options_live.ex:439
+msgid "Nothing here places a trade."
+msgstr "Not financial advice. This page places nothing. It eats crayons."
+
+#: lib/opus_web/live/strategies_live.ex:230
+msgid "Nothing here."
+msgstr "Nothing here. Sir, this is a Wendy's."
+
+#: lib/opus_web/live/instruments_live.ex:206
+#: lib/opus_web/live/research_live.ex:164
+msgid "Nothing matches."
+msgstr "Sir, this is a Wendy's."
+
+#: lib/opus_web/live/dashboard_live.ex:140
+msgid "Nothing needs you."
+msgstr "Sir, this is a Wendy's. Nothing to do."
+
+#: lib/opus_web/live/dashboard_live.ex:190
+msgid "Nothing open."
+msgstr "No bags. Cash gang."
+
+#: lib/opus_web/live/journal_live.ex:182
+msgid "Nothing suspended."
+msgstr "Nobody in timeout. Apes together strong 🦍"
+
+#: lib/opus_web/components/paper_book.ex:251
+msgid "Nothing yet: the first trades open at the next 10:30 New York check."
+msgstr "No bags yet. The first trades open at the next 10:30 check."
+
+#: lib/opus_web/live/strategies_live.ex:219
+#: lib/opus_web/live/strategies_live.ex:406
+#: lib/opus_web/live/strategy_live.ex:569
+msgid "Off"
+msgstr "Benched"
+
+#: lib/opus_web/live/strategies_live.ex:412
+msgid "On, no decision yet"
+msgstr "On, jury's out"
+
+#: lib/opus_web/live/strategy_live.ex:298
+msgid "Open position"
+msgstr "The bag"
+
+#: lib/opus_web/live/dashboard_live.ex:155
+msgid "Open positions"
+msgstr "Bags currently held"
+
+#: lib/opus_web/live/strategy_live.ex:457
+msgid "Open the journal"
+msgstr "Open the loss porn"
+
+#: lib/opus_web/components/paper_book.ex:149
+msgid "Open trades"
+msgstr "Bags held"
+
+#: lib/opus_web/components/layouts.ex:46
+#: lib/opus_web/live/options_live.ex:432
+msgid "Options"
+msgstr "Casino"
+
+#: lib/opus_web/components/paper_book.ex:299
+#: lib/opus_web/components/paper_trades.ex:47
+msgid "Overview"
+msgstr "The whole degenerate book"
+
+#: lib/opus_web/live/options_live.ex:1236
+msgid "Own shares at %{breakeven} effective"
+msgstr "Bags at %{breakeven}, hold the line 💎🙌"
+
+#: lib/opus_web/components/paper_book.ex:257
+msgid "P&L"
+msgstr "Gains (or loss porn)"
+
+#: lib/opus_web/live/dashboard_live.ex:203
+msgid "P&L so far"
+msgstr "Tendies so far"
+
+#: lib/opus_web/components/paper_book.ex:145
+msgid "P&L, all books"
+msgstr "Gains (or loss porn)"
+
+#: lib/opus_web/live/options_live.ex:451
+msgid "Paper book"
+msgstr "Theta gang"
+
+#: lib/opus_web/live/dashboard_live.ex:311
+msgid "Paper options"
+msgstr "Casino chips"
+
+#: lib/opus_web/live/research_live.ex:240
+msgid "Parked"
+msgstr "Diamond-handing"
+
+#: lib/opus_web/components/strategy_parts.ex:85
+msgid "Passed"
+msgstr "Printed"
+
+#: lib/opus_web/live/options_live.ex:519
+msgid "Pick a contract"
+msgstr "Pick a play, regard"
+
+#: lib/opus_web/live/options_live.ex:480
+msgid "Position"
+msgstr "The play"
+
+#: lib/opus_web/live/strategy_live.ex:406
+msgid "Position in bands"
+msgstr ""
+
+#: lib/opus_web/live/options_live.ex:1313
+msgid "Premium"
+msgstr ""
+
+#: lib/opus_web/components/paper_book.ex:273
+msgid "Premium paid"
+msgstr "Lit on fire (so far)"
+
+#: lib/opus_web/live/strategy_builder_live.ex:935
+msgid "Preview"
+msgstr "Hindsight"
+
+#: lib/opus_web/live/accounts_live.ex:218
+msgid "Price"
+msgstr ""
+
+#: lib/opus_web/live/options_live.ex:1002
+msgid "Price by price, at expiry"
+msgstr "Price by price, for the DD post"
+
+#: lib/opus_web/components/paper_book.ex:222
+msgid "Priced at %{time} New York. Open trades update every 15 minutes while the market is open, and a take-profit fills as soon as a quote reaches it."
+msgstr "Marked at %{time} NY. Refreshes every 15 min; take-profits fill the second they print."
+
+#: lib/opus_web/live/journal_live.ex:197
+#: lib/opus_web/live/journal_live.ex:234
+msgid "Profit factor"
+msgstr ""
+
+#: lib/opus_web/live/strategy_builder_live.ex:841
+msgid "Protect it"
+msgstr "Risk management (lol)"
+
+#: lib/opus_web/components/paper_parts.ex:16
+msgid "Put spreads"
+msgstr "Spread degen"
+
+#: lib/opus_web/live/options_live.ex:665
+msgid "Puts"
+msgstr "Puts 🌈🐻"
+
+#: lib/opus_web/live/strategy_live.ex:396
+msgid "Rate of change"
+msgstr ""
+
+#: lib/opus_web/live/strategy_live.ex:511
+msgid "Recent signals"
+msgstr "Recent moves"
+
+#: lib/opus_web/live/strategy_live.ex:282
+msgid "Regime"
+msgstr "Vibe check"
+
+#: lib/opus_web/components/layouts.ex:48
+#: lib/opus_web/live/research_live.ex:84
+msgid "Research"
+msgstr "DD"
+
+#: lib/opus_web/live/strategies_live.ex:398
+#: lib/opus_web/live/strategy_live.ex:244
+msgid "Reset"
+msgstr "Un-bench"
+
+#: lib/opus_web/components/trade_story.ex:67
+#: lib/opus_web/live/strategy_live.ex:472
+msgid "Result"
+msgstr "Tendies"
+
+#: lib/opus_web/live/strategy_live.ex:379
+msgid "Right now"
+msgstr "Vibe readout"
+
+#: lib/opus_web/live/journal_live.ex:116
+msgid "Round trip excess (bp)"
+msgstr "Total clip (bp)"
+
+#: lib/opus_web/live/strategy_live.ex:279
+msgid "Rules engine"
+msgstr "The overlords"
+
+#: lib/opus_web/components/paper_book.ex:150
+msgid "Running for"
+msgstr "Days of copium"
+
+#: lib/opus_web/live/strategy_builder_live.ex:1008
+msgid "Save and run the tests"
+msgstr "Send it to the backtest"
+
+#: lib/opus_web/live/strategy_builder_live.ex:1019
+msgid "Save as a draft"
+msgstr "Save the napkin"
+
+#: lib/opus_web/live/strategy_builder_live.ex:1006
+msgid "Save changes"
+msgstr "Send it"
+
+#: lib/opus_web/components/signal_chart.ex:61
+msgid "Selected trade"
+msgstr "This play"
+
+#: lib/opus_web/components/signal_chart.ex:38
+msgid "Sell"
+msgstr "Cash out"
+
+#: lib/opus_web/live/options_live.ex:978
+msgid "Sell it instead"
+msgstr "🌈🐻 Bear it instead"
+
+#: lib/opus_web/live/accounts_live.ex:212
+msgid "Shares"
+msgstr ""
+
+#: lib/opus_web/live/instruments_live.ex:170
+msgid "Show retired"
+msgstr "Show the dead ones"
+
+#: lib/opus_web/live/strategy_builder_live.ex:721
+msgid "Signals it watches"
+msgstr "Indicators (the crayons)"
+
+#: lib/opus_web/live/journal_live.ex:171
+msgid "Since"
+msgstr ""
+
+#: lib/opus_web/live/strategy_live.ex:373
+msgid "Size here"
+msgstr "Position size"
+
+#: lib/opus_web/live/accounts_live.ex:164
+msgid "Source"
+msgstr ""
+
+#: lib/opus_web/live/journal_live.ex:115
+msgid "Spread (bp)"
+msgstr ""
+
+#: lib/opus_web/live/strategy_builder_live.ex:644
+msgid "Start from an example"
+msgstr "Copy someone's homework"
+
+#: lib/opus_web/components/layouts.ex:43
+#: lib/opus_web/live/strategies_live.ex:150
+#: lib/opus_web/live/strategy_builder_live.ex:534
+#: lib/opus_web/live/strategy_live.ex:162
+msgid "Strategies"
+msgstr "Plays"
+
+#: lib/opus_web/live/journal_live.ex:111
+#: lib/opus_web/live/journal_live.ex:171
+msgid "Strategy"
+msgstr "Play"
+
+#: lib/opus_web/live/strategies_live.ex:389
+msgid "Suspended"
+msgstr "In timeout"
+
+#: lib/opus_web/live/strategy_live.ex:236
+msgid "Suspended by the circuit breaker"
+msgstr "Benched by the circuit breaker"
+
+#: lib/opus_web/live/strategy_builder_live.ex:617
+msgid "Switch it off everywhere, then edit"
+msgstr "Bench it, then tweak"
+
+#: lib/opus_web/live/accounts_live.ex:209
+msgid "Symbol"
+msgstr "Ticker"
+
+#: lib/opus_web/live/strategy_builder_live.ex:1056
+msgid "Test results"
+msgstr "Receipts"
+
+#: lib/opus_web/live/strategy_live.ex:427
+msgid "Test results on %{instrument}"
+msgstr "Receipts on %{instrument}"
+
+#: lib/opus_web/live/research_live.ex:237
+msgid "Testing"
+msgstr "In the lab"
+
+#: lib/opus_web/live/journal_live.ex:78
+msgid "The latest %{count}, newest first. Strategy records cover the last %{days} days."
+msgstr "Newest first. Click one for the post-mortem."
+
+#: lib/opus_web/live/strategy_builder_live.ex:609
+msgid "The original keeps trading untouched. The copy goes through the tests, then you choose where it runs."
+msgstr "The original keeps cooking. The clone has to pass the tests before it gets money."
+
+#: lib/opus_web/live/journal_live.ex:137
+msgid "The pipeline's one look at bars after the holdout start."
+msgstr "The pipeline's one look at bars it had never seen."
+
+#: lib/opus_web/components/paper_book.ex:54
+msgid "The same calls, two at a time: half sold at double to pay back the cost, the rest rides. Paper US$."
+msgstr "Same dip YOLOs, but take the house's money back at a double and let the rest ride."
+
+#: lib/opus_web/components/paper_book.ex:66
+msgid "The same crash puts, two at a time: half sold at double, the rest held to the roll. Paper US$."
+msgstr "Doomsday puts, but cash half at a double and let the rest burn with the market."
+
+#: lib/opus_web/components/paper_book.ex:38
+msgid "The wheel's put with a cheaper put bought below it: the crash risk capped. Paper US$."
+msgstr "Selling puts with a seatbelt on. Paper money, capped copium."
+
+#: lib/opus_web/components/paper_book.ex:32
+msgid "The wheel: sell puts, take the shares if assigned, sell calls on them. Paper US$, nothing real."
+msgstr "Selling puts to degens every morning. Paper money, real copium."
+
+#: lib/opus_web/components/signal_chart.ex:42
+msgid "Time in a trade"
+msgstr "Holding the bag"
+
+#: lib/opus_web/components/trade_story.ex:64
+msgid "Trade"
+msgstr "Play"
+
+#: lib/opus_web/live/journal_live.ex:112
+#: lib/opus_web/live/journal_live.ex:145
+#: lib/opus_web/live/journal_live.ex:194
+#: lib/opus_web/live/journal_live.ex:227
+msgid "Trades"
+msgstr "Plays"
+
+#: lib/opus_web/live/strategies_live.ex:213
+#: lib/opus_web/live/strategies_live.ex:419
+#: lib/opus_web/live/strategy_live.ex:586
+msgid "Trading"
+msgstr "Sending it"
+
+#: lib/opus_web/live/journal_live.ex:171
+msgid "Trigger"
+msgstr "Why"
+
+#: lib/opus_web/live/options_live.ex:535
+msgid "Type a contract"
+msgstr "Type your own degen contract"
+
+#: lib/opus_web/live/options_live.ex:1274
+msgid "Unlimited upside"
+msgstr "To the moon 🚀"
+
+#: lib/opus_web/live/strategy_builder_live.ex:582
+#: lib/opus_web/live/strategy_live.ex:194
+msgid "Unlock to edit"
+msgstr "Paper-hand the lock"
+
+#: lib/opus_web/live/options_live.ex:971
+msgid "Update"
+msgstr "Send it"
+
+#: lib/opus_web/components/paper_book.ex:255
+msgid "Value"
+msgstr "Net worth"
+
+#: lib/opus_web/components/paper_book.ex:143
+msgid "Value, all books"
+msgstr "Net worth"
+
+#: lib/opus_web/live/instruments_live.ex:220
+msgid "Vendor names"
+msgstr "Aliases"
+
+#: lib/opus_web/live/journal_live.ex:143
+msgid "Verdict"
+msgstr ""
+
+#: lib/opus_web/live/journal_live.ex:193
+msgid "Week of"
+msgstr ""
+
+#: lib/opus_web/live/journal_live.ex:187
+msgid "Weekly digests"
+msgstr "Weekly loss porn"
+
+#: lib/opus_web/live/dashboard_live.ex:166
+msgid "What happened"
+msgstr "Tendies report"
+
+#: lib/opus_web/components/paper_book.ex:552
+#: lib/opus_web/components/paper_trades.ex:235
+msgid "What happens next"
+msgstr "The plan, regard"
+
+#: lib/opus_web/live/strategy_builder_live.ex:969
+msgid "What happens when you save"
+msgstr "What happens when you send it"
+
+#: lib/opus_web/live/strategy_builder_live.ex:677
+msgid "What it is"
+msgstr "The play"
+
+#: lib/opus_web/live/dashboard_live.ex:263
+msgid "What to do:"
+msgstr "The play:"
+
+#: lib/opus_web/components/trade_story.ex:144
+msgid "What to take from it"
+msgstr "Lessons, regard"
+
+#: lib/opus_web/components/paper_book.ex:154
+msgid "What to take from it:"
+msgstr "The play:"
+
+#: lib/opus_web/live/research_live.ex:91
+msgid "What we tried, what held up, what didn't, and what's worth another look."
+msgstr "Tendies, the graveyard, and the ones we're still holding. Not financial advice."
+
+#: lib/opus_web/components/paper_parts.ex:15
+msgid "Wheel"
+msgstr "Theta gang"
+
+#: lib/opus_web/live/journal_live.ex:146
+msgid "When"
+msgstr ""
+
+#: lib/opus_web/live/strategy_builder_live.ex:811
+msgid "When to act"
+msgstr "When to send it"
+
+#: lib/opus_web/components/trade_story.ex:70
+#: lib/opus_web/live/strategy_live.ex:476
+msgid "Why it closed"
+msgstr "How it died"
+
+#: lib/opus_web/live/journal_live.ex:195
+#: lib/opus_web/live/journal_live.ex:228
+msgid "Win rate"
+msgstr "Hit rate"
+
+#: lib/opus_web/live/options_live.ex:445
+msgid "Workbench"
+msgstr "The casino floor"
+
+#: lib/opus_web/live/research_live.ex:238
+msgid "Worked"
+msgstr "Printed"
+
+#: lib/opus_web/live/options_live.ex:1350
+msgid "Worst case"
+msgstr "Worst case · GUH"
+
+#: lib/opus_web/live/options_live.ex:1320
+msgid "Yield"
+msgstr "Theta gang pay"
+
+#: lib/opus_web/live/strategy_builder_live.ex:574
+msgid "You can look and preview, but not change anything."
+msgstr "Look, don't touch."
+
+#: lib/opus_web/live/options_live.ex:448
+msgid "Your own contract"
+msgstr "Type your own degen contract"
+
+#: lib/opus_web/live/options_live.ex:873
+msgid "at the money"
+msgstr "ATM"
+
+#: lib/opus_web/live/strategies_live.ex:273
+msgid "buy"
+msgstr "load up"
+
+#: lib/opus_web/live/strategy_live.ex:590
+msgid "decided"
+msgstr "ruled"
+
+#: lib/opus_web/live/strategy_live.ex:174
+msgid "deployed"
+msgstr "sent"
+
+#: lib/opus_web/live/strategy_live.ex:570
+msgid "disabled, the rules engine skips it"
+msgstr "benched, the overlords skip it"
+
+#: lib/opus_web/live/strategies_live.ex:154
+msgid "enabled"
+msgstr "sending it"
+
+#: lib/opus_web/live/research_live.ex:87
+msgid "entries"
+msgstr "posts of DD"
+
+#: lib/opus_web/live/strategy_live.ex:338
+msgid "every buy and sell the rules made over the last 120 bars"
+msgstr "every time it would have loaded up or cashed out, last 120 bars"
+
+#: lib/opus_web/live/strategy_live.ex:513
+msgid "every evaluation that did something, newest first"
+msgstr "every time the bot twitched, newest first"
+
+#: lib/opus_web/live/options_live.ex:654
+msgid "implied vs realized, at the money · cheapest first"
+msgstr "vol tax at the money · cheapest first"
+
+#: lib/opus_web/live/accounts_live.ex:120
+msgid "invested, the rest in cash"
+msgstr "sent, the rest on the sidelines"
+
+#: lib/opus_web/live/strategies_live.ex:474
+msgid "last signal %{action} · %{at}"
+msgstr "last move %{action} · %{at}"
+
+#: lib/opus_web/live/instruments_live.ex:127
+msgid "listings shown"
+msgstr "tickers in the book"
+
+#: lib/opus_web/live/options_live.ex:607
+msgid "no scan yet"
+msgstr ""
+
+#: lib/opus_web/live/strategies_live.ex:480
+msgid "no trades yet"
+msgstr "no plays yet, positions or ban"
+
+#: lib/opus_web/live/accounts_live.ex:203
+msgid "positions"
+msgstr "bags"
+
+#: lib/opus_web/live/strategies_live.ex:275
+msgid "sell"
+msgstr "cash out"
+
+#: lib/opus_web/components/paper_book.ex:476
+msgid "shares from an assignment"
+msgstr "shares (bagholding)"
+
+#: lib/opus_web/live/options_live.ex:1292
+msgctxt "buyer"
+msgid "%{gain} best case"
+msgstr "%{gain} if it goes to zero, hedgies r fuk"
+
+#: lib/opus_web/live/options_live.ex:1283
+msgctxt "buyer"
+msgid "If the stock stays above %{strike}"
+msgstr "GUH: stock stays above %{strike}"
+
+#: lib/opus_web/live/options_live.ex:1264
+msgctxt "buyer"
+msgid "If the stock stays below %{strike}"
+msgstr "GUH: stock stays below %{strike}"
+
+#: lib/opus_web/live/accounts_live.ex:166
+#: lib/opus_web/live/accounts_live.ex:221
+msgctxt "account"
+msgid "Value"
+msgstr "Worth"
+
+#: lib/opus_web/live/journal_live.ex:196
+msgctxt "column"
+msgid "P&L"
+msgstr "Tendies"
+
+#: lib/opus_web/live/options_live.ex:804
+msgctxt "heading"
+msgid "Chain"
+msgstr "The menu (option chain)"
+
+#: lib/opus_web/live/options_live.ex:652
+msgctxt "heading"
+msgid "Ideas"
+msgstr "Today's plays"
+
+#: lib/opus_web/components/paper_parts.ex:18
+msgctxt "paper book"
+msgid "Ideas"
+msgstr "Dip YOLOs"
+
+#: lib/opus_web/live/research_live.ex:109
+msgctxt "research"
+msgid "All"
+msgstr "All of it"
+
+#: lib/opus_web/live/journal_live.ex:166
+msgctxt "section"
+msgid "Suspended"
+msgstr "Timeouts"
+
+#: lib/opus_web/live/journal_live.ex:76
+msgctxt "section"
+msgid "Trades"
+msgstr "The plays, one by one"
+
+#: lib/opus_web/live/strategy_live.ex:453
+msgctxt "strategy page"
+msgid "Trades"
+msgstr "Positions (or ban)"
+
+#: lib/opus_web/components/strategy_parts.ex:88
+msgctxt "test result"
+msgid "Failed"
+msgstr "GUH"
+
+#: lib/opus_web/live/journal_live.ex:230
+msgctxt "total"
+msgid "P&L"
+msgstr "Tendies, net"
+
+#: lib/opus_web/live/strategies_live.ex:195
+msgid "Resume trading"
+msgstr "Unbench the account"
+
+#: lib/opus_web/live/strategies_live.ex:181
+msgid "Trading is paused: the account fell %{down} from its peak"
+msgstr "GUH. Account down %{down} from the top, everything's benched"
+
+#: lib/opus_web/live/strategy_live.ex:593
+msgid "Circuit breaker off: kept trading through losing streaks by choice."
+msgstr "No circuit breaker. Diamond hands through the red, by choice."
+
+#: lib/opus_web/live/strategy_builder_live.ex:1033
+msgid "Over its whole history on %{instrument}"
+msgstr "The full send on %{instrument}, every bar"
+
+#: lib/opus_web/live/journal_live.ex:144
+msgid "Sharpe (a year)"
+msgstr ""

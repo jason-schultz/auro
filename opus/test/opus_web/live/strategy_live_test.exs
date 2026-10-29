@@ -80,6 +80,9 @@ defmodule OpusWeb.StrategyLiveTest do
     assert html =~ "Locked"
     assert html =~ "Unlock to edit"
     assert html =~ "Never run through the testing pipeline."
+    assert html =~ "Against just holding NAS100_USD"
+    assert html =~ "Is it fragile?"
+    assert html =~ "Noise band · Sessions to average"
     assert html =~ "No completed candles stored"
     assert html =~ "unavailable while it is down"
   end

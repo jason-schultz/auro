@@ -64,19 +64,22 @@ defmodule OpusWeb.JournalLive do
     <Layouts.app flash={@flash}>
       <div class="flex flex-col gap-12">
         <header class="flex flex-wrap items-baseline justify-between gap-3">
-          <h1 class="text-[22px] font-semibold tracking-tight"><.t s="Journal" wsb="Loss porn" /></h1>
+          <h1 class="text-[22px] font-semibold tracking-tight"><.t {copy("Journal")} /></h1>
           <span class="text-[13px] text-muted">
-            <.t s="Closed trades" wsb="Positions or ban" />, last {@kpi_days} days · {clock(@as_of)}
+            <.t {copy("Closed trades")} />, last {@kpi_days} days · {clock(@as_of)}
           </span>
         </header>
 
         <.kpis kpis={@kpis} />
 
         <.section
-          title="Trades"
-          wsb_title="The plays, one by one"
-          hint={"The latest #{length(@trades)}, newest first. Strategy records cover the last #{@kpi_days} days."}
-          wsb_hint="Newest first. Click one for the post-mortem."
+          title={pcopy("section", "Trades")}
+          hint={
+            copy("The latest %{count}, newest first. Strategy records cover the last %{days} days.",
+              count: length(@trades),
+              days: @kpi_days
+            )
+          }
         >
           <.strategy_filter :if={@strategies != []} strategies={@strategies} selected={@strategy} />
           <div
@@ -89,25 +92,28 @@ defmodule OpusWeb.JournalLive do
             </div>
           </div>
           <.empty :if={@trades == []}>
-            <.t s="No live trades yet." wsb="No plays yet. Positions or ban." />
+            <.t {copy("No live trades yet.")} />
           </.empty>
         </.section>
 
         <.section
-          title="Execution quality"
-          wsb_title="Slippage, the hidden vol tax"
-          hint={"Fills vs the backtest's assumed fills, last #{@execution_days} days. Positive = worse than backtest."}
-          wsb_hint={"Fills vs what the backtest assumed, last #{@execution_days} days. Positive = you got clipped."}
+          title={copy("Execution quality")}
+          hint={
+            copy(
+              "Fills vs the backtest's assumed fills, last %{days} days. Positive = worse than backtest.",
+              days: @execution_days
+            )
+          }
         >
           <.review_table
             :if={@execution != []}
             cols={[
-              {"Strategy", :left, "Play"},
-              {"Trades", :right, "Plays"},
-              {"Entry slip (bp)", :right, "Entry clip (bp)"},
-              {"Exit slip (bp)", :right, "Exit clip (bp)"},
-              {"Spread (bp)", :right, "Spread (bp)"},
-              {"Round trip excess (bp)", :right, "Total clip (bp)"}
+              {copy("Strategy"), :left},
+              {copy("Trades"), :right},
+              {copy("Entry slip (bp)"), :right},
+              {copy("Exit slip (bp)"), :right},
+              {copy("Spread (bp)"), :right},
+              {copy("Round trip excess (bp)"), :right}
             ]}
           >
             <tr :for={e <- @execution}>
@@ -122,27 +128,22 @@ defmodule OpusWeb.JournalLive do
             </tr>
           </.review_table>
           <.empty :if={@execution == []}>
-            <.t
-              s="No measured fills yet. Rows appear as strategies trade."
-              wsb="No fills measured yet. Rows appear once the plays play."
-            />
+            <.t {copy("No measured fills yet. Rows appear as strategies trade.")} />
           </.empty>
         </.section>
 
         <.section
-          title="Holdout verdicts"
-          wsb_title="The DD got graded"
-          hint="The pipeline's one look at bars after the holdout start."
-          wsb_hint="The pipeline's one look at bars it had never seen."
+          title={copy("Holdout verdicts")}
+          hint={copy("The pipeline's one look at bars after the holdout start.")}
         >
           <.review_table
             :if={@holdouts != []}
             cols={[
-              {"Config", :left, "Play"},
-              {"Verdict", :left, "Verdict"},
-              {"Sharpe", :right, "Sharpe"},
-              {"Trades", :right, "Plays"},
-              {"When", :right, "When"}
+              {copy("Config"), :left},
+              {copy("Verdict"), :left},
+              {copy("Sharpe (a year)"), :right},
+              {copy("Trades"), :right},
+              {copy("When"), :right}
             ]}
           >
             <tr :for={h <- @holdouts}>
@@ -151,25 +152,23 @@ defmodule OpusWeb.JournalLive do
                 {h.status}
                 <span :if={h.failure_reason} class="text-muted"> · {h.failure_reason}</span>
               </td>
-              <td class="py-2.5 text-right">{stat(h.stats, "sharpe")}</td>
+              <td class="py-2.5 text-right">{stat(h.stats, "annual_sharpe")}</td>
               <td class="py-2.5 text-right">{stat(h.stats, "num_trades")}</td>
               <td class="py-2.5 text-right text-muted">{day(h.evaluated_at)}</td>
             </tr>
           </.review_table>
           <.empty :if={@holdouts == []}>
-            <.t s="No holdout runs yet." wsb="Nothing graded yet." />
+            <.t {copy("No holdout runs yet.")} />
           </.empty>
         </.section>
 
         <.section
-          title="Suspended"
-          wsb_title="Timeouts"
-          hint="Circuit-breaker suspensions awaiting a manual reset."
-          wsb_hint="The circuit breaker benched these. A human has to un-bench them."
+          title={pcopy("section", "Suspended")}
+          hint={copy("Circuit-breaker suspensions awaiting a manual reset.")}
         >
           <.review_table
             :if={@suspensions != []}
-            cols={[{"Strategy", :left, "Play"}, {"Trigger", :left, "Why"}, {"Since", :right, "Since"}]}
+            cols={[{copy("Strategy"), :left}, {copy("Trigger"), :left}, {copy("Since"), :right}]}
           >
             <tr :for={s <- @suspensions}>
               <td class="py-2.5"><.strategy_label row={s} /></td>
@@ -180,24 +179,22 @@ defmodule OpusWeb.JournalLive do
             </tr>
           </.review_table>
           <.empty :if={@suspensions == []}>
-            <.t s="Nothing suspended." wsb="Nobody in timeout. Apes together strong 🦍" />
+            <.t {copy("Nothing suspended.")} />
           </.empty>
         </.section>
 
         <.section
-          title="Weekly digests"
-          wsb_title="Weekly loss porn"
-          hint="Frozen every Monday 08:00 ET for the week before."
-          wsb_hint="Frozen every Monday 08:00 ET for the week before. Screenshots welcome."
+          title={copy("Weekly digests")}
+          hint={copy("Frozen every Monday 08:00 ET for the week before.")}
         >
           <.review_table
             :if={@digests != []}
             cols={[
-              {"Week of", :left, "Week of"},
-              {"Trades", :right, "Plays"},
-              {"Win rate", :right, "Hit rate"},
-              {"P&L", :right, "Tendies"},
-              {"Profit factor", :right, "Profit factor"}
+              {copy("Week of"), :left},
+              {copy("Trades"), :right},
+              {copy("Win rate"), :right},
+              {pcopy("column", "P&L"), :right},
+              {copy("Profit factor"), :right}
             ]}
           >
             <tr :for={d <- @digests}>
@@ -214,7 +211,7 @@ defmodule OpusWeb.JournalLive do
             </tr>
           </.review_table>
           <.empty :if={@digests == []}>
-            <.t s="First digest lands next Monday." wsb="First one drops Monday. Positions or ban." />
+            <.t {copy("First digest lands next Monday.")} />
           </.empty>
         </.section>
       </div>
@@ -227,56 +224,50 @@ defmodule OpusWeb.JournalLive do
   defp kpis(assigns) do
     ~H"""
     <section class="grid grid-cols-2 gap-x-8 gap-y-6 sm:grid-cols-3 lg:grid-cols-6">
-      <.kpi label="Trades" wsb_label="Plays" value={@kpis.trade_count} />
-      <.kpi label="Win rate" wsb_label="Hit rate" value={pct(@kpis.win_rate_pct / 100)} />
+      <.kpi label={copy("Trades")} value={@kpis.trade_count} />
+      <.kpi label={copy("Win rate")} value={pct(@kpis.win_rate_pct / 100)} />
       <.kpi
-        label="P&L"
-        wsb_label="Tendies, net"
+        label={pcopy("total", "P&L")}
         value={money(@kpis.total_pnl_cad)}
         class={pnl_class(@kpis.total_pnl_cad)}
       />
-      <.kpi label="Profit factor" wsb_label="Profit factor" value={ratio(@kpis.profit_factor)} />
+      <.kpi label={copy("Profit factor")} value={ratio(@kpis.profit_factor)} />
       <.kpi
-        label="Expectancy"
-        wsb_label="Tendies per play"
+        label={copy("Expectancy")}
         value={money(@kpis.expectancy_cad)}
         class={pnl_class(@kpis.expectancy_cad)}
       />
       <.kpi
-        label="MFE / MAE"
-        wsb_label="Peak / pain"
+        label={copy("MFE / MAE")}
         value={"#{pct(@kpis.avg_mfe_pct, 2)} / #{pct(@kpis.avg_mae_pct, 2)}"}
       />
     </section>
     """
   end
 
-  attr :label, :string, required: true
-  attr :wsb_label, :string, default: nil
+  attr :label, :map, required: true, doc: "copy/1"
   attr :value, :any, required: true
   attr :class, :any, default: nil
 
   defp kpi(assigns) do
     ~H"""
     <div class="flex flex-col gap-1">
-      <span class="text-[13px] text-muted"><.t s={@label} wsb={@wsb_label || @label} /></span>
+      <span class="text-[13px] text-muted"><.t {@label} /></span>
       <span class={["text-2xl font-semibold tracking-tight", @class]}>{@value}</span>
     </div>
     """
   end
 
-  attr :title, :string, required: true
-  attr :wsb_title, :string, default: nil
-  attr :hint, :string, default: nil
-  attr :wsb_hint, :string, default: nil
+  attr :title, :map, required: true, doc: "copy/1"
+  attr :hint, :map, default: nil, doc: "copy/1"
   slot :inner_block, required: true
 
   defp section(assigns) do
     ~H"""
     <section class="flex flex-col gap-3">
       <div class="flex flex-wrap items-baseline justify-between gap-2">
-        <span class="text-[15px] font-semibold"><.t s={@title} wsb={@wsb_title || @title} /></span>
-        <span :if={@hint} class="text-[13px] text-muted"><.t s={@hint} wsb={@wsb_hint || @hint} /></span>
+        <span class="text-[15px] font-semibold"><.t {@title} /></span>
+        <span :if={@hint} class="text-[13px] text-muted"><.t {@hint} /></span>
       </div>
       {render_slot(@inner_block)}
     </section>
@@ -293,14 +284,14 @@ defmodule OpusWeb.JournalLive do
         <thead>
           <tr class="text-xs text-muted">
             <th
-              :for={{label, align, meme} <- @cols}
+              :for={{label, align} <- @cols}
               class={[
                 "border-b border-base-300 py-2.5 font-medium",
                 align == :right && "text-right",
                 align == :left && "text-left"
               ]}
             >
-              <.t s={label} wsb={meme} />
+              <.t {label} />
             </th>
           </tr>
         </thead>

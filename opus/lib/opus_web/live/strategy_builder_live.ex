@@ -34,6 +34,12 @@ defmodule OpusWeb.StrategyBuilderLive do
     StrategyWords
   }
 
+  alias OpusWeb.WholeHistory
+
+  # How long the form must sit still before the whole-history run starts: a
+  # 5-minute strategy takes seconds, too long to repeat on every keystroke.
+  @report_after_ms 1_200
+
   @impl true
   def mount(params, _session, socket) do
     socket =
@@ -51,8 +57,10 @@ defmodule OpusWeb.StrategyBuilderLive do
         preview_error: nil,
         untestable: nil,
         focus: nil,
+        report_ref: nil,
         page_title: "New strategy"
       )
+      |> WholeHistory.init()
 
     {:ok, socket |> open(socket.assigns.live_action, params) |> refresh_instruments()}
   end
@@ -121,7 +129,9 @@ defmodule OpusWeb.StrategyBuilderLive do
       assign(socket,
         untestable: nil,
         chart: nil,
-        preview_error: "No instrument has recent bars at this timeframe."
+        preview_error: "No instrument has recent bars at this timeframe.",
+        report: {:ok, nil},
+        report_ref: nil
       )
 
   defp preview(socket) do
@@ -129,15 +139,34 @@ defmodule OpusWeb.StrategyBuilderLive do
     socket = assign(socket, untestable: untestable(instrument, granularity))
 
     if connected?(socket) do
-      %{form: form, instrument: instrument, recipe: recipe} = socket.assigns
-      definition = RecipeForm.to_definition(form, (recipe && recipe.definition) || %{})
+      definition = definition(socket.assigns)
 
-      start_async(socket, :preview, fn ->
-        Strategies.preview(definition, instrument, form["granularity"], nil)
+      socket
+      |> WholeHistory.assign_axes(definition)
+      |> cancel_async(:fragility, :form_changed)
+      |> assign(fragility: :idle)
+      |> schedule_report()
+      |> start_async(:preview, fn ->
+        Strategies.preview(definition, instrument, granularity, nil)
       end)
     else
       socket
     end
+  end
+
+  # The rules as the form has them now.
+  defp definition(%{form: form, recipe: recipe}),
+    do: RecipeForm.to_definition(form, (recipe && recipe.definition) || %{})
+
+  # Run the strategy over its whole history once the form sits still; an
+  # instrument without history before the holdout has nothing to run on.
+  defp schedule_report(%{assigns: %{untestable: words}} = socket) when is_binary(words),
+    do: assign(socket, report: {:ok, nil}, report_ref: nil)
+
+  defp schedule_report(socket) do
+    ref = make_ref()
+    Process.send_after(self(), {:report, ref}, @report_after_ms)
+    assign(socket, report: :loading, report_ref: ref)
   end
 
   # Why the tests can't run on this instrument, in words, or nil.
@@ -165,6 +194,26 @@ defmodule OpusWeb.StrategyBuilderLive do
 
   def handle_async(:preview, {:exit, _}, socket),
     do: {:noreply, assign(socket, chart: nil, preview_error: "The preview didn't finish.")}
+
+  # A check cancelled because the form changed: its grid would be stale.
+  def handle_async(:fragility, {:exit, :form_changed}, socket), do: {:noreply, socket}
+
+  def handle_async(name, result, socket) when name in [:report, :fragility],
+    do: {:noreply, WholeHistory.put_result(socket, name, result)}
+
+  @impl true
+  def handle_info({:report, ref}, %{assigns: %{report_ref: ref}} = socket) do
+    %{instrument: instrument, form: %{"granularity" => granularity}} = socket.assigns
+    definition = definition(socket.assigns)
+
+    {:noreply,
+     start_async(socket, :report, fn ->
+       Strategies.report(definition, instrument, granularity, nil)
+     end)}
+  end
+
+  # The form changed again before this one was due.
+  def handle_info({:report, _stale}, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("change", %{"form" => params} = all, socket) do
@@ -215,6 +264,22 @@ defmodule OpusWeb.StrategyBuilderLive do
 
   def handle_event("pick_trade", %{"trade" => trade}, socket),
     do: {:noreply, assign(socket, focus: String.to_integer(trade))}
+
+  def handle_event("fragility_axes", params, socket),
+    do: {:noreply, WholeHistory.pick_axes(socket, params)}
+
+  def handle_event("check_fragility", _params, socket) do
+    %{instrument: instrument, form: %{"granularity" => granularity}} = socket.assigns
+    definition = definition(socket.assigns)
+    {x, y} = WholeHistory.chosen_axes(socket.assigns)
+
+    {:noreply,
+     socket
+     |> assign(fragility: :running)
+     |> start_async(:fragility, fn ->
+       Strategies.fragility(definition, instrument, granularity, nil, x, y)
+     end)}
+  end
 
   def handle_event("delete", _params, socket) do
     case Recipes.delete(socket.assigns.recipe) do
@@ -466,15 +531,15 @@ defmodule OpusWeb.StrategyBuilderLive do
             navigate={~p"/strategies"}
             class="self-start text-[13px] text-muted hover:text-base-content"
           >
-            ← <.t s="Strategies" wsb="Plays" />
+            ← <.t {copy("Strategies")} />
           </.link>
           <div class="flex flex-wrap items-baseline justify-between gap-3">
             <h1 class="text-[24px] font-semibold tracking-tight">
               <%= case @mode do %>
                 <% :new -> %>
-                  <.t s="New strategy" wsb="New play" />
+                  <.t {copy("New strategy")} />
                 <% :copy -> %>
-                  <.t s={"Copy of #{@recipe.name}"} wsb={"Cloning #{@recipe.name}"} />
+                  <.t {copy("Copy of %{name}", name: @recipe.name)} />
                 <% :edit -> %>
                   {@recipe.name}
               <% end %>
@@ -488,14 +553,11 @@ defmodule OpusWeb.StrategyBuilderLive do
               data-confirm={"Delete #{@recipe.name}#{delete_scope(@assignments)}? This can't be undone. Its test history is kept."}
               class="min-h-11 px-1 text-[14px] font-medium text-error disabled:cursor-not-allowed disabled:text-muted"
             >
-              <.t s="Delete" wsb="Yeet" />
+              <.t {copy("Delete")} />
             </button>
           </div>
           <p class="text-[14px] text-muted">
-            <.t
-              s="Build the signal from blocks, say when to act on it, and see where it would have bought and sold."
-              wsb="Stack the indicators, say when to send it, and see where it would've printed (or not)."
-            />
+            <.t {copy("Build the signal from blocks, say when to act on it, and see where it would have bought and sold.")} />
           </p>
         </div>
 
@@ -507,9 +569,9 @@ defmodule OpusWeb.StrategyBuilderLive do
           <div class="flex min-w-0 flex-[1_1_420px] items-start gap-3">
             <.icon name="hero-lock-closed" class="mt-0.5 size-5 shrink-0" />
             <p class="m-0 text-[14px]">
-              <strong><.t s="Locked." wsb="Diamond-handed." /></strong>
+              <strong><.t {copy("Locked.")} /></strong>
               {locked_words(Recipes.locked_by(@assignments))}
-              <.t s="You can look and preview, but not change anything." wsb="Look, don't touch." />
+              <.t {copy("You can look and preview, but not change anything.")} />
             </p>
           </div>
           <button
@@ -517,7 +579,7 @@ defmodule OpusWeb.StrategyBuilderLive do
             phx-click="ask_unlock"
             class="min-h-11 rounded-field bg-base-content px-4 text-[14px] font-semibold text-base-100 hover:brightness-110"
           >
-            <.t s="Unlock to edit" wsb="Paper-hand the lock" />
+            <.t {copy("Unlock to edit")} />
           </button>
         </section>
 
@@ -528,13 +590,10 @@ defmodule OpusWeb.StrategyBuilderLive do
           class="flex flex-col gap-4 rounded-box border border-warning bg-base-200 px-5 py-5"
         >
           <h2 id="unlock-h" class="text-[17px] font-semibold">
-            <.t s="How do you want to change it?" wsb="How we doing this?" />
+            <.t {copy("How do you want to change it?")} />
           </h2>
           <p class="m-0 text-[14px] text-muted">
-            <.t
-              s="Changing these rules would change a live strategy mid-trade. Pick one:"
-              wsb="Changing the rules mid-play is how accounts die. Pick one:"
-            />
+            <.t {copy("Changing these rules would change a live strategy mid-trade. Pick one:")} />
           </p>
           <div class="grid grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))] gap-3">
             <button
@@ -543,14 +602,11 @@ defmodule OpusWeb.StrategyBuilderLive do
               class="flex min-h-11 flex-col items-start gap-1 rounded-field border border-primary bg-primary/10 px-4 py-4 text-left"
             >
               <strong>
-                <.t s="Edit a copy" wsb="Clone it" />
+                <.t {copy("Edit a copy")} />
                 <span class="font-semibold text-primary">(recommended)</span>
               </strong>
               <span class="text-[14px] text-muted">
-                <.t
-                  s="The original keeps trading untouched. The copy goes through the tests, then you choose where it runs."
-                  wsb="The original keeps cooking. The clone has to pass the tests before it gets money."
-                />
+                <.t {copy("The original keeps trading untouched. The copy goes through the tests, then you choose where it runs.")} />
               </span>
             </button>
             <button
@@ -558,12 +614,9 @@ defmodule OpusWeb.StrategyBuilderLive do
               phx-click="unlock_off"
               class="flex min-h-11 flex-col items-start gap-1 rounded-field border border-base-300 bg-base-100 px-4 py-4 text-left"
             >
-              <strong><.t s="Switch it off everywhere, then edit" wsb="Bench it, then tweak" /></strong>
+              <strong><.t {copy("Switch it off everywhere, then edit")} /></strong>
               <span class="text-[14px] text-muted">
-                <.t
-                  s="No new trades until it passes the tests again and you switch it back on. Not possible while a trade is open."
-                  wsb="No new plays until it passes again and you un-bench it. Can't do it while a bag is open."
-                />
+                <.t {copy("No new trades until it passes the tests again and you switch it back on. Not possible while a trade is open.")} />
               </span>
             </button>
           </div>
@@ -572,7 +625,7 @@ defmodule OpusWeb.StrategyBuilderLive do
             phx-click="cancel_unlock"
             class="min-h-11 self-start px-1 text-[14px] text-muted hover:text-base-content"
           >
-            <.t s="Keep it locked" wsb="Keep diamond hands" />
+            <.t {copy("Keep it locked")} />
           </button>
         </section>
 
@@ -588,7 +641,7 @@ defmodule OpusWeb.StrategyBuilderLive do
           class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4"
         >
           <h2 class="text-[15px] font-semibold">
-            <.t s="Start from an example" wsb="Copy someone's homework" />
+            <.t {copy("Start from an example")} />
           </h2>
           <p class="m-0 text-[14px] text-muted">
             Each one is a complete strategy you can open, look at in the preview and change.
@@ -621,7 +674,7 @@ defmodule OpusWeb.StrategyBuilderLive do
           >
             <section class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4">
               <h2 class="text-[15px] font-semibold">
-                <span class="text-muted">1 ·</span> <.t s="What it is" wsb="The play" />
+                <span class="text-muted">1 ·</span> <.t {copy("What it is")} />
               </h2>
               <div class="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
                 <.field label="Name">
@@ -665,7 +718,7 @@ defmodule OpusWeb.StrategyBuilderLive do
             <section class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4">
               <h2 class="text-[15px] font-semibold">
                 <span class="text-muted">2 ·</span>
-                <.t s="Signals it watches" wsb="Indicators (the crayons)" />
+                <.t {copy("Signals it watches")} />
               </h2>
               <p :if={@form["components"] == []} class="m-0 text-[14px] text-muted">
                 A block watches one thing about the price and answers simple yes/no questions about it,
@@ -728,7 +781,7 @@ defmodule OpusWeb.StrategyBuilderLive do
                 class="rounded-field border border-dashed border-base-300 px-4 py-2"
               >
                 <summary class="min-h-9 cursor-pointer py-1.5 text-[14px] font-medium text-primary">
-                  + <.t s="Add a block" wsb="Add a crayon" />
+                  + <.t {copy("Add a block")} />
                 </summary>
                 <div class="flex flex-col gap-4 pb-2 pt-2">
                   <div
@@ -755,7 +808,7 @@ defmodule OpusWeb.StrategyBuilderLive do
 
             <section class="flex flex-col gap-4 rounded-box border border-base-300 bg-base-200 px-5 py-4">
               <h2 class="text-[15px] font-semibold">
-                <span class="text-muted">3 ·</span> <.t s="When to act" wsb="When to send it" />
+                <span class="text-muted">3 ·</span> <.t {copy("When to act")} />
               </h2>
               <p :if={@choices == []} class="m-0 text-[14px] text-muted">
                 The rules to pick from appear once there's a block in step 2.
@@ -785,7 +838,7 @@ defmodule OpusWeb.StrategyBuilderLive do
 
             <section class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4">
               <h2 class="text-[15px] font-semibold">
-                <span class="text-muted">4 ·</span> <.t s="Protect it" wsb="Risk management (lol)" />
+                <span class="text-muted">4 ·</span> <.t {copy("Protect it")} />
               </h2>
               <div class="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
                 <.field label="Stop">
@@ -879,7 +932,7 @@ defmodule OpusWeb.StrategyBuilderLive do
           <div class="order-first flex min-w-0 flex-col gap-4 lg:sticky lg:top-24 lg:order-none lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
             <section class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4">
               <div class="flex flex-wrap items-center justify-between gap-3">
-                <h2 class="text-[15px] font-semibold"><.t s="Preview" wsb="Hindsight" /></h2>
+                <h2 class="text-[15px] font-semibold"><.t {copy("Preview")} /></h2>
                 <label class="inline-flex items-center gap-2 text-[13px] text-muted">
                   On
                   <select
@@ -913,7 +966,7 @@ defmodule OpusWeb.StrategyBuilderLive do
 
             <section class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4">
               <h2 class="text-[15px] font-semibold">
-                <.t s="What happens when you save" wsb="What happens when you send it" />
+                <.t {copy("What happens when you save")} />
               </h2>
               <ol class="m-0 flex list-decimal flex-col gap-1 pl-5 text-[14px] text-muted">
                 <%= if @mode == :edit do %>
@@ -950,9 +1003,9 @@ defmodule OpusWeb.StrategyBuilderLive do
                   class="min-h-11 rounded-field bg-primary px-4 text-[14px] font-semibold text-primary-content hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <%= if @mode == :edit do %>
-                    <.t s="Save changes" wsb="Send it" />
+                    <.t {copy("Save changes")} />
                   <% else %>
-                    <.t s="Save and run the tests" wsb="Send it to the backtest" />
+                    <.t {copy("Save and run the tests")} />
                   <% end %>
                 </button>
                 <button
@@ -963,7 +1016,7 @@ defmodule OpusWeb.StrategyBuilderLive do
                   disabled={@locked}
                   class="min-h-11 rounded-field border border-base-300 px-4 text-[14px] hover:border-primary disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <.t s="Save as a draft" wsb="Save the napkin" />
+                  <.t {copy("Save as a draft")} />
                 </button>
               </div>
             </section>
@@ -971,11 +1024,36 @@ defmodule OpusWeb.StrategyBuilderLive do
         </form>
 
         <section
+          :if={@instrument}
+          aria-label="Whole history"
+          class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4"
+        >
+          <div class="flex flex-col gap-1">
+            <h2 class="text-[15px] font-semibold">
+              <.t {copy("Over its whole history on %{instrument}", instrument: @instrument)} />
+            </h2>
+            <p class="m-0 text-[13px] text-muted">
+              The preview shows the last 120 bars; this runs the rules as they are now over every bar
+              the tests use, before the holdout. It reruns a moment after you stop changing things.
+            </p>
+          </div>
+          <WholeHistory.panel
+            report={@report}
+            fragility={@fragility}
+            axes={@axes}
+            fx={@fx}
+            fy={@fy}
+            instrument={@instrument}
+            granularity={@form["granularity"]}
+          />
+        </section>
+
+        <section
           :if={@runs != []}
           id="tests"
           class="flex scroll-mt-24 flex-col gap-2 rounded-box border border-base-300 bg-base-200 px-5 py-4"
         >
-          <h2 class="text-[15px] font-semibold"><.t s="Test results" wsb="Receipts" /></h2>
+          <h2 class="text-[15px] font-semibold"><.t {copy("Test results")} /></h2>
           <.runs_list runs={@runs} />
         </section>
       </div>

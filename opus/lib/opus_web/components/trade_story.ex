@@ -61,13 +61,13 @@ defmodule OpusWeb.Components.TradeStory do
           <tr class="text-left text-xs text-muted">
             <th class="border-b border-base-300 py-2.5 font-medium">Opened (ET)</th>
             <th class="border-b border-base-300 py-2.5 pl-4 font-medium">
-              <.t s="Trade" wsb="Play" />
+              <.t {copy("Trade")} />
             </th>
             <th class="border-b border-base-300 py-2.5 text-right font-medium">
-              <.t s="Result" wsb="Tendies" />
+              <.t {copy("Result")} />
             </th>
             <th class="border-b border-base-300 py-2.5 pl-4 font-medium">
-              <.t s="Why it closed" wsb="How it died" />
+              <.t {copy("Why it closed")} />
             </th>
           </tr>
         </thead>
@@ -141,7 +141,7 @@ defmodule OpusWeb.Components.TradeStory do
 
       <div class="flex flex-col gap-1.5">
         <span class="text-[14px] font-medium">
-          <.t s="What to take from it" wsb="Lessons, regard" />
+          <.t {copy("What to take from it")} />
         </span>
         <ul class="m-0 flex list-disc flex-col gap-1.5 pl-5 text-[14px]">
           <li :for={line <- @trade.story.takeaways}>{line}</li>

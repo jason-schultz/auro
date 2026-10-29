@@ -24,7 +24,6 @@ export type RulesStateResponse = {
     summary: {
         trading: number;
         live: number;
-        curator_enabled: boolean;
     };
     strategies: RuleStateRow[];
 };
@@ -35,7 +34,7 @@ export function useRulesState() {
     const loading = ref(true);
     const error = ref<string | null>(null);
     const computedAt = ref<string | null>(null);
-    const summary = ref({ trading: 0, live: 0, curator_enabled: false });
+    const summary = ref({ trading: 0, live: 0 });
     const strategies = ref<RuleStateRow[]>([]);
 
     let refreshTimer: ReturnType<typeof setInterval> | null = null;

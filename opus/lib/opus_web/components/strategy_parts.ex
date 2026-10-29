@@ -9,7 +9,7 @@ defmodule OpusWeb.StrategyParts do
   use Phoenix.Component
 
   import OpusWeb.CoreComponents, only: [icon: 1]
-  import OpusWeb.Copy, only: [t: 1]
+  import OpusWeb.Copy, only: [t: 1, copy: 1, pcopy: 2]
   import OpusWeb.Format
 
   attr :locked_by, :list, required: true, doc: "the assignment rows keeping it locked"
@@ -17,7 +17,7 @@ defmodule OpusWeb.StrategyParts do
   def lock_badge(%{locked_by: []} = assigns) do
     ~H"""
     <span class="text-[13px] text-muted">
-      <.t s="Not trading, so its rules can be changed" wsb="Benched, so you can mess with it" />
+      <.t {copy("Not trading, so its rules can be changed")} />
     </span>
     """
   end
@@ -25,7 +25,7 @@ defmodule OpusWeb.StrategyParts do
   def lock_badge(assigns) do
     ~H"""
     <span class="inline-flex items-center gap-1.5 rounded-field border border-base-300 bg-base-200 px-2 py-0.5 text-[12px] font-medium">
-      <.icon name="hero-lock-closed-mini" class="size-3.5" /> <.t s="Locked" wsb="Diamond-handed" />
+      <.icon name="hero-lock-closed-mini" class="size-3.5" /> <.t {copy("Locked")} />
     </span>
     <span class="text-[13px] text-muted">{locked_words(@locked_by)}</span>
     """
@@ -52,7 +52,7 @@ defmodule OpusWeb.StrategyParts do
   def evidence(assigns) do
     ~H"""
     <dl class="grid grid-cols-1 gap-x-6 gap-y-2 text-[13px] sm:grid-cols-[8rem_minmax(0,1fr)]">
-      <dt class="text-muted"><.t s="Backtest" wsb="Backtest (hopium)" /></dt>
+      <dt class="text-muted"><.t {copy("Backtest")} /></dt>
       <dd class="m-0">
         <.stage stage={@results.backtest} line={backtest_line(@results.backtest)} />
       </dd>
@@ -67,7 +67,7 @@ defmodule OpusWeb.StrategyParts do
       <dt class="text-muted">Holdout</dt>
       <dd class="m-0"><.stage stage={@results.holdout} /></dd>
       <%= if @results[:live] do %>
-        <dt class="text-muted"><.t s="Live (forward)" wsb="Real life" /></dt>
+        <dt class="text-muted"><.t {copy("Live (forward)")} /></dt>
         <dd class="m-0">{live_words(@results.live)}</dd>
       <% end %>
     </dl>
@@ -82,10 +82,10 @@ defmodule OpusWeb.StrategyParts do
     <div class="flex flex-col gap-1">
       <span>
         <span :if={@stage.status == :passed} class="font-medium text-success">
-          <.t s="Passed" wsb="Printed" />
+          <.t {copy("Passed")} />
         </span>
         <span :if={@stage.status == :failed} class="font-medium text-error">
-          <.t s="Failed" wsb="GUH" />
+          <.t {pcopy("test result", "Failed")} />
         </span>
         <span :if={@stage.status in [:running, :pending]} class="font-medium text-warning">
           {if @stage.status == :running, do: "Running", else: "Waiting to run"}
@@ -177,10 +177,12 @@ defmodule OpusWeb.StrategyParts do
     "total_return" => {"Return", :share},
     "expectancy" => {"Average trade", :share},
     "sharpe" => {"Sharpe per trade", :number},
+    "annual_sharpe" => {"Sharpe (a year)", :number},
     "oos_num_trades" => {"Trades on unseen data", :count},
     "oos_return" => {"Return on unseen data", :share},
     "oos_t_stat" => {"Luck test on unseen data (t)", :number},
     "oos_sharpe" => {"Sharpe per trade on unseen data", :number},
+    "oos_annual_sharpe" => {"Sharpe (a year) on unseen data", :number},
     "sharpe_retention" => {"Quality kept on unseen data", :share},
     "profitable_pct" => {"Redrawn histories that made money", :share},
     "p95_drawdown" => {"Bad-run drop (1 in 20)", :share},

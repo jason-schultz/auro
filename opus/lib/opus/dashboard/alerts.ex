@@ -82,6 +82,7 @@ defmodule Opus.Dashboard.Alerts do
   def build(input) do
     [
       engine(input),
+      account_pause(input),
       suspensions(input),
       failed_jobs(input),
       stale_candles(input),
@@ -155,6 +156,22 @@ defmodule Opus.Dashboard.Alerts do
   end
 
   defp engine(_input), do: []
+
+  defp account_pause(%{account_pause: %{down: down, peak: peak, nav: nav, limit: limit}}) do
+    [
+      alert(
+        :act,
+        "account_pause",
+        "Trading is paused: the account fell #{pct(down)} from its peak",
+        "NAV #{money(nav)}, peak #{money(peak)}; the limit is #{limit}%.",
+        "No strategy opens a trade until you resume. Open trades keep their stops. " <>
+          "Look at what lost before resuming on the Strategies page.",
+        "/strategies"
+      )
+    ]
+  end
+
+  defp account_pause(_input), do: []
 
   defp suspensions(%{suspensions: suspensions}) do
     for s <- suspensions do

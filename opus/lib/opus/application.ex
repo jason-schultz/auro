@@ -36,7 +36,6 @@ defmodule Opus.Application do
         Opus.Trading.Reconciler,
         Opus.Trading.RegimeDetector,
         Opus.Trading.RulesEngine,
-        Opus.Trading.StrategyCurator,
         Opus.Trading.CircuitBreaker,
         Opus.Trading.SignalEventListener
       ]

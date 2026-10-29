@@ -72,7 +72,7 @@ defmodule OpusWeb.OptionsIdeasTest do
   test "the page lists the latest scan's ideas and Analyze fills the form from one", %{conn: conn} do
     {:ok, view, html} = live(conn, ~p"/options")
 
-    assert html =~ "Oct 24 scan · 1 ideas"
+    assert html =~ "Oct 24 scan · 1 idea"
     assert html =~ "IWM $235.00 call"
     assert html =~ "RSI(2) 5.1 under 10"
     assert html =~ "+4.6%"
