@@ -82,6 +82,20 @@ impl Signaler for MeanReversionParams {
         Some(ports)
     }
 
+    fn series(&self, candles: &[Candle]) -> HashMap<String, f64> {
+        let mut values = HashMap::new();
+        if let Some(ma) = indicators::sma(candles, self.ma_period) {
+            values.insert("ma".to_string(), ma);
+        }
+        if let Some(z) = z_score(candles, self.ma_period) {
+            values.insert("z".to_string(), z);
+        }
+        if let Some(r) = rsi(candles, self.rsi_period) {
+            values.insert("rsi".to_string(), r);
+        }
+        values
+    }
+
     fn entry_reason(&self, candles: &[Candle], _direction: Direction) -> EntryReason {
         let ma = indicators::sma(candles, self.ma_period).unwrap_or(0.0);
         let z = z_score(candles, self.ma_period).unwrap_or(0.0);

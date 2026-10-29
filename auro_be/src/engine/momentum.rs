@@ -29,6 +29,12 @@ impl Signaler for MomentumParams {
         ]))
     }
 
+    fn series(&self, candles: &[Candle]) -> HashMap<String, f64> {
+        indicators::rate_of_change(candles, self.lookback)
+            .map(|roc| HashMap::from([("roc".to_string(), roc)]))
+            .unwrap_or_default()
+    }
+
     fn entry_reason(&self, candles: &[Candle], _direction: Direction) -> EntryReason {
         EntryReason::Momentum {
             roc_pct: indicators::rate_of_change(candles, self.lookback).unwrap_or(0.0),
@@ -39,27 +45,7 @@ impl Signaler for MomentumParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::types::OHLC;
-    use chrono::{Duration, TimeZone, Utc};
-
-    fn candles(closes: &[f64]) -> Vec<Candle> {
-        closes
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| Candle {
-                time: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap() + Duration::days(i as i64),
-                mid: OHLC {
-                    open: c,
-                    high: c,
-                    low: c,
-                    close: c,
-                },
-                volume: 1,
-                bid: None,
-                ask: None,
-            })
-            .collect()
-    }
+    use crate::engine::test_candles::daily as candles;
 
     #[test]
     fn up_when_close_above_lookback_close() {

@@ -199,6 +199,9 @@ pub enum EntryReason {
     Momentum { roc_pct: f64 },
     /// Scheduled-event window entry: the event being traded around.
     EventWindow { event_time: DateTime<Utc> },
+    /// An indicator block's reading at entry (Bollinger position,
+    /// stochastic %K, ADX, …): which reading, and its value.
+    Indicator { name: &'static str, value: f64 },
     /// Noise-area breakout: band levels and session VWAP at the decision bar.
     NoiseAreaBreakout {
         upper_band: f64,

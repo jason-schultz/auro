@@ -87,6 +87,26 @@ defmodule Opus.Trading.SignalChartTest do
            ] = lanes
   end
 
+  test "indicators come out as lines on the candles and panels with their levels" do
+    with_series =
+      update_in(body(), ["bars"], fn bars ->
+        bars
+        |> Enum.with_index()
+        |> Enum.map(fn {bar, i} ->
+          Map.put(bar, "series", %{"r.rsi" => 10.0 * i, "t.ma" => if(i > 0, do: 100.0 + i)})
+        end)
+      end)
+
+    chart = SignalChart.shape(with_series, @definition, "D")
+
+    assert [%{label: "Average", values: [nil, 101.0, 102.0, 103.0, 104.0]}] = chart.overlays
+
+    assert [%{label: "RSI", range: {0, 100}, levels: [20.0, 50.0, 80.0], also: nil}] =
+             chart.panels
+
+    assert hd(chart.panels).values == [0.0, 10.0, 20.0, 30.0, 40.0]
+  end
+
   test "a short trade opens with a sell and closes with a buy" do
     body = %{
       body()

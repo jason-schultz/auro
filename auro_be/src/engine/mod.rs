@@ -1,3 +1,5 @@
+pub mod adx_filter;
+pub mod bollinger;
 pub mod donchian;
 pub mod event_window;
 pub mod financing;
@@ -10,11 +12,19 @@ pub mod macd;
 pub mod mean_reversion;
 pub mod momentum;
 pub mod noise_area;
+pub mod opening_range;
 pub mod options;
 pub mod pipeline;
+pub mod pivot_points;
 pub mod rsi_reversion;
 pub mod rules;
+pub mod session;
 pub mod stats;
+pub mod stochastic;
 pub mod strategy;
+#[cfg(test)]
+pub(crate) mod test_candles;
 pub mod trend_following;
 pub mod types;
+pub mod volatility;
+pub mod vwap;

@@ -87,6 +87,14 @@ impl Signaler for TrendFollowingParams {
         Some(ports)
     }
 
+    fn series(&self, candles: &[Candle]) -> HashMap<String, f64> {
+        self.mas(candles)
+            .map(|(fast, slow)| {
+                HashMap::from([("fast".to_string(), fast), ("slow".to_string(), slow)])
+            })
+            .unwrap_or_default()
+    }
+
     fn entry_reason(&self, candles: &[Candle], direction: Direction) -> EntryReason {
         let (fast, slow) = self.mas(candles).unwrap_or((0.0, 0.0));
         match direction {

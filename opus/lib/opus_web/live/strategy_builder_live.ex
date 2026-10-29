@@ -25,6 +25,7 @@ defmodule OpusWeb.StrategyBuilderLive do
   alias Opus.Auro.Client
 
   alias Opus.Trading.{
+    Blocks,
     Granularity,
     RecipeForm,
     Recipes,
@@ -50,7 +51,6 @@ defmodule OpusWeb.StrategyBuilderLive do
         preview_error: nil,
         untestable: nil,
         focus: nil,
-        catalog: RecipeForm.catalog(),
         page_title: "New strategy"
       )
 
@@ -195,9 +195,16 @@ defmodule OpusWeb.StrategyBuilderLive do
        |> preview()}
 
   def handle_event("add_block", %{"type" => type}, socket) do
-    if RecipeForm.block(type),
+    if Blocks.get(type),
       do: {:noreply, socket |> update(:form, &RecipeForm.add_component(&1, type)) |> preview()},
       else: {:noreply, socket}
+  end
+
+  def handle_event("use_template", %{"id" => id}, socket) do
+    case RecipeForm.template(id) do
+      nil -> {:noreply, socket}
+      form -> {:noreply, socket |> assign(form: form) |> refresh_instruments()}
+    end
   end
 
   def handle_event("remove_block", %{"key" => key}, socket),
@@ -576,6 +583,31 @@ defmodule OpusWeb.StrategyBuilderLive do
           This strategy's rules nest deeper than the builder handles, so it can't be edited here.
         </p>
 
+        <section
+          :if={@mode == :new and @form["components"] == []}
+          class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4"
+        >
+          <h2 class="text-[15px] font-semibold">
+            <.t s="Start from an example" wsb="Copy someone's homework" />
+          </h2>
+          <p class="m-0 text-[14px] text-muted">
+            Each one is a complete strategy you can open, look at in the preview and change.
+            Or start from nothing below.
+          </p>
+          <div class="grid grid-cols-[repeat(auto-fit,minmax(min(100%,240px),1fr))] gap-3">
+            <button
+              :for={t <- RecipeForm.templates()}
+              type="button"
+              phx-click="use_template"
+              phx-value-id={t.id}
+              class="flex min-h-11 flex-col items-start gap-1 rounded-field border border-base-300 bg-base-100 px-4 py-3 text-left hover:border-primary"
+            >
+              <span class="text-[14px] font-semibold">{t.name}</span>
+              <span class="text-[13px] text-muted">{t.description}</span>
+            </button>
+          </div>
+        </section>
+
         <form
           :if={!@too_complex}
           id="builder"
@@ -636,31 +668,34 @@ defmodule OpusWeb.StrategyBuilderLive do
                 <.t s="Signals it watches" wsb="Indicators (the crayons)" />
               </h2>
               <p :if={@form["components"] == []} class="m-0 text-[14px] text-muted">
-                Add a block below. Each one gives you rules to use in step 3.
+                A block watches one thing about the price and answers simple yes/no questions about it,
+                like "is RSI below 20?". Pick one below; its questions become the rules in step 3.
               </p>
               <div
                 :for={c <- @form["components"]}
+                :if={block = Blocks.get(c["type"])}
                 class="flex flex-col gap-3 rounded-field border border-base-300 bg-base-100 px-4 py-3"
               >
-                <div class="flex items-baseline justify-between gap-3">
-                  <strong>
-                    {RecipeForm.block(c["type"]).name}
-                    <span class="text-[13px] font-normal text-muted">
-                      · {RecipeForm.block(c["type"]).hint}
+                <div class="flex items-start justify-between gap-3">
+                  <div class="flex flex-col gap-1">
+                    <span class="flex flex-wrap items-baseline gap-x-2">
+                      <strong>{block.name}</strong>
+                      <span class="text-[12px] text-muted">{block.group}</span>
                     </span>
-                  </strong>
+                    <span class="text-[13px] text-muted">{block.watches}</span>
+                  </div>
                   <button
                     type="button"
                     phx-click="remove_block"
                     phx-value-key={c["key"]}
-                    aria-label={"Remove #{RecipeForm.block(c["type"]).name}"}
-                    class="min-h-9 min-w-9 rounded-field text-muted hover:text-error"
+                    aria-label={"Remove #{block.name}"}
+                    class="min-h-9 min-w-9 shrink-0 rounded-field text-muted hover:text-error"
                   >
                     <.icon name="hero-x-mark-mini" class="size-4" />
                   </button>
                 </div>
-                <div class="grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-3">
-                  <.field :for={p <- RecipeForm.block(c["type"]).params} label={p.label}>
+                <div class="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
+                  <.field :for={p <- block.params} label={p.label} help={p.help}>
                     <%= case p.kind do %>
                       <% {:select, options} -> %>
                         <select
@@ -688,19 +723,34 @@ defmodule OpusWeb.StrategyBuilderLive do
                   </.field>
                 </div>
               </div>
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="text-[13px] text-muted">Add a block:</span>
-                <button
-                  :for={b <- @catalog}
-                  type="button"
-                  phx-click="add_block"
-                  phx-value-type={b.type}
-                  title={b.hint}
-                  class="min-h-9 rounded-full border border-dashed border-base-300 px-3 text-[13px] hover:border-primary"
-                >
-                  + {b.name}
-                </button>
-              </div>
+              <details
+                open={@form["components"] == []}
+                class="rounded-field border border-dashed border-base-300 px-4 py-2"
+              >
+                <summary class="min-h-9 cursor-pointer py-1.5 text-[14px] font-medium text-primary">
+                  + <.t s="Add a block" wsb="Add a crayon" />
+                </summary>
+                <div class="flex flex-col gap-4 pb-2 pt-2">
+                  <div
+                    :for={{group, question, blocks} <- Blocks.by_group()}
+                    class="flex flex-col gap-1.5"
+                  >
+                    <span class="text-[13px]">
+                      <strong>{group}</strong> <span class="text-muted">· {question}</span>
+                    </span>
+                    <button
+                      :for={b <- blocks}
+                      type="button"
+                      phx-click="add_block"
+                      phx-value-type={b.type}
+                      class="flex min-h-11 flex-col items-start gap-0.5 rounded-field border border-base-300 bg-base-100 px-3 py-2 text-left hover:border-primary"
+                    >
+                      <span class="text-[14px] font-medium">+ {b.name}</span>
+                      <span class="text-[12px] text-muted">{b.watches}</span>
+                    </button>
+                  </div>
+                </div>
+              </details>
             </section>
 
             <section class="flex flex-col gap-4 rounded-box border border-base-300 bg-base-200 px-5 py-4">
@@ -802,7 +852,7 @@ defmodule OpusWeb.StrategyBuilderLive do
                           value={c["key"]}
                           selected={c["key"] == @form["stop"]["params"]["component"]}
                         >
-                          {RecipeForm.block(c["type"]).name}
+                          {Blocks.get(c["type"]).name}
                         </option>
                       </select>
                     </.field>
@@ -934,6 +984,7 @@ defmodule OpusWeb.StrategyBuilderLive do
   end
 
   attr :label, :string, required: true
+  attr :help, :string, default: nil
   slot :inner_block, required: true
 
   defp field(assigns) do
@@ -941,6 +992,7 @@ defmodule OpusWeb.StrategyBuilderLive do
     <label class="flex flex-col gap-1 text-[13px] text-muted">
       {@label}
       {render_slot(@inner_block)}
+      <span :if={@help} class="text-[12px] leading-snug">{@help}</span>
     </label>
     """
   end

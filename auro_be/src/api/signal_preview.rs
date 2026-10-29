@@ -7,8 +7,9 @@
 //!
 //! Each signal carries its fill price, and an exit says why it closed
 //! (`rule`, `stop_loss`, `hold_limit`). `bars` is the chart window: each
-//! bar's OHLC and every component port's value on it (`"r.long": true`), so
-//! a page can show which rule was true on which bar.
+//! bar's OHLC, every component port's value on it (`"r.long": true`), so a
+//! page can show which rule was true on which bar, and every component's
+//! chart values (`"r.rsi": 23.4`, `"t.ma": 5601.2`) to draw the indicators.
 
 use axum::extract::State;
 use axum::Json;
@@ -87,8 +88,9 @@ fn preview(candles: &[Candle], strategy: &Strategy, count: usize) -> Value {
     })
 }
 
-/// The last `count` bars with every port's value, keyed `"component.port"`.
-/// A bar inside the warmup has no `ports`.
+/// The last `count` bars with every port's value, keyed `"component.port"`,
+/// and every chart value, keyed `"component.value"`. A bar inside the warmup
+/// has no `ports`; a value a component can't compute yet is left out.
 fn bars(candles: &[Candle], strategy: &Strategy, count: usize) -> Vec<Value> {
     let cap = strategy.granularity.buffer_capacity();
     let warmup = strategy.warmup();
@@ -97,8 +99,18 @@ fn bars(candles: &[Candle], strategy: &Strategy, count: usize) -> Vec<Value> {
     (from..candles.len())
         .map(|i| {
             let c = &candles[i];
+            let window = bounded_window(candles, i, cap);
+            let series: std::collections::BTreeMap<String, f64> = strategy
+                .compute_series(window)
+                .into_iter()
+                .flat_map(|(name, values)| {
+                    values
+                        .into_iter()
+                        .map(move |(key, value)| (format!("{name}.{key}"), value))
+                })
+                .collect();
             let ports = (i >= warmup)
-                .then(|| strategy.compute_ports(bounded_window(candles, i, cap)))
+                .then(|| strategy.compute_ports(window))
                 .flatten()
                 .map(|by_component| {
                     by_component
@@ -117,6 +129,7 @@ fn bars(candles: &[Candle], strategy: &Strategy, count: usize) -> Vec<Value> {
                 "low": c.mid.low,
                 "close": c.mid.close,
                 "ports": ports,
+                "series": series,
             })
         })
         .collect()
@@ -157,27 +170,7 @@ fn direction_str(direction: Direction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::types::OHLC;
-    use chrono::{Duration, TimeZone};
-
-    fn candles(closes: &[f64]) -> Vec<Candle> {
-        closes
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| Candle {
-                time: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap() + Duration::days(i as i64),
-                mid: OHLC {
-                    open: c,
-                    high: c,
-                    low: c,
-                    close: c,
-                },
-                volume: 1,
-                bid: None,
-                ask: None,
-            })
-            .collect()
-    }
+    use crate::engine::test_candles::daily as candles;
 
     fn momentum() -> Strategy {
         serde_json::from_value(json!({
@@ -223,5 +216,18 @@ mod tests {
         assert_eq!(bars[0]["close"], 101.0);
         assert_eq!(bars[0]["ports"]["m.up"], true);
         assert_eq!(bars[2]["ports"]["m.down"], true);
+    }
+
+    #[test]
+    fn bars_carry_each_indicator_value_to_draw() {
+        let body = preview(
+            &candles(&[100.0, 100.0, 101.0, 102.0, 101.0, 100.0]),
+            &momentum(),
+            4,
+        );
+        let bars = body["bars"].as_array().unwrap();
+
+        // Momentum over 1 bar: (101 - 100) / 100 as a percent.
+        assert!((bars[0]["series"]["m.roc"].as_f64().unwrap() - 1.0).abs() < 1e-9);
     }
 }

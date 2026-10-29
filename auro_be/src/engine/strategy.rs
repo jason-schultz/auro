@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::engine::adx_filter::AdxFilterParams;
+use crate::engine::bollinger::BollingerParams;
 use crate::engine::donchian::DonchianParams;
 use crate::engine::event_window::EventWindowParams;
 use crate::engine::ma_filter::MaFilterParams;
@@ -25,9 +27,14 @@ use crate::engine::macd::MacdParams;
 use crate::engine::mean_reversion::MeanReversionParams;
 use crate::engine::momentum::MomentumParams;
 use crate::engine::noise_area::NoiseAreaParams;
+use crate::engine::opening_range::OpeningRangeParams;
+use crate::engine::pivot_points::PivotPointsParams;
 use crate::engine::rsi_reversion::RsiReversionParams;
+use crate::engine::stochastic::StochasticParams;
 use crate::engine::trend_following::TrendFollowingParams;
 use crate::engine::types::{Candle, Direction, EntryReason, ExitReason, Granularity, Trade};
+use crate::engine::volatility::VolatilityParams;
+use crate::engine::vwap::VwapParams;
 
 /// Behavior contract for all signaler components. Each strategy type
 /// implements this trait in its own file (TF in trend_following.rs, MR in
@@ -62,6 +69,14 @@ pub trait Signaler {
     /// Default: None (component doesn't expose its own stop placement).
     fn stop_price(&self, _candles: &[Candle], _direction: Direction) -> Option<f64> {
         None
+    }
+
+    /// Optional: the values this component draws on a chart for the bar at
+    /// the end of `candles` (`"rsi"`, `"ma"`, `"upper"`, …), so a preview
+    /// can plot the indicator beside its yes/no ports. A value it can't
+    /// compute yet is left out. Default: nothing to draw.
+    fn series(&self, _candles: &[Candle]) -> HashMap<String, f64> {
+        HashMap::new()
     }
 }
 
@@ -109,6 +124,20 @@ pub enum Component {
     Momentum(MomentumParams),
     #[serde(rename = "EventWindow")]
     EventWindow(EventWindowParams),
+    #[serde(rename = "Bollinger")]
+    Bollinger(BollingerParams),
+    #[serde(rename = "Stochastic")]
+    Stochastic(StochasticParams),
+    #[serde(rename = "AdxFilter")]
+    AdxFilter(AdxFilterParams),
+    #[serde(rename = "Volatility")]
+    Volatility(VolatilityParams),
+    #[serde(rename = "Vwap")]
+    Vwap(VwapParams),
+    #[serde(rename = "OpeningRange")]
+    OpeningRange(OpeningRangeParams),
+    #[serde(rename = "PivotPoints")]
+    PivotPoints(PivotPointsParams),
     // Future variants: LiquiditySweep, etc.
 }
 
@@ -265,6 +294,15 @@ impl Strategy {
         Some(values)
     }
 
+    /// Every component's chart values for the bar at the end of `candles`,
+    /// keyed by component name (see `Signaler::series`).
+    pub fn compute_series(&self, candles: &[Candle]) -> HashMap<String, HashMap<String, f64>> {
+        self.components
+            .iter()
+            .map(|(name, component)| (name.clone(), component.series(candles)))
+            .collect()
+    }
+
     /// Evaluate the entry selector against computed port values.
     pub fn evaluate_entry(&self, ports: &PortValues) -> EntrySignal {
         let long = resolve_side(&self.entry.long, ports);
@@ -308,6 +346,13 @@ impl Component {
             Component::NoiseArea(p) => p.warmup(),
             Component::Momentum(p) => p.warmup(),
             Component::EventWindow(p) => p.warmup(),
+            Component::Bollinger(p) => p.warmup(),
+            Component::Stochastic(p) => p.warmup(),
+            Component::AdxFilter(p) => p.warmup(),
+            Component::Volatility(p) => p.warmup(),
+            Component::Vwap(p) => p.warmup(),
+            Component::OpeningRange(p) => p.warmup(),
+            Component::PivotPoints(p) => p.warmup(),
         }
     }
 
@@ -322,6 +367,13 @@ impl Component {
             Component::NoiseArea(p) => p.compute(candles),
             Component::Momentum(p) => p.compute(candles),
             Component::EventWindow(p) => p.compute(candles),
+            Component::Bollinger(p) => p.compute(candles),
+            Component::Stochastic(p) => p.compute(candles),
+            Component::AdxFilter(p) => p.compute(candles),
+            Component::Volatility(p) => p.compute(candles),
+            Component::Vwap(p) => p.compute(candles),
+            Component::OpeningRange(p) => p.compute(candles),
+            Component::PivotPoints(p) => p.compute(candles),
         }
     }
 
@@ -336,6 +388,34 @@ impl Component {
             Component::NoiseArea(p) => p.entry_reason(candles, direction),
             Component::Momentum(p) => p.entry_reason(candles, direction),
             Component::EventWindow(p) => p.entry_reason(candles, direction),
+            Component::Bollinger(p) => p.entry_reason(candles, direction),
+            Component::Stochastic(p) => p.entry_reason(candles, direction),
+            Component::AdxFilter(p) => p.entry_reason(candles, direction),
+            Component::Volatility(p) => p.entry_reason(candles, direction),
+            Component::Vwap(p) => p.entry_reason(candles, direction),
+            Component::OpeningRange(p) => p.entry_reason(candles, direction),
+            Component::PivotPoints(p) => p.entry_reason(candles, direction),
+        }
+    }
+
+    pub fn series(&self, candles: &[Candle]) -> HashMap<String, f64> {
+        match self {
+            Component::TrendFollowing(p) => p.series(candles),
+            Component::MeanReversion(p) => p.series(candles),
+            Component::Macd(p) => p.series(candles),
+            Component::Donchian(p) => p.series(candles),
+            Component::MaFilter(p) => p.series(candles),
+            Component::RsiReversion(p) => p.series(candles),
+            Component::NoiseArea(p) => p.series(candles),
+            Component::Momentum(p) => p.series(candles),
+            Component::EventWindow(p) => p.series(candles),
+            Component::Bollinger(p) => p.series(candles),
+            Component::Stochastic(p) => p.series(candles),
+            Component::AdxFilter(p) => p.series(candles),
+            Component::Volatility(p) => p.series(candles),
+            Component::Vwap(p) => p.series(candles),
+            Component::OpeningRange(p) => p.series(candles),
+            Component::PivotPoints(p) => p.series(candles),
         }
     }
 
@@ -350,6 +430,13 @@ impl Component {
             Component::NoiseArea(p) => p.stop_price(candles, direction),
             Component::Momentum(p) => p.stop_price(candles, direction),
             Component::EventWindow(p) => p.stop_price(candles, direction),
+            Component::Bollinger(p) => p.stop_price(candles, direction),
+            Component::Stochastic(p) => p.stop_price(candles, direction),
+            Component::AdxFilter(p) => p.stop_price(candles, direction),
+            Component::Volatility(p) => p.stop_price(candles, direction),
+            Component::Vwap(p) => p.stop_price(candles, direction),
+            Component::OpeningRange(p) => p.stop_price(candles, direction),
+            Component::PivotPoints(p) => p.stop_price(candles, direction),
         }
     }
 }
@@ -630,6 +717,35 @@ fn resolve_port_ref(port_ref: &PortRef, ports: &PortValues) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_block_parses_as_opus_sends_it() {
+        for (block, params) in [
+            (
+                "Bollinger",
+                serde_json::json!({"period": 20, "std_dev_mult": 2.0}),
+            ),
+            (
+                "Stochastic",
+                serde_json::json!({"period": 14, "signal_period": 3, "oversold": 20.0, "overbought": 80.0}),
+            ),
+            (
+                "AdxFilter",
+                serde_json::json!({"period": 14, "threshold": 25.0}),
+            ),
+            (
+                "Volatility",
+                serde_json::json!({"period": 14, "baseline": 100}),
+            ),
+            ("Vwap", serde_json::json!({})),
+            ("OpeningRange", serde_json::json!({"minutes": 30})),
+            ("PivotPoints", serde_json::json!({})),
+        ] {
+            let component: Result<Component, _> =
+                serde_json::from_value(serde_json::json!({"type": block, "params": params}));
+            assert!(component.is_ok(), "{block}: {component:?}");
+        }
+    }
     use serde_json::json;
 
     #[test]

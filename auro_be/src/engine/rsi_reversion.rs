@@ -39,6 +39,12 @@ impl Signaler for RsiReversionParams {
         Some(ports)
     }
 
+    fn series(&self, candles: &[Candle]) -> HashMap<String, f64> {
+        rsi(candles, self.rsi_period)
+            .map(|r| HashMap::from([("rsi".to_string(), r)]))
+            .unwrap_or_default()
+    }
+
     fn entry_reason(&self, candles: &[Candle], _direction: Direction) -> EntryReason {
         let r = rsi(candles, self.rsi_period).unwrap_or(50.0);
         EntryReason::MeanReversionEntry {

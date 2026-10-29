@@ -9,7 +9,7 @@ defmodule Opus.Trading.SignalChart do
   from the first candle in the window.
   """
 
-  alias Opus.Trading.StrategyWords
+  alias Opus.Trading.{Blocks, StrategyWords}
 
   @type trade :: %{
           id: non_neg_integer(),
@@ -29,6 +29,11 @@ defmodule Opus.Trading.SignalChart do
   recipe definition it ran. A marker is `%{index, kind: :buy | :sell,
   price, trade}`; a span is the bars a trade was open; a lane is
   `%{ref, label, role: :buy | :sell, runs: [{from, to}]}` (the role is the trade action the rule leads to).
+  `overlays` are indicator lines drawn on the candles (`%{label, values}`,
+  one value or nil per candle); `panels` are indicators drawn in their own
+  small chart (`%{label, values, also, levels, range}`: `also` is a second
+  line such as MACD's signal, `levels` the dashed reference lines from the
+  block's settings, `range` a fixed scale like RSI's 0 to 100).
   """
   @spec shape(map(), map(), String.t()) :: map()
   def shape(%{"bars" => bars, "signals" => signals}, definition, granularity) do
@@ -41,7 +46,9 @@ defmodule Opus.Trading.SignalChart do
       trades: trades,
       markers: Enum.flat_map(trades, &markers/1),
       spans: Enum.map(trades, &{&1.entry_index, &1.exit_index || length(candles) - 1}),
-      lanes: lanes(bars, definition, granularity)
+      lanes: lanes(bars, definition, granularity),
+      overlays: drawn(bars, definition, :price),
+      panels: drawn(bars, definition, :panel)
     }
   end
 
@@ -140,6 +147,31 @@ defmodule Opus.Trading.SignalChart do
       }
     end)
   end
+
+  # Each block's chart values (`Blocks` draw specs) placed on the candles
+  # (`:price`) or in panels (`:panel`), in component-name order. A line
+  # with no values in the window is left out.
+  defp drawn(bars, definition, place) do
+    for {name, %{"type" => type} = component} <- Enum.sort(definition["components"] || %{}),
+        %{draw: specs} <- [Blocks.get(type)],
+        spec <- specs,
+        spec.place == place,
+        values = series(bars, "#{name}.#{spec.key}"),
+        Enum.any?(values) do
+      line = %{label: spec.label, values: values}
+
+      if place == :panel,
+        do:
+          Map.merge(line, %{
+            also: spec[:with] && series(bars, "#{name}.#{spec[:with]}"),
+            levels: Blocks.levels(spec, component["params"] || %{}),
+            range: spec[:range]
+          }),
+        else: line
+    end
+  end
+
+  defp series(bars, key), do: Enum.map(bars, &get_in(&1, ["series", key]))
 
   @doc "The `{from, to}` index ranges where `flags` is true, inclusive."
   @spec runs([boolean()]) :: [{non_neg_integer(), non_neg_integer()}]

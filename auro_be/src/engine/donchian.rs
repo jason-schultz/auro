@@ -55,6 +55,21 @@ impl Signaler for DonchianParams {
         Some(ports)
     }
 
+    /// The channels the current bar is judged against: the ones from the
+    /// bars before it, as `compute` uses them.
+    fn series(&self, candles: &[Candle]) -> HashMap<String, f64> {
+        let mut values = HashMap::new();
+        if let Some(entry) = indicators::donchian(candles, self.entry_period) {
+            values.insert("upper".to_string(), entry.upper);
+            values.insert("lower".to_string(), entry.lower);
+        }
+        if let Some(exit) = indicators::donchian(candles, self.exit_period) {
+            values.insert("exit_upper".to_string(), exit.upper);
+            values.insert("exit_lower".to_string(), exit.lower);
+        }
+        values
+    }
+
     fn entry_reason(&self, candles: &[Candle], _direction: Direction) -> EntryReason {
         let channel = indicators::donchian(candles, self.entry_period).unwrap_or(
             indicators::DonchianChannel {
