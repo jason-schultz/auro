@@ -987,7 +987,9 @@ mod tests {
         // Pool needs enough distinct magnitudes that the per-sim sharpe
         // distribution is approximately continuous; a tiny pool with few
         // distinct values gives a discrete sharpe distribution whose median
-        // can land on the same atom in both runs.
+        // can land on the same atom in both runs. Even this pool's medians
+        // occasionally coincide (seen in CI Oct 29), so take five runs and
+        // require at least two distinct medians.
         let trades = vec![
             trade_with_pnl(3.0),
             trade_with_pnl(2.0),
@@ -1001,23 +1003,19 @@ mod tests {
             trade_with_pnl(-2.5),
         ];
 
-        let run_a = run_monte_carlo_sims(&trades);
-        let run_b = run_monte_carlo_sims(&trades);
-
-        let median_a = run_a
-            .get("median_sharpe")
-            .and_then(|v| v.as_f64())
-            .expect("median_sharpe should be present");
-        let median_b = run_b
-            .get("median_sharpe")
-            .and_then(|v| v.as_f64())
-            .expect("median_sharpe should be present");
+        let medians: Vec<f64> = (0..5)
+            .map(|_| {
+                run_monte_carlo_sims(&trades)
+                    .get("median_sharpe")
+                    .and_then(|v| v.as_f64())
+                    .expect("median_sharpe should be present")
+            })
+            .collect();
 
         assert!(
-            (median_a - median_b).abs() > 1e-9,
-            "expected median_sharpe to differ between MC runs (a={}, b={})",
-            median_a,
-            median_b
+            medians.iter().any(|m| (m - medians[0]).abs() > 1e-9),
+            "expected median_sharpe to differ between MC runs, got {:?}",
+            medians
         );
     }
 

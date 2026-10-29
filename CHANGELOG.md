@@ -6,6 +6,7 @@ TBD hasn't been released yet. Each line is one change with a link to its commit.
 Releases start once Auro runs locally as a service; until then everything is in 0.1.0.
 
 ## Version 0.1.0 (TBD)
+- The Monte Carlo "runs differ" test no longer fails by chance: it compares five runs instead of two, since two random runs occasionally land on the same median (CI, Oct 29). (commit pending)
 - The Vue frontend (`auro_fe/`) is deprecated and frozen: its CI workflow is removed and Opus serves the app. Wealthsimple account linking and the pipeline status list move to Opus before the folder goes. (commit pending)
 - Questrade calls wait out a rate limit (429) and retry once instead of failing: the 15-minute paper-book quotes for a third underlying (QQQ) were refused every run on Oct 29, so its take-profits used the morning's prices. (commit pending)
 - Option chain snapshots survive a contract Questrade lists twice: it's kept once (standard listing first) and the duplicate logged, instead of the whole capture failing (SPY 09:00 NY, Oct 29). (commit pending)
