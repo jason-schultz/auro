@@ -2,7 +2,8 @@ defmodule Opus.Options.PaperWorker do
   @moduledoc """
   Runs the options paper books (`Opus.Options.Paper`) at 10:30 New York on
   trading days, after the 10:00 chain snapshot and the ideas scan. Safe to
-  run twice: a market date already recorded is skipped. Gated on `enabled`.
+  run twice: a market date already recorded is skipped. Gated on `enabled`,
+  and does nothing on a day the US market is closed (`Opus.MarketCalendar`).
   The alerts go to Discord straight after (`NotifyWorker.send_now/1`).
   """
 
@@ -11,16 +12,22 @@ defmodule Opus.Options.PaperWorker do
   require Logger
 
   alias Opus.Dashboard.NotifyWorker
+  alias Opus.{Clock, MarketCalendar}
   alias Opus.Options.Paper
 
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok
-  def perform(%Oban.Job{}) do
-    if Application.fetch_env!(:opus, __MODULE__)[:enabled] do
-      for {book, symbol, result} <- Paper.run(), do: log("#{book} #{symbol}", result)
-      NotifyWorker.send_now("options_paper")
-    else
-      Logger.info("[PaperBook] Disabled in config; nothing run")
+  def perform(%Oban.Job{scheduled_at: scheduled_at}) do
+    cond do
+      not Application.fetch_env!(:opus, __MODULE__)[:enabled] ->
+        Logger.info("[PaperBook] Disabled in config; nothing run")
+
+      not MarketCalendar.trading_day?(Clock.date(scheduled_at)) ->
+        Logger.info("[PaperBook] The US market is closed today; nothing run")
+
+      true ->
+        for {book, symbol, result} <- Paper.run(), do: log("#{book} #{symbol}", result)
+        NotifyWorker.send_now("options_paper")
     end
 
     :ok
@@ -31,4 +38,7 @@ defmodule Opus.Options.PaperWorker do
 
   defp log(name, {:skipped, reason}),
     do: Logger.info("[PaperBook] #{name}: skipped (#{reason})")
+
+  # Already logged with its stacktrace by Paper.run/0.
+  defp log(_name, {:error, _reason}), do: :ok
 end

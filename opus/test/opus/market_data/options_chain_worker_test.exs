@@ -11,6 +11,9 @@ defmodule Opus.MarketData.OptionsChainWorkerTest do
     %{config: config}
   end
 
+  # Wednesday 2026-10-28 09:00 New York, a trading day.
+  @trading_day ~U[2026-10-28 13:00:00Z]
+
   defp flag_for_chains(spelling) do
     {:ok, instrument} = Instruments.add(spelling, "etf")
     {:ok, instrument} = Instruments.toggle(instrument, :feed_options_chain)
@@ -21,7 +24,16 @@ defmodule Opus.MarketData.OptionsChainWorkerTest do
     flag_for_chains("SPY")
     Application.put_env(:opus, OptionsChainWorker, Keyword.put(config, :enabled, false))
 
-    assert :ok = perform_job(OptionsChainWorker, %{})
+    assert :ok = perform_job(OptionsChainWorker, %{}, scheduled_at: @trading_day)
+    assert all_enqueued(worker: OptionsChainWorker) == []
+  end
+
+  test "the cron shape enqueues nothing on a market holiday", %{config: config} do
+    flag_for_chains("SPY")
+    Application.put_env(:opus, OptionsChainWorker, Keyword.put(config, :enabled, true))
+
+    # Thanksgiving, 09:00 New York.
+    assert :ok = perform_job(OptionsChainWorker, %{}, scheduled_at: ~U[2026-11-26 14:00:00Z])
     assert all_enqueued(worker: OptionsChainWorker) == []
   end
 
@@ -31,7 +43,7 @@ defmodule Opus.MarketData.OptionsChainWorkerTest do
     {:ok, _unflagged} = Instruments.add("QQQ", "etf")
     Application.put_env(:opus, OptionsChainWorker, Keyword.put(config, :enabled, true))
 
-    assert :ok = perform_job(OptionsChainWorker, %{})
+    assert :ok = perform_job(OptionsChainWorker, %{}, scheduled_at: @trading_day)
 
     jobs = all_enqueued(worker: OptionsChainWorker)
     assert Enum.sort(Enum.map(jobs, & &1.args["underlying"])) == ["SPY", "XIU.TO"]

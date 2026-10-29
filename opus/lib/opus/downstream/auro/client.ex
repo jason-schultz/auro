@@ -512,7 +512,7 @@ defmodule Opus.Auro.Client do
   # -- Private --
 
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}) do
-    Logger.info("[AuroClient] Request succeeded: #{inspect(body)}")
+    Logger.debug("[AuroClient] Request succeeded: #{inspect(body)}")
     {:ok, body}
   end
 

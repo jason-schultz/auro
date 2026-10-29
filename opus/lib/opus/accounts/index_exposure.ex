@@ -27,7 +27,7 @@ defmodule Opus.Accounts.IndexExposure do
 
   @doc "This month's S&P 500 exposure, from last month's bars; nil without them."
   @spec current(Date.t()) :: t() | nil
-  def current(today \\ Date.utc_today()) do
+  def current(today \\ Opus.Clock.today()) do
     month = today |> Date.beginning_of_month() |> Date.shift(month: -1)
 
     with %{} = result <- for_month(closes(month), month) do
@@ -57,7 +57,7 @@ defmodule Opus.Accounts.IndexExposure do
         %{
           month: month,
           realized_vol: :math.sqrt(variance),
-          exposure: min(1.0, @target_vol * @target_vol / variance)
+          exposure: exposure(variance)
         }
     end
   end
@@ -72,6 +72,16 @@ defmodule Opus.Accounts.IndexExposure do
         where:
           c.instrument == ^@instrument and c.granularity == "D" and c.complete and
             c.timestamp < ^DateTime.new!(Date.add(month_end, 1), ~T[00:00:00]),
+        # Skip the weekly stub bar (Friday 16:00 to the 17:00 weekend close,
+        # the engine's `daily_bars`): counted as a day, its one-hour move
+        # would understate the month's daily volatility.
+        where:
+          not fragment(
+            "(extract(isodow from ? AT TIME ZONE 'America/New_York') = 5 AND extract(hour from ? AT TIME ZONE 'America/New_York') >= 16) OR extract(isodow from ? AT TIME ZONE 'America/New_York') = 6",
+            c.timestamp,
+            c.timestamp,
+            c.timestamp
+          ),
         order_by: [desc: c.timestamp],
         limit: 40,
         select: {type(c.timestamp, :utc_datetime_usec), c.close}
@@ -84,4 +94,9 @@ defmodule Opus.Accounts.IndexExposure do
     {before, during} = Enum.split_with(rows, fn {date, _} -> Date.before?(date, month) end)
     Enum.take(before, -1) ++ Enum.filter(during, fn {date, _} -> same_month?(date, month) end)
   end
+
+  # A month with no movement (flat bars) has no variance to divide by: hold
+  # it all, as the rule does for any calm month.
+  defp exposure(variance) when variance > 0, do: min(1.0, @target_vol * @target_vol / variance)
+  defp exposure(_variance), do: 1.0
 end

@@ -20,7 +20,7 @@ defmodule OpusWeb.Components.PaperBook do
   import OpusWeb.PayoffChart
   import OpusWeb.Components.PaperParts
 
-  alias Opus.Options.Paper.Wheel
+  alias Opus.Options.Paper.{Legs, Pick, Wheel}
   alias OpusWeb.Components.PaperTrades
 
   # The books, in the order the selector shows them (names: `book_name/1`).
@@ -127,7 +127,7 @@ defmodule OpusWeb.Components.PaperBook do
           |> Enum.max(NaiveDateTime, fn -> nil end),
         days:
           started
-          |> Enum.map(&Date.diff(Date.utc_today(), &1.started_on))
+          |> Enum.map(&Date.diff(Opus.Clock.today(), &1.started_on))
           |> Enum.max(fn -> 0 end)
       )
 
@@ -497,7 +497,11 @@ defmodule OpusWeb.Components.PaperBook do
     %{position: p, events: events, quote: quote} = assigns.leg
     opened = Enum.find(events, &(&1.kind == "open"))
     now = now_spot(assigns.leg)
-    mark = last_mark(assigns.leg)
+    open? = p.status == "open"
+
+    # The latest quote's mid, like the book's overview; the nightly mark only
+    # when there's no quote. A closed leg is worth what it closed at.
+    mark = if open?, do: Pick.mid(quote) || last_mark(assigns.leg), else: p.close_price
 
     assigns =
       assign(assigns,
@@ -507,9 +511,13 @@ defmodule OpusWeb.Components.PaperBook do
         now: now,
         mark: mark,
         premium: p.open_price * Wheel.multiplier() * p.quantity,
-        pnl: mark && (p.open_price - mark) * Wheel.multiplier() * p.quantity,
+        pnl:
+          if(open?,
+            do: mark && (p.open_price - mark) * Wheel.multiplier() * p.quantity,
+            else: Legs.realized(p)
+          ),
         kept: mark && (p.open_price - mark) / p.open_price,
-        days_left: Date.diff(p.expiration, Date.utc_today()),
+        days_left: Date.diff(p.expiration, Opus.Clock.today()),
         cushion: now && cushion(p, now),
         outcome: Enum.find(events, &(&1.kind != "open"))
       )
@@ -530,7 +538,7 @@ defmodule OpusWeb.Components.PaperBook do
 
       <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <.fact
-          label="Option worth now"
+          label={if @p.status == "open", do: "Option worth now", else: "Closed at"}
           value={money(@mark)}
           note={@quote && "bid #{num(@quote.bid)} · ask #{num(@quote.ask)}"}
         />
@@ -795,7 +803,7 @@ defmodule OpusWeb.Components.PaperBook do
   defp next_decision(%{short: %{} = short}) do
     manage_on = Wheel.manage_on(short)
 
-    if Date.before?(Date.utc_today(), manage_on),
+    if Date.before?(Opus.Clock.today(), manage_on),
       do: "#{day(manage_on)} · 21-day check",
       else: "#{day(short.expiration)} · expiry"
   end

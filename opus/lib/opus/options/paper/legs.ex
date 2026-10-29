@@ -35,6 +35,19 @@ defmodule Opus.Options.Paper.Legs do
   def close_price(%{side: "short"}, quote), do: quote.ask
   def close_price(%{side: "long"}, quote), do: quote.bid
 
+  @doc """
+  A closed leg's P&L: what it opened and closed (or settled) at, less its
+  commission. Nil for a leg still open.
+  """
+  @spec realized(map()) :: float() | nil
+  def realized(%{status: status, close_price: close} = leg)
+      when status != "open" and is_number(close),
+      do:
+        sign(leg) * (leg.open_price - close) * Pick.multiplier() * leg.quantity -
+          (leg.commission || 0.0)
+
+  def realized(_leg), do: nil
+
   @doc "Cash from opening legs at `open_price`, commission included."
   @spec open_cash([map()], float()) :: float()
   def open_cash(legs, commission),

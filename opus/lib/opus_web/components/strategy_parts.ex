@@ -71,6 +71,11 @@ defmodule OpusWeb.StrategyParts do
         <dd class="m-0">{live_words(@results.live)}</dd>
       <% end %>
     </dl>
+    <p class="m-0 text-[12px] text-muted">
+      <.t {copy(
+        "Test returns and drops are each trade's price move added up, as if every trade used the whole account. Your account moves less: each trade is sized to risk a small share. The Together page shows the account."
+      )} />
+    </p>
     """
   end
 
@@ -87,10 +92,15 @@ defmodule OpusWeb.StrategyParts do
         <span :if={@stage.status == :failed} class="font-medium text-error">
           <.t {pcopy("test result", "Failed")} />
         </span>
+        <span :if={@stage.status == :old_pass} class="font-medium text-warning">
+          <.t {copy("Passed older rules")} />
+        </span>
         <span :if={@stage.status in [:running, :pending]} class="font-medium text-warning">
           {if @stage.status == :running, do: "Running", else: "Waiting to run"}
         </span>
-        <span :if={@stage.status == :not_run} class="text-muted">{@stage.reason}</span>
+        <span :if={@stage.status in [:not_run, :old_pass]} class="text-muted">
+          <span :if={@stage.status == :old_pass}>·</span> {@stage.reason}
+        </span>
         <span :if={@line}>
           · {@line}<span :if={@stage.at} class="text-muted"> ({date(@stage.at)})</span>
         </span>
@@ -163,6 +173,9 @@ defmodule OpusWeb.StrategyParts do
 
       results.backtest.status == :not_run ->
         %{mark: "–", words: "not tested", class: "text-muted"}
+
+      Enum.any?(stages, fn {_name, s} -> s.status == :old_pass end) ->
+        %{mark: "~", words: "passed older rules; re-test it", class: "text-warning"}
 
       true ->
         passed = Enum.count(stages, fn {_name, s} -> s.status == :passed end)

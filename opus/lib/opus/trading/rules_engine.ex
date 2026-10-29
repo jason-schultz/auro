@@ -23,8 +23,9 @@ defmodule Opus.Trading.RulesEngine do
   decision time (`regime_inputs`, from `Opus.Trading.RegimeDetector`). That
   is a readout for screens, not an input to the decision.
 
-  Polls every 5 minutes, and recomputes at once when a suspension opens or
-  clears.
+  Polls every minute, and recomputes at once when a suspension opens or
+  clears. The engine refuses entries after a restart until its first push,
+  so pushes come often; each is cheap.
   """
 
   use GenServer
@@ -46,27 +47,27 @@ defmodule Opus.Trading.RulesEngine do
 
   import Ecto.Query
 
-  @poll_interval :timer.minutes(5)
+  @poll_interval :timer.minutes(1)
   @initial_delay :timer.seconds(30)
 
   # -- Public API --
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @doc "Force an immediate recompute (for testing or manual trigger from FE)."
+  @doc "Force an immediate recompute (after a safety setting or suspension changes)."
+  @spec recompute() :: :ok
   def recompute do
     GenServer.cast(__MODULE__, :recompute)
   end
-
-  def recompute_now, do: recompute()
 
   @doc "Computes decisions once, persists rules, and pushes to Rust."
   @spec compute_and_push() :: {:ok, list(map())} | {:error, term()}
   def compute_and_push do
     strategies = list_live_strategies()
-    regimes = RegimeDetector.get_all_regimes()
+    regimes = regimes()
     open_suspensions = open_suspensions_by_strategy(strategies)
     pause = AccountPause.check()
     decisions = Enum.map(strategies, &decide(&1, regimes, open_suspensions, pause))
@@ -79,6 +80,19 @@ defmodule Opus.Trading.RulesEngine do
 
   @spec last_run() :: DateTime.t() | nil
   def last_run, do: GenServer.call(__MODULE__, :last_run)
+
+  # The regime is only a readout recorded with each rule: a detector that
+  # is busy or down mustn't stop the safety push.
+  defp regimes do
+    RegimeDetector.get_all_regimes()
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "[RulesEngine] Regime readout unavailable (#{inspect(reason)}); pushing without it"
+      )
+
+      %{}
+  end
 
   # -- GenServer Callbacks --
 
@@ -108,18 +122,8 @@ defmodule Opus.Trading.RulesEngine do
 
   # -- Core logic --
 
+  # A failed cycle leaves the state unchanged; the next tick retries.
   defp run_cycle(state) do
-    # Skeleton of the cycle. Each step is a defp — fill in the bodies in order.
-    #
-    # 1. Read all live_strategies rows in the universe.
-    # 2. Read the regime map from RegimeDetector (a readout, recorded per rule).
-    # 3. For each strategy, derive a decision (enabled?, reason) from the safety rules.
-    # 4. Persist each decision to the `rules` table (upsert).
-    # 5. Push the full map to Rust via Auro.Client.push_rules/1.
-    # 6. Log a one-line summary.
-    #
-    # If any step fails, log and return state unchanged so the next tick retries.
-
     case compute_and_push() do
       {:ok, decisions} ->
         Logger.info(
@@ -179,6 +183,11 @@ defmodule Opus.Trading.RulesEngine do
   defp limits(strategies) do
     case AccountLimits.get() do
       nil ->
+        Logger.warning(
+          "[RulesEngine] No account limits stored (trading_config account_limits); " <>
+            "pushing without a risk budget or group caps"
+        )
+
         nil
 
       %{risk_budget_pct: budget, max_open_per_group: per_group} ->

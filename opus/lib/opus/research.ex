@@ -71,7 +71,7 @@ defmodule Opus.Research do
   """
   @spec set_status(Entry.t(), String.t()) :: {:ok, Entry.t()} | {:error, Ecto.Changeset.t()}
   def set_status(%Entry{decided_on: nil} = entry, status) when status in ~w(worked failed parked),
-    do: update(entry, %{status: status, decided_on: Date.utc_today()})
+    do: update(entry, %{status: status, decided_on: Opus.Clock.today()})
 
   def set_status(%Entry{} = entry, status), do: update(entry, %{status: status})
 end

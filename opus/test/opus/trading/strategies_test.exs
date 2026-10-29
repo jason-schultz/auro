@@ -243,7 +243,8 @@ defmodule Opus.Trading.StrategiesTest do
         |> Repo.insert!()
 
       for {stage, status, stats, reason} <- [
-            {"backtest", "passed", %{"total_return" => 0.43, "num_trades" => 118}, nil},
+            {"backtest", "passed", %{"total_return" => 0.43, "num_trades" => 118, "checks" => []},
+             nil},
             {"walk_forward", "failed", nil, "out-of-sample Sharpe below 0.05"}
           ] do
         Repo.insert!(%StrategyEvaluation{
@@ -279,6 +280,17 @@ defmodule Opus.Trading.StrategiesTest do
       assert [%{instrument: "NAS100_USD"}] = dip_buy.locked_by
 
       assert held.locked_by == []
+    end
+
+    test "a pass from before the Oct 28 rules reads as that, not as passed" do
+      from(e in StrategyEvaluation, where: e.stage == "backtest")
+      |> Repo.update_all(set: [stats: %{"total_return" => 0.43, "num_trades" => 118}])
+
+      [dip_buy, _held] = Strategies.recipes()
+      [nas, _spx] = dip_buy.assignments
+
+      assert %{status: :old_pass, reason: reason} = nas.results.backtest
+      assert reason =~ "before Oct 28"
     end
 
     test "says what each test found, and why a test has no result" do

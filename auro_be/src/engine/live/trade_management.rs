@@ -42,13 +42,14 @@ pub(crate) async fn update_mae_mfe(state: &AppState, position: &OpenPosition, cu
         Direction::Short => (position.entry_price - new_best) / position.entry_price,
     };
 
-    if let Err(e) =
-        live_trades_repo::record_excursions(&state.db, &position.trade_id, mae_pct, mfe_pct).await
-    {
-        tracing::warn!(
-            "[MGMT] Failed to update MAE/MFE for {}: {}",
-            position.trade_id,
-            e
-        );
-    }
+    // Written in the background so a slow database never holds up the
+    // quote loop that every instrument's price goes through. The update
+    // keeps the larger value, so writes landing out of order are harmless.
+    let (db, trade_id) = (state.db.clone(), position.trade_id.clone());
+    tokio::spawn(async move {
+        if let Err(e) = live_trades_repo::record_excursions(&db, &trade_id, mae_pct, mfe_pct).await
+        {
+            tracing::warn!("[MGMT] Failed to update MAE/MFE for {}: {}", trade_id, e);
+        }
+    });
 }

@@ -82,7 +82,10 @@ pub async fn get_open_trades(State(state): State<AppState>) -> AppResult<Json<Va
             .bind(&trade_ids)
             .fetch_all(&state.db)
             .await
-            .unwrap_or_default()
+            .unwrap_or_else(|e| {
+                tracing::error!("open trades: strategy lookup failed, shown without strategies: {e}");
+                Vec::new()
+            })
     };
 
     #[allow(clippy::type_complexity)]

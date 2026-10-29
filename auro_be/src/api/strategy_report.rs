@@ -188,7 +188,17 @@ pub async fn sensitivity(
                 .map(|chunk| scope.spawn(|| chunk.iter().map(&judge).collect::<Vec<_>>()))
                 .collect::<Vec<_>>()
                 .into_iter()
-                .flat_map(|handle| handle.join().unwrap_or_default())
+                .zip(settings.chunks(per_thread))
+                .flat_map(|(handle, chunk)| {
+                    // A worker that panicked loses its chunk; its cells are
+                    // reported as errors rather than silently missing.
+                    handle.join().unwrap_or_else(|_| {
+                        chunk
+                            .iter()
+                            .map(|(x, y, _)| json!({ "x": x, "y": y, "error": "crashed" }))
+                            .collect()
+                    })
+                })
                 .collect()
         });
         Ok(cells)

@@ -65,6 +65,9 @@ pub struct BackfillParams {
     pub days: Option<i64>,
 }
 
+/// Longest backfill one request may ask for (about 20 years).
+const MAX_BACKFILL_DAYS: i64 = 7_300;
+
 /// Extend stored history back `days` days. Uses the same OANDA fetch as the
 /// live candle feed; overlapping rows are overwritten with identical data.
 pub async fn backfill(
@@ -73,6 +76,11 @@ pub async fn backfill(
 ) -> AppResult<Json<Value>> {
     let granularity = parse_granularity(params.granularity.as_deref())?;
     let days = params.days.unwrap_or(365);
+    if !(1..=MAX_BACKFILL_DAYS).contains(&days) {
+        return Err(AppError::BadRequest(format!(
+            "days must be from 1 to {MAX_BACKFILL_DAYS}, got {days}"
+        )));
+    }
     let after = Utc::now() - Duration::days(days);
 
     let stored = backfill::backfill(

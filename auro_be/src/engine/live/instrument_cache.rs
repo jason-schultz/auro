@@ -39,6 +39,26 @@ impl InstrumentMeta {
     }
 }
 
+/// How often instrument metadata and policy caps are reloaded, so a failed
+/// startup load (or a cap changed in the database) doesn't last until a
+/// restart.
+const RELOAD_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Reload the metadata every `RELOAD_EVERY`, keeping the old copy when a
+/// load comes back empty. Runs forever; started under a supervisor.
+pub async fn run_metadata_reload(state: crate::state::AppState) {
+    let mut interval = tokio::time::interval(RELOAD_EVERY);
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        let fresh = load_instrument_metadata(&state.oanda, &state.db).await;
+        if fresh.is_empty() {
+            continue;
+        }
+        *state.live.instrument_metadata.write().await = fresh;
+    }
+}
+
 pub async fn load_instrument_metadata(
     oanda: &OandaClient,
     db: &PgPool,
@@ -46,7 +66,10 @@ pub async fn load_instrument_metadata(
     let instruments = match oanda.get_instruments().await {
         Ok(instruments) => instruments,
         Err(e) => {
-            tracing::warn!("[SIZING] failed to load instrument metadata: {}", e);
+            tracing::error!(
+                "[SIZING] failed to load instrument metadata (entries skip until a reload works): {}",
+                e
+            );
             return HashMap::new();
         }
     };
@@ -56,12 +79,14 @@ pub async fn load_instrument_metadata(
             .into_iter()
             .map(|(instrument, cap)| (instrument, cap as f64))
             .collect(),
+        // Without the caps, sizing would run uncapped: keep no metadata at
+        // all instead, so entries skip until a reload reads both.
         Err(e) => {
-            tracing::warn!(
-                "[SIZING] failed to load instrument policy caps from DB: {}",
+            tracing::error!(
+                "[SIZING] failed to load instrument policy caps (entries skip until a reload works): {}",
                 e
             );
-            HashMap::new()
+            return HashMap::new();
         }
     };
 

@@ -11,6 +11,7 @@ defmodule Opus.Trading.Strategies do
   for the same reason.
   """
 
+  import Opus.Utils.Time, only: [parse_iso8601!: 1]
   import Ecto.Query
 
   alias Opus.Auro.Client
@@ -118,7 +119,7 @@ defmodule Opus.Trading.Strategies do
         # Test runs on instruments it isn't on yet: a draft's, or a copy's.
         runs:
           recipe.definition
-          |> StrategyResults.for_recipe()
+          |> StrategyResults.for_recipe(recipe.granularity)
           |> Enum.reject(&MapSet.member?(assigned, &1.instrument)),
         status:
           cond do
@@ -210,7 +211,7 @@ defmodule Opus.Trading.Strategies do
       points:
         Enum.map(points, fn p ->
           %{
-            time: at(p["time"]),
+            time: parse_iso8601!(p["time"]),
             strategy: p["strategy"],
             hold: p["hold"],
             drawdown: p["drawdown"]
@@ -223,15 +224,10 @@ defmodule Opus.Trading.Strategies do
         hold_max_drawdown: s["hold_max_drawdown"],
         time_in_market: s["time_in_market"],
         num_trades: s["num_trades"],
-        from: at(s["from"]),
-        to: at(s["to"])
+        from: parse_iso8601!(s["from"]),
+        to: parse_iso8601!(s["to"])
       }
     }
-  end
-
-  defp at(text) do
-    {:ok, at, _} = DateTime.from_iso8601(text)
-    at
   end
 
   @doc """
@@ -319,7 +315,7 @@ defmodule Opus.Trading.Strategies do
       # Tests on instruments the recipe doesn't run on.
       runs:
         strategy.recipe.definition
-        |> StrategyResults.for_recipe()
+        |> StrategyResults.for_recipe(strategy.recipe.granularity)
         |> Enum.reject(fn run -> Enum.any?(siblings, &(&1.instrument == run.instrument)) end),
       locked_by: Enum.filter(siblings, &(&1.enabled or &1.open_trades > 0)),
       results: StrategyResults.for_ids([strategy.id]) |> Map.fetch!(strategy.id)
@@ -570,6 +566,7 @@ defmodule Opus.Trading.Strategies do
       granularity: strategy.granularity,
       enabled: strategy.enabled,
       circuit_breaker_exempt: strategy.circuit_breaker_exempt,
+      sizing_params: strategy.sizing,
       created_at: strategy.created_at,
       rule: Map.get(context.rules, strategy.id),
       suspension: Map.get(context.suspensions, strategy.id),

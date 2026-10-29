@@ -25,12 +25,15 @@ defmodule Opus.Options.Paper do
 
   import Ecto.Query
 
+  require Logger
+
   alias Opus.Options
   alias Opus.Options.Idea
   alias Opus.Options.Paper.{Event, Legs, LongOptions, Position, Structures, Trade, Wheel}
   alias Opus.{Clock, Repo}
 
   @recent_events 12
+  @open ~T[09:30:00]
 
   defp config, do: Application.fetch_env!(:opus, __MODULE__)
 
@@ -45,12 +48,26 @@ defmodule Opus.Options.Paper do
 
   def underlyings(book), do: Map.fetch!(config()[:books], book)
 
-  @doc "Run tonight's rules for every book on each of its underlyings."
-  @spec run() :: [{String.t(), String.t(), {:ok, [tuple()]} | {:skipped, atom()}}]
-  def run,
-    do: for(book <- books(), symbol <- underlyings(book), do: {book, symbol, run(book, symbol)})
+  @doc """
+  Run today's rules for every book on each of its underlyings. Each book and
+  underlying runs on its own: one that raises is logged and returned as
+  `{:error, exception}`, and the rest still run.
+  """
+  @spec run() :: [
+          {String.t(), String.t(), {:ok, [tuple()]} | {:skipped, atom()} | {:error, term()}}
+        ]
+  def run do
+    for book <- books(), symbol <- underlyings(book) do
+      {book, symbol, isolated("#{book} #{symbol}", fn -> run(book, symbol) end)}
+    end
+  end
 
-  @doc "Run one book on one underlying's latest snapshot, once per market date."
+  @doc """
+  Run one book on one underlying's latest snapshot, once per market date.
+  A snapshot captured before the 09:30 New York open (the pre-open capture,
+  holding the previous session's closing quotes) is not traded on: the day
+  is skipped for that book and underlying.
+  """
   @spec run(String.t(), String.t()) :: {:ok, [tuple()]} | {:skipped, atom()}
   def run(book, symbol) do
     case Options.snapshot(symbol) do
@@ -60,10 +77,36 @@ defmodule Opus.Options.Paper do
       [%{instrument_id: id, captured_at: captured_at} | _] = rows ->
         as_of = market_date(captured_at)
 
-        if ran?(book, id, as_of),
-          do: {:skipped, :already_ran},
-          else: Repo.transaction(fn -> step(book, id, as_of, rows) end)
+        cond do
+          not in_session?(captured_at) ->
+            Logger.warning(
+              "[PaperBook] #{book} #{symbol}: latest chain was captured before the open " <>
+                "(#{captured_at} UTC); not trading on it today"
+            )
+
+            {:skipped, :stale_snapshot}
+
+          ran?(book, id, as_of) ->
+            {:skipped, :already_ran}
+
+          true ->
+            Repo.transaction(fn -> step(book, id, as_of, rows) end)
+        end
     end
+  end
+
+  # Captured at or after 09:30 New York on its own date: live quotes, not
+  # the previous session's close.
+  defp in_session?(captured_at),
+    do: Time.compare(DateTime.to_time(Clock.local(captured_at)), @open) != :lt
+
+  # Runs one book on one underlying, so a raise in one doesn't stop the rest.
+  defp isolated(name, fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.error("[PaperBook] #{name} failed: " <> Exception.format(:error, e, __STACKTRACE__))
+      {:error, e}
   end
 
   @doc "Run the wheel on one underlying."
@@ -101,8 +144,13 @@ defmodule Opus.Options.Paper do
     |> Repo.all()
     |> Enum.filter(fn {book, id} -> ran?(book, id, as_of) end)
     |> Enum.map(fn {book, id} ->
-      {:ok, fills} =
-        Repo.transaction(fn -> take_profits(book, id, as_of, commission) end)
+      fills =
+        case isolated("#{book} #{id} take-profits", fn ->
+               Repo.transaction(fn -> take_profits(book, id, as_of, commission) end)
+             end) do
+          {:ok, fills} -> fills
+          {:error, _reason} -> []
+        end
 
       {book, id, fills}
     end)
@@ -641,6 +689,10 @@ defmodule Opus.Options.Paper do
       events: events |> Enum.reject(&(&1.kind == "mark")) |> Enum.take(@recent_events)
     }
   end
+
+  @doc "Every book's P&L added up (marked to the latest quotes), for the tab badge."
+  @spec total_pnl() :: float()
+  def total_pnl, do: Enum.sum_by(books(), &book(&1).pnl) / 1
 
   @doc "How many trades each book has open, for the tab badges."
   @spec open_counts() :: %{String.t() => non_neg_integer()}

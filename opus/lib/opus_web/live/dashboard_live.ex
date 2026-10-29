@@ -23,7 +23,7 @@ defmodule OpusWeb.DashboardLive do
   def mount(_params, _session, socket) do
     socket =
       socket
-      |> assign(page_title: "Dashboard", data: nil, alerts: [], as_of: nil)
+      |> assign(page_title: "Dashboard", data: nil, alerts: [], as_of: nil, refresh_timer: nil)
       |> assign_cached_accounts()
 
     {:ok, if(connected?(socket), do: refresh(socket, :if_stale), else: socket)}
@@ -75,9 +75,15 @@ defmodule OpusWeb.DashboardLive do
   # Gathering reads the engine and the database, so it runs in the
   # background: the page renders at once (with the last data, if any) and
   # fills in when the gather lands, instead of holding up navigation.
+  # One timer at a time: a Refresh press replaces the pending one instead of
+  # starting a second chain.
   defp refresh(socket, accounts) do
-    Process.send_after(self(), :refresh, @refresh_ms)
-    socket = start_async(socket, :gather, &Dashboard.gather/0)
+    if socket.assigns.refresh_timer, do: Process.cancel_timer(socket.assigns.refresh_timer)
+
+    socket =
+      socket
+      |> assign(refresh_timer: Process.send_after(self(), :refresh, @refresh_ms))
+      |> start_async(:gather, &Dashboard.gather/0)
 
     if accounts == :always or not Dashboard.fresh?(Dashboard.cached_accounts()),
       do: start_async(socket, :accounts, &Dashboard.accounts/0),

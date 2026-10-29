@@ -66,6 +66,24 @@ pub(crate) async fn open_trade_count_for_strategy(
     .await
 }
 
+/// When OANDA last closed one of the strategy's trades by itself (a stop,
+/// trailing stop or take-profit hit mid-bar, or a broker close: the labels
+/// Opus's reconciler writes), if ever. Exits the strategy's own rules make
+/// at a bar close are not counted.
+pub(crate) async fn last_broker_exit_time_for_strategy(
+    pool: &PgPool,
+    strategy_id: Uuid,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT MAX(exit_time) FROM live_trades \
+         WHERE live_strategy_id = $1 AND status = 'closed' \
+         AND exit_reason IN ('StopLoss', 'TrailingStop', 'TakeProfit', 'ClosedByBroker')",
+    )
+    .bind(strategy_id)
+    .fetch_one(pool)
+    .await
+}
+
 pub(crate) async fn instrument_unit_caps(pool: &PgPool) -> Result<Vec<(String, i64)>, sqlx::Error> {
     sqlx::query_as("SELECT instrument, max_units FROM instrument_unit_caps")
         .fetch_all(pool)

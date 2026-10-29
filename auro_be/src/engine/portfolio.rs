@@ -7,15 +7,16 @@
 //! - **Sizing** is the live rule: a trade puts `risk_pct / stop distance`
 //!   of NAV into the position, capped at the play's notional cap. Its
 //!   account return is that share times the trade's return.
-//! - **One trade per instrument**, as live: a play can't open on an
-//!   instrument another play already holds.
+//! - **One trade per play**, as live: a strategy holds one position at a
+//!   time, but two strategies may hold the same instrument at once (live
+//!   checks open positions per strategy, not per instrument).
 //! - **Risk budget and group cap**: the live check (`AccountLimits::breach`).
 //! - **Drawdown pause and circuit breaker** need a person to resume, which a
 //!   backtest can't do. They are reported as the dates they would have
 //!   tripped, and the replay carries on as if you had resumed at once.
 //!
-//! Without limits, only the one-per-instrument rule applies: the same plays
-//! side by side, to show what the rules cost or saved.
+//! Without limits, the same plays run side by side unchecked, to show what
+//! the rules cost or saved.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -62,7 +63,6 @@ pub struct Limits {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Blocked {
-    pub instrument_busy: usize,
     pub risk_budget: usize,
     pub group_cap: usize,
 }
@@ -180,13 +180,6 @@ impl<'a> Replay<'a> {
 
     /// Why `play` can't open now, if it can't.
     fn refusal(&self, play: &Play) -> Option<Refusal> {
-        if self
-            .open
-            .iter()
-            .any(|o| o.play.instrument == play.instrument)
-        {
-            return Some(Refusal::InstrumentBusy);
-        }
         let held = self
             .open
             .iter()
@@ -203,7 +196,6 @@ impl<'a> Replay<'a> {
 }
 
 enum Refusal {
-    InstrumentBusy,
     RiskBudget,
     GroupCap,
 }
@@ -248,7 +240,6 @@ pub fn simulate(
         let play = plays[i];
         replay.close_until(Some(trade.entry_time));
         match replay.refusal(play) {
-            Some(Refusal::InstrumentBusy) => blocked.instrument_busy += 1,
             Some(Refusal::RiskBudget) => blocked.risk_budget += 1,
             Some(Refusal::GroupCap) => blocked.group_cap += 1,
             None => {
@@ -463,12 +454,11 @@ mod tests {
     }
 
     #[test]
-    fn two_plays_cannot_hold_the_same_instrument() {
+    fn two_plays_may_hold_the_same_instrument_as_live() {
         let daily = play("d", "NAS100_USD", vec![trade((5, 10), (7, 20), 0.01)]);
         let intraday = play("m", "NAS100_USD", vec![trade((6, 14), (6, 20), 0.01)]);
         let out = simulate(&[&daily, &intraday], None, at(5, 0), at(8, 0));
-        assert_eq!(out.blocked.instrument_busy, 1);
-        assert_eq!(out.taken, 1);
+        assert_eq!(out.taken, 2);
     }
 
     #[test]

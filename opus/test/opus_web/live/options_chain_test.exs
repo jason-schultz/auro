@@ -66,7 +66,7 @@ defmodule OpusWeb.OptionsChainTest do
   end
 
   test "picking a strike fills the position from the quote and runs the analysis", %{conn: conn} do
-    {:ok, view, html} = live(conn, ~p"/options")
+    {:ok, view, html} = live(conn, ~p"/options?view=workbench")
 
     assert html =~ "· SPY puts"
     assert html =~ "Dec 18"
@@ -91,7 +91,7 @@ defmodule OpusWeb.OptionsChainTest do
     |> form("#position-form", position: %{"strategy" => "long_call"})
     |> render_change()
 
-    html = render_patch(view, ~p"/options")
+    html = render_patch(view, ~p"/options?view=workbench")
 
     assert html =~ "· SPY calls"
     assert html =~ "phx-value-strike=\"765\""

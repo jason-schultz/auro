@@ -223,7 +223,7 @@ pub fn analyze(input: &Input) -> Analysis {
         .chain([strike, breakeven])
         .filter(|p| *p > 0.0)
         .collect();
-    prices.sort_by(|a, b| a.partial_cmp(b).expect("finite prices"));
+    prices.sort_by(f64::total_cmp);
     prices.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     let scenarios = prices
         .into_iter()
@@ -446,7 +446,7 @@ pub fn analyze_structure(legs: &[Leg], spot: f64, t: f64, rate: f64, div_yield: 
     let mut kinks: Vec<f64> = std::iter::once(0.0)
         .chain(legs.iter().map(|l| l.strike))
         .collect();
-    kinks.sort_by(|a, b| a.partial_cmp(b).expect("finite strikes"));
+    kinks.sort_by(f64::total_cmp);
     kinks.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     let values: Vec<f64> = kinks.iter().map(|&p| at_expiry(p)).collect();
     let slope_above: f64 = legs

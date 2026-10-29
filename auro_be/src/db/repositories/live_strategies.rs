@@ -254,7 +254,7 @@ pub(crate) async fn list_trading_config(
 }
 
 pub(crate) async fn upsert_trading_config(
-    pool: &PgPool,
+    executor: impl sqlx::PgExecutor<'_>,
     key: &str,
     value: &Value,
 ) -> Result<(), sqlx::Error> {
@@ -263,7 +263,7 @@ pub(crate) async fn upsert_trading_config(
     )
     .bind(key)
     .bind(value)
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(())

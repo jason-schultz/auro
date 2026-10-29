@@ -59,4 +59,27 @@ defmodule Opus.DashboardTest do
     alerts = Dashboard.alerts(data.input, [%{broker: "Questrade", error: "token"}])
     assert Enum.any?(alerts, &(&1.title == "Questrade is offline"))
   end
+
+  @tag :capture_log
+  test "a part that raises is named in an alert and the rest still go out" do
+    # The paper books can't be valued without their starting cash.
+    config = Application.fetch_env!(:opus, Opus.Options.Paper)
+    on_exit(fn -> Application.put_env(:opus, Opus.Options.Paper, config) end)
+    Application.put_env(:opus, Opus.Options.Paper, Keyword.delete(config, :starting_cash))
+
+    data = Dashboard.gather()
+    titles = data.input |> Dashboard.alerts() |> Enum.map(& &1.title)
+
+    assert "Part of the dashboard failed to load: paper options books" in titles
+    assert "Auro (the Rust engine) is not running" in titles
+    assert data.books == []
+    assert data.input.paper == []
+  end
+
+  @tag :capture_log
+  test "a section stands in its default for a raise or an exit" do
+    assert {%{a: 1}, []} = Dashboard.section({%{}, []}, :a, 0, fn -> 1 end)
+    assert {%{a: 0}, [:a]} = Dashboard.section({%{}, []}, :a, 0, fn -> raise "boom" end)
+    assert {%{a: 0}, [:a]} = Dashboard.section({%{}, []}, :a, 0, fn -> exit(:timeout) end)
+  end
 end

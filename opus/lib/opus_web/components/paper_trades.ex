@@ -168,7 +168,7 @@ defmodule OpusWeb.Components.PaperTrades do
     assigns =
       assign(assigns,
         open_legs: open_legs,
-        days_left: trade.expiration && Date.diff(trade.expiration, Date.utc_today()),
+        days_left: trade.expiration && Date.diff(trade.expiration, Opus.Clock.today()),
         manage_on: trade.expiration && Date.add(trade.expiration, -@manage_dte)
       )
 
@@ -266,15 +266,24 @@ defmodule OpusWeb.Components.PaperTrades do
   # One leg's own numbers: how it was opened and its latest quote.
   attr :leg, :map, required: true
 
+  # A closed leg shows what it closed at and its realized P&L, not today's
+  # quote of a contract it no longer holds.
   defp leg_facts(assigns) do
     %{position: p, quote: quote} = assigns.leg
-    mark = Pick.mid(quote)
+    open? = p.status == "open"
+    mark = if open?, do: Pick.mid(quote), else: p.close_price
 
     assigns =
       assign(assigns,
         p: p,
         quote: quote,
-        pnl: mark && Legs.sign(p) * (p.open_price - mark) * Pick.multiplier() * p.quantity
+        open?: open?,
+        mark: mark,
+        pnl:
+          if(open?,
+            do: mark && Legs.sign(p) * (p.open_price - mark) * Pick.multiplier() * p.quantity,
+            else: Legs.realized(p)
+          )
       )
 
     ~H"""
@@ -286,11 +295,22 @@ defmodule OpusWeb.Components.PaperTrades do
       </span>
       <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <.fact
+          :if={@open?}
           label="Worth now"
-          value={@quote && money(Pick.mid(@quote))}
+          value={@mark && money(@mark)}
           note={@quote && "bid #{num(@quote.bid)} · ask #{num(@quote.ask)}"}
         />
-        <.fact label="Leg P&L" value={money(@pnl)} tone={tone(@pnl)} />
+        <.fact
+          :if={!@open?}
+          label={"Closed #{day(@p.closed_on)}"}
+          value={@mark && money(@mark)}
+          note={@p.status}
+        />
+        <.fact
+          label={if @open?, do: "Leg P&L", else: "Leg P&L, realized"}
+          value={money(@pnl)}
+          tone={tone(@pnl)}
+        />
         <.fact label="Delta" value={@quote && num(@quote.delta)} />
         <.fact label="Implied vol" value={@quote && @quote.iv_pct && "#{num(@quote.iv_pct, 1)}%"} />
       </div>
@@ -626,7 +646,7 @@ defmodule OpusWeb.Components.PaperTrades do
   defp next_decision(%{expiration: expiration}) do
     manage_on = Date.add(expiration, -@manage_dte)
 
-    if Date.before?(Date.utc_today(), manage_on),
+    if Date.before?(Opus.Clock.today(), manage_on),
       do: "#{day(manage_on)} · 21-day check",
       else: "#{day(expiration)} · expiry"
   end

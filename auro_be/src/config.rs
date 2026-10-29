@@ -20,7 +20,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_env() -> Result<Self, env::VarError> {
+    pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
             database_url: env::var("DATABASE_URL")?,
             oanda_api_key: env::var("OANDA_API_KEY")?,
@@ -39,7 +39,7 @@ impl Config {
             port: env::var("PORT")
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()
-                .expect("PORT must be a valid u16"),
+                .map_err(|e| anyhow::anyhow!("PORT must be a valid port number: {e}"))?,
         })
     }
 

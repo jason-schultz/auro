@@ -74,7 +74,9 @@ pub fn equity(candles: &[Candle], trades: &[Trade]) -> Option<EquityReport> {
             next += 1;
         }
         best = best.max(running);
-        let drawdown = running - best;
+        // Relative to the best, as the backtest's drawdown (`stats.rs`) and
+        // holding's below are: from +100% to +50% is a 25% drop.
+        let drawdown = (1.0 + running) / (1.0 + best) - 1.0;
         strategy_max_dd = strategy_max_dd.min(drawdown);
 
         let hold = candle.mid.close / base - 1.0;
@@ -178,7 +180,8 @@ mod tests {
             vec![0.0, 0.10, 0.10, 0.05, 0.05]
         );
         assert!((report.summary.hold_return - 0.20).abs() < 1e-12);
-        assert!((report.summary.strategy_max_drawdown - 0.05).abs() < 1e-12);
+        // From +10% to +5%: 1.05 / 1.10 − 1, a 4.5% drop, measured like holding's.
+        assert!((report.summary.strategy_max_drawdown - (1.0 - 1.05 / 1.10)).abs() < 1e-12);
         // Holding fell from 110 to 90 at its worst: −18.2%.
         assert!((report.summary.hold_max_drawdown - 20.0 / 110.0).abs() < 1e-12);
         // Two one-day trades in a four-day window.

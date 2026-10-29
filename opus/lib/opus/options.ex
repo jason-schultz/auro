@@ -16,6 +16,9 @@ defmodule Opus.Options do
   # Strikes shown either side of the spot price when picking from a chain.
   @strikes_each_side 8
 
+  # `option_quotes.source` of the held contracts quoted during the session.
+  @held_source "questrade_legs"
+
   @strategies [
     {"cash_secured_put", "Sell a put (cash-secured)", "put", "sell"},
     {"covered_call", "Sell a call (covered)", "call", "sell"},
@@ -68,6 +71,7 @@ defmodule Opus.Options do
       on: c.id == q.contract_id,
       join: i in "instruments",
       on: i.id == c.underlying_instrument_id,
+      where: q.source != @held_source,
       group_by: [i.id, i.symbol, i.asset_class],
       order_by: i.symbol,
       select: %{
@@ -87,7 +91,7 @@ defmodule Opus.Options do
   """
   @spec candidates(String.t(), pos_integer(), pos_integer()) :: [map()]
   def candidates(symbol, dte_min, dte_max) do
-    today = Date.utc_today()
+    today = Opus.Clock.today()
     first = Date.add(today, dte_min)
     last = Date.add(today, dte_max)
 
@@ -222,8 +226,12 @@ defmodule Opus.Options do
     |> Repo.all()
   end
 
-  # Quotes from the latest capture of an underlying's chain: the snapshot
-  # worker writes one capture time per underlying per night.
+  # Quotes from the latest capture of an underlying's whole chain: the
+  # chain snapshot writes one capture time per underlying per run. The
+  # session's held-contract quotes (`Opus.Options.IntradayWorker`, source
+  # "questrade_legs") cover a handful of contracts and never count as the
+  # chain, or the paper books, the ideas scan and the chain view would read
+  # those few contracts as everything listed.
   defp latest_quotes(symbol) do
     latest =
       from(q in "option_quotes",
@@ -231,7 +239,7 @@ defmodule Opus.Options do
         on: c.id == q.contract_id,
         join: i in "instruments",
         on: i.id == c.underlying_instrument_id,
-        where: i.symbol == ^symbol,
+        where: i.symbol == ^symbol and q.source != @held_source,
         select: max(q.captured_at)
       )
 
@@ -240,7 +248,9 @@ defmodule Opus.Options do
       on: c.id == q.contract_id,
       join: i in "instruments",
       on: i.id == c.underlying_instrument_id,
-      where: i.symbol == ^symbol and q.captured_at == subquery(latest)
+      where:
+        i.symbol == ^symbol and q.captured_at == subquery(latest) and
+          q.source != @held_source
     )
   end
 

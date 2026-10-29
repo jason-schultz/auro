@@ -17,6 +17,7 @@ defmodule Opus.Trading.Together do
   pipeline-tested config.
   """
 
+  import Opus.Utils.Time, only: [parse_iso8601!: 1]
   import Ecto.Query
 
   alias Opus.Auro.Client
@@ -32,6 +33,7 @@ defmodule Opus.Trading.Together do
           timeframe: String.t(),
           enabled: boolean(),
           exempt: boolean(),
+          older_rules: boolean(),
           parameters: map()
         }
 
@@ -53,12 +55,14 @@ defmodule Opus.Trading.Together do
         join: e in StrategyEvaluation,
         on: e.strategy_config_id == c.id,
         where: e.stage == "walk_forward" and e.status == "passed",
-        order_by: [desc: c.inserted_at]
+        order_by: [desc: c.inserted_at],
+        # A pass from before Oct 28 recorded no checks: older, looser rules.
+        select: {c, not fragment("jsonb_exists(?, 'checks')", e.stats)}
       )
       |> Repo.all()
-      |> Enum.uniq_by(&recipe_of(&1.parameters))
-      |> Enum.reject(&MapSet.member?(taken, recipe_of(&1.parameters)))
-      |> Enum.map(&tested_play/1)
+      |> Enum.uniq_by(&recipe_of(elem(&1, 0).parameters))
+      |> Enum.reject(&MapSet.member?(taken, recipe_of(elem(&1, 0).parameters)))
+      |> Enum.map(fn {c, older_rules} -> tested_play(c, older_rules) end)
       |> Enum.sort_by(&{&1.instrument, &1.granularity, &1.name})
 
     %{yours: yours, tested: tested}
@@ -73,11 +77,12 @@ defmodule Opus.Trading.Together do
       timeframe: StrategyWords.timeframe(s.granularity),
       enabled: s.enabled,
       exempt: s.circuit_breaker_exempt,
+      older_rules: false,
       parameters: Strategies.engine_parameters(s)
     }
   end
 
-  defp tested_play(c) do
+  defp tested_play(c, older_rules) do
     %{
       key: "cfg:#{c.id}",
       name: c.parameters["strategy_name"] || "Tested play",
@@ -86,6 +91,7 @@ defmodule Opus.Trading.Together do
       timeframe: StrategyWords.timeframe(c.granularity),
       enabled: false,
       exempt: false,
+      older_rules: older_rules,
       parameters: c.parameters
     }
   end
@@ -178,8 +184,8 @@ defmodule Opus.Trading.Together do
     names = Map.new(tested, &{&1["key"], label(by_key[&1["key"]])})
 
     %{
-      from: at(body["from"]),
-      to: at(body["to"]),
+      from: parse_iso8601!(body["from"]),
+      to: parse_iso8601!(body["to"]),
       with_rules: body["with_rules"] && outcome(body["with_rules"], names),
       without_rules: outcome(body["without_rules"], names),
       plays:
@@ -200,16 +206,16 @@ defmodule Opus.Trading.Together do
       taken: o["taken"],
       taken_by_play: o["taken_by_play"],
       blocked: %{
-        instrument_busy: o["blocked"]["instrument_busy"],
         risk_budget: o["blocked"]["risk_budget"],
         group_cap: o["blocked"]["group_cap"]
       },
-      pause_trips: Enum.map(o["pause_trips"], &at/1),
-      breaker_trips: Enum.map(o["breaker_trips"], &%{name: names[&1["key"]], at: at(&1["at"])}),
+      pause_trips: Enum.map(o["pause_trips"], &parse_iso8601!/1),
+      breaker_trips:
+        Enum.map(o["breaker_trips"], &%{name: names[&1["key"]], at: parse_iso8601!(&1["at"])}),
       points:
         Enum.map(
           o["points"],
-          &%{time: at(&1["time"]), equity: &1["equity"], drawdown: &1["drawdown"]}
+          &%{time: parse_iso8601!(&1["time"]), equity: &1["equity"], drawdown: &1["drawdown"]}
         )
     }
   end
@@ -235,8 +241,8 @@ defmodule Opus.Trading.Together do
     %{
       play: by_key[row["key"]],
       correlation: row["correlation"],
-      from: at(row["from"]),
-      to: at(row["to"]),
+      from: parse_iso8601!(row["from"]),
+      to: parse_iso8601!(row["to"]),
       alone_sharpe: row["alone"]["annual_sharpe"],
       base_sharpe: base["annual_sharpe"],
       pair_sharpe: pair["annual_sharpe"],
@@ -260,9 +266,4 @@ defmodule Opus.Trading.Together do
   def alike_words(c) when c >= 0.2, do: "loosely together"
   def alike_words(c) when c > -0.2, do: "independent"
   def alike_words(_c), do: "tend to move opposite"
-
-  defp at(text) do
-    {:ok, at, _} = DateTime.from_iso8601(text)
-    at
-  end
 end

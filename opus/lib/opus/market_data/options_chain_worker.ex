@@ -15,7 +15,8 @@ defmodule Opus.MarketData.OptionsChainWorker do
   The 09:00 run, before the open, holds the previous session's closing
   quotes; the 10:00 run holds live ones, after the opening rush. The strike
   band is centred on the underlying's Questrade quote at capture time, not
-  on stored bars. The cron fan-out is gated on `enabled`. Historical bars are the Massive
+  on stored bars. The cron fan-out is gated on `enabled` and does nothing on
+  a day the US market is closed (`Opus.MarketCalendar`). Historical bars are the Massive
   flat-file path, not this worker's job.
   """
 
@@ -27,7 +28,7 @@ defmodule Opus.MarketData.OptionsChainWorker do
   require Logger
 
   alias Opus.Auro.Client
-  alias Opus.Instruments
+  alias Opus.{Clock, Instruments, MarketCalendar}
 
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok | {:error, term()}
@@ -53,12 +54,17 @@ defmodule Opus.MarketData.OptionsChainWorker do
     end
   end
 
-  def perform(%Oban.Job{args: args}) when map_size(args) == 0 do
-    if config(:enabled) do
-      {:ok, count} = enqueue_all()
-      Logger.info("[OptionsChain] Enqueued #{count} underlying jobs")
-    else
-      Logger.info("[OptionsChain] Disabled in config; nothing enqueued")
+  def perform(%Oban.Job{args: args, scheduled_at: scheduled_at}) when map_size(args) == 0 do
+    cond do
+      not config(:enabled) ->
+        Logger.info("[OptionsChain] Disabled in config; nothing enqueued")
+
+      not MarketCalendar.trading_day?(Clock.date(scheduled_at)) ->
+        Logger.info("[OptionsChain] The US market is closed today; nothing enqueued")
+
+      true ->
+        {:ok, count} = enqueue_all()
+        Logger.info("[OptionsChain] Enqueued #{count} underlying jobs")
     end
 
     :ok

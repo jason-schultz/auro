@@ -13,6 +13,10 @@ defmodule Opus.Dashboard.Alerts do
       24 hours.
     * The newest candle the engine stored is more than 10 minutes old while
       the forex market is open (Sunday 17:00 to Friday 17:00 New York).
+    * The engine's account numbers (NAV) are more than 10 minutes old while
+      the forex market is open.
+    * OANDA has an open trade the engine isn't tracking.
+    * Part of the dashboard failed to load (its other parts still show).
     * A broker is offline in the accounts overview.
     * A paper short leg is in the money (a put below its strike, a call
       above it).
@@ -21,6 +25,7 @@ defmodule Opus.Dashboard.Alerts do
       puts aside: losing their premium is their plan).
 
   **Check soon (`:check`)**
+    * The OANDA account nets opposite trades (hedging off).
     * A live strategy isn't behaving like its backtest (`Opus.Trading.Drift`).
     * A paper short leg is within 2% of its strike.
     * A paper trade's 21-day check is 0–3 days away.
@@ -58,6 +63,7 @@ defmodule Opus.Dashboard.Alerts do
         }
 
   @stale_candle_seconds 600
+  @stale_nav_seconds 600
   @near_strike 0.02
   @check_window_days 3
   @near_take_profit 0.10
@@ -75,7 +81,8 @@ defmodule Opus.Dashboard.Alerts do
     "Opus.MarketData.FinancingSnapshotWorker" => "OANDA financing snapshot",
     "Opus.MarketData.EventWindowSyncWorker" => "Event calendar sync",
     "Opus.Journal.DigestWorker" => "Weekly journal digest",
-    "Opus.Trading.EvaluationWorker" => "Strategy evaluation backstop"
+    "Opus.Trading.EvaluationWorker" => "Strategy evaluation backstop",
+    "Opus.Pipeline.PromoteWorker" => "Promotion of a tested strategy"
   }
 
   @doc "Every alert for the inputs, act first, then check, then fyi."
@@ -87,6 +94,10 @@ defmodule Opus.Dashboard.Alerts do
       suspensions(input),
       failed_jobs(input),
       stale_candles(input),
+      stale_nav(input),
+      untracked_trades(input),
+      failed_sections(input),
+      hedging(input),
       drift(input),
       offline_brokers(input),
       paper_in_the_money(input),
@@ -235,6 +246,58 @@ defmodule Opus.Dashboard.Alerts do
 
   defp stale_candles(_input), do: []
 
+  defp stale_nav(%{engine: :up, nav_age: age, now: now})
+       when is_integer(age) and age > @stale_nav_seconds do
+    if forex_open?(now) do
+      alert(
+        :act,
+        "stale_nav",
+        "Account numbers stopped updating #{div(age, 60)} minutes ago",
+        nil,
+        "The drawdown pause and trade sizing work from the last NAV stored, which is now " <>
+          "out of date. Check the Rust log for OANDA account errors; a Rust restart usually " <>
+          "clears it.",
+        "/safety"
+      )
+    else
+      []
+    end
+  end
+
+  defp stale_nav(_input), do: []
+
+  defp untracked_trades(%{untracked_trades: trades}) do
+    for t <- trades do
+      alert(
+        :act,
+        "untracked:#{t.id}",
+        "OANDA has a trade Auro isn't managing",
+        "Trade #{t.id}: #{t.instrument}, #{t.units} units.",
+        "It keeps its stop at OANDA but none of Auro's exit rules run on it. Close it in " <>
+          "OANDA, or tell Claude if Auro should pick it up.",
+        nil
+      )
+    end
+  end
+
+  defp untracked_trades(_input), do: []
+
+  defp failed_sections(%{failed_sections: sections}) do
+    for name <- sections do
+      alert(
+        :act,
+        "dashboard_section:#{name}",
+        "Part of the dashboard failed to load: #{name}",
+        nil,
+        "The rest of the dashboard and its alerts still work, but nothing about #{name} " <>
+          "shows until this clears. Check the Opus log for the error.",
+        nil
+      )
+    end
+  end
+
+  defp failed_sections(_input), do: []
+
   defp offline_brokers(%{offline_brokers: brokers}) do
     for b <- brokers do
       alert(
@@ -325,15 +388,27 @@ defmodule Opus.Dashboard.Alerts do
         "big_loss:#{t.key}",
         "Paper: #{t.label} is down #{money(lost)}",
         "That's #{pct(lost / t.max_loss)} of the most it can lose (#{money(t.max_loss)}).",
-        "The paper rules don't stop a trade out early: they hold it to the 21-day check on " <>
-          "#{day(t.manage_on)}. If you're trading this for real, decide now: closing locks in " <>
-          "about #{money(lost)} lost; holding risks up to #{money(t.max_loss - lost)} more.",
+        big_loss_what_to_do(t, lost),
         t.link
       )
     end
   end
 
   defp paper_big_losses(_input), do: []
+
+  # The ideas books stop a bought option out at half what it cost (at the
+  # next 10:30 check); the others hold to their 21-day check.
+  defp big_loss_what_to_do(%{book: book} = t, lost) when book in ~w(ideas ideas_half),
+    do:
+      "Nothing for the paper book: its rule sells once the option is worth half what it cost, " <>
+        "at the next 10:30 check. If you're trading this for real, do the same: about " <>
+        "#{money(lost)} is lost, and holding risks up to #{money(t.max_loss - lost)} more."
+
+  defp big_loss_what_to_do(t, lost),
+    do:
+      "The paper rules don't stop this trade out early: they hold it to the 21-day check on " <>
+        "#{day(t.manage_on)}. If you're trading this for real, decide now: closing locks in " <>
+        "about #{money(lost)} lost; holding risks up to #{money(t.max_loss - lost)} more."
 
   defp losing_big?(%{pnl: pnl, max_loss: max})
        when is_number(pnl) and is_number(max) and max > 0,
@@ -342,6 +417,21 @@ defmodule Opus.Dashboard.Alerts do
   defp losing_big?(_trade), do: false
 
   # --- check -------------------------------------------------------------
+
+  defp hedging(%{hedging: false}) do
+    alert(
+      :check,
+      "hedging_off",
+      "Your OANDA account nets opposite trades",
+      "Hedging is off, so a buy and a sell on one instrument cancel each other out.",
+      "Auro won't open a trade in the opposite direction while one is open on that " <>
+        "instrument, so some signals are skipped. Turning hedging on for the OANDA account " <>
+        "removes the conflict.",
+      nil
+    )
+  end
+
+  defp hedging(_input), do: []
 
   defp drift(%{drift: rows}) do
     for d <- rows do
@@ -634,7 +724,7 @@ defmodule Opus.Dashboard.Alerts do
       "Options ideas scan: #{count} ideas",
       "Scanned #{day(on)}.",
       "Nothing; browse them on the Options page if you're curious.",
-      "/options"
+      "/options?view=workbench"
     )
   end
 

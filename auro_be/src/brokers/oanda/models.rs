@@ -23,6 +23,10 @@ pub struct Account {
     pub open_position_count: i32,
     pub margin_used: String,
     pub margin_available: String,
+    /// False on an account that nets opposite trades on one instrument
+    /// (a short reduces a long instead of opening beside it).
+    #[serde(default)]
+    pub hedging_enabled: Option<bool>,
 }
 
 // --- Pricing ---

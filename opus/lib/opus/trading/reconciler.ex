@@ -5,6 +5,11 @@ defmodule Opus.Trading.Reconciler do
   When OANDA closes a trade server-side (via stop loss or take profit), our database
   doesn't know about it. This GenServer runs every 60 seconds, compares what we think
   is open against what OANDA actually has open, and updates any stale rows.
+
+  After closing a row it asks the Rust engine to drop the trade from its open
+  positions. A delete that fails is kept in the state and retried every tick
+  until it succeeds: the row is already closed, so the next tick wouldn't
+  find it again.
   """
 
   use GenServer
@@ -22,14 +27,29 @@ defmodule Opus.Trading.Reconciler do
 
   # -- Public API --
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @doc "Runs a single reconciliation cycle immediately."
-  @spec reconcile_once() :: {:ok, non_neg_integer()} | {:error, term()}
-  def reconcile_once do
-    reconcile()
+  @doc """
+  Runs one cycle: retries the engine deletes in `pending` (OANDA trade ids),
+  then closes the rows OANDA no longer has open. Returns how many rows were
+  closed and the ids whose engine delete still failed.
+  """
+  @spec reconcile_once(MapSet.t(String.t())) ::
+          {:ok, non_neg_integer(), MapSet.t(String.t())} | {:error, term(), MapSet.t(String.t())}
+  def reconcile_once(pending \\ MapSet.new()) do
+    pending = pending |> Enum.reject(&delete_position/1) |> MapSet.new()
+
+    case reconcile() do
+      {:ok, closed_ids} ->
+        failed = closed_ids |> Enum.reject(&delete_position/1) |> MapSet.new()
+        {:ok, length(closed_ids), MapSet.union(pending, failed)}
+
+      {:error, reason} ->
+        {:error, reason, pending}
+    end
   end
 
   @spec last_run() :: DateTime.t() | nil
@@ -46,23 +66,24 @@ defmodule Opus.Trading.Reconciler do
     # Schedule the first reconciliation after a short delay
     Polling.schedule(self(), :timer.seconds(10), :reconcile)
 
-    {:ok, %{last_run: nil, reconciled_count: 0}}
+    {:ok, %{last_run: nil, reconciled_count: 0, pending_deletes: MapSet.new()}}
   end
 
   @impl true
   def handle_info(:reconcile, state) do
     new_state =
-      case reconcile_once() do
-        {:ok, count} ->
+      case reconcile_once(state.pending_deletes) do
+        {:ok, count, pending} ->
           %{
             state
             | last_run: DateTime.utc_now(),
-              reconciled_count: state.reconciled_count + count
+              reconciled_count: state.reconciled_count + count,
+              pending_deletes: pending
           }
 
-        {:error, reason} ->
+        {:error, reason, pending} ->
           Logger.error("[Reconciler] Reconciliation failed: #{inspect(reason)}")
-          state
+          %{state | pending_deletes: pending}
       end
 
     # Schedule next run
@@ -101,9 +122,23 @@ defmodule Opus.Trading.Reconciler do
       end
 
       # Step 4: Close each stale trade
-      Enum.each(stale_trades, &close_stale_trade/1)
+      {:ok, stale_trades |> Enum.map(&close_stale_trade/1) |> Enum.filter(& &1)}
+    end
+  end
 
-      {:ok, stale_count}
+  # Drops a closed trade from the engine's open positions; true once done.
+  defp delete_position(oanda_trade_id) do
+    case Auro.delete_position(oanda_trade_id) do
+      {:ok, _body} ->
+        true
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Reconciler] Engine delete for closed trade #{oanda_trade_id} failed; " <>
+            "retrying next tick. Reason: #{inspect(reason)}"
+        )
+
+        false
     end
   end
 
@@ -142,11 +177,16 @@ defmodule Opus.Trading.Reconciler do
           "[Reconciler] Skipping DB update for trade #{trade.oanda_trade_id} — " <>
             "will retry next tick. Reason: #{inspect(reason)}"
         )
+
+        nil
     end
   end
 
+  # Closes the row with OANDA's close time (now only if OANDA didn't say).
+  # Returns the OANDA trade id when a row was closed, else nil.
   defp apply_close(trade, %{
          exit_price: exit_price,
+         exit_time: exit_time,
          exit_reason: exit_reason,
          pnl: pnl,
          stop_loss_state_at_close: sl_state
@@ -159,7 +199,7 @@ defmodule Opus.Trading.Reconciler do
          |> Repo.update_all(
            set: [
              exit_price: exit_price,
-             exit_time: now,
+             exit_time: exit_time || now,
              pnl_percent: pnl,
              exit_reason: exit_reason,
              stop_loss_state_at_close: sl_state,
@@ -173,10 +213,11 @@ defmodule Opus.Trading.Reconciler do
             "PnL=#{Float.round(pnl * 100, 4)}%, reason=#{exit_reason}, sl_state=#{sl_state || "nil"}"
         )
 
-        Auro.delete_position(trade.oanda_trade_id)
+        trade.oanda_trade_id
 
       {0, _} ->
         Logger.warning("[Reconciler] No open trade found for #{trade.oanda_trade_id} to update")
+        nil
     end
   end
 
@@ -230,6 +271,7 @@ defmodule Opus.Trading.Reconciler do
       {:ok,
        %{
          exit_price: exit_price,
+         exit_time: close_time(close_tx["close_time"]),
          exit_reason: exit_reason,
          pnl: pnl,
          stop_loss_state_at_close: nil
@@ -271,6 +313,7 @@ defmodule Opus.Trading.Reconciler do
       {:ok,
        %{
          exit_price: exit_price,
+         exit_time: close_time(trade_data["closeTime"]),
          exit_reason: exit_reason,
          pnl: pnl,
          stop_loss_state_at_close: sl_state
@@ -286,6 +329,9 @@ defmodule Opus.Trading.Reconciler do
 
     {:error, :not_closed}
   end
+
+  # OANDA's RFC 3339 close time (nanosecond digits), or nil.
+  defp close_time(at), do: Opus.Utils.Time.parse_iso8601(at)
 
   defp compute_pnl("Long", entry, exit_price, _realized), do: (exit_price - entry) / entry
   defp compute_pnl("Short", entry, exit_price, _realized), do: (entry - exit_price) / entry

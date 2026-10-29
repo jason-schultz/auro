@@ -46,7 +46,13 @@ defmodule Opus.Trading.Safety do
       risk: %{
         used: Enum.sum_by(open, &AccountLimits.counted_risk(&1.sizing)) / 1,
         trades: length(open),
-        budget: limits.risk_budget_pct / 100
+        budget: limits.risk_budget_pct / 100,
+        per_strategy:
+          Enum.map(
+            enabled,
+            &%{instrument: &1.instrument, risk: AccountLimits.counted_risk(&1.sizing_params)}
+          ),
+        all_at_once: Enum.sum_by(enabled, &AccountLimits.counted_risk(&1.sizing_params)) / 1
       },
       groups: group_rows(enabled, open, groups),
       breakers:

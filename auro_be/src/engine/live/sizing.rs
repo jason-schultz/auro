@@ -12,6 +12,11 @@ pub const MAX_CONCURRENT_PCT_OF_NAV: f64 = 0.50;
 /// the first override user (Zarattini et al. 2024 noise-area) caps leverage
 /// at 4×.
 pub const MAX_NOTIONAL_OVERRIDE_PCT: f64 = 4.0;
+/// Oldest price an entry is sized and stopped on: with the stream quiet for
+/// longer, the price (and FX rate) may no longer be the market.
+pub const MAX_QUOTE_AGE_SECONDS: i64 = 120;
+/// Oldest account snapshot an entry is sized on (it refreshes every minute).
+pub const MAX_ACCOUNT_AGE_SECONDS: i64 = 300;
 
 pub struct SizingInput {
     pub equity: f64,
@@ -52,6 +57,9 @@ pub enum SkipReason {
     NavUnavailable,
     FxRateUnavailable,
     MissingInstrumentMetadata,
+    StaleQuote,
+    StaleAccount,
+    InvalidOpenPositionUnits,
 }
 
 impl SkipReason {
@@ -66,6 +74,9 @@ impl SkipReason {
             SkipReason::NavUnavailable => "nav_unavailable",
             SkipReason::FxRateUnavailable => "fx_rate_unavailable",
             SkipReason::MissingInstrumentMetadata => "missing_instrument_metadata",
+            SkipReason::StaleQuote => "stale_quote",
+            SkipReason::StaleAccount => "stale_account",
+            SkipReason::InvalidOpenPositionUnits => "invalid_open_position_units",
         }
     }
 }
@@ -121,7 +132,22 @@ pub async fn size_entry(
         .await
         .clone()
         .ok_or(SkipReason::NavUnavailable)?;
-    let quotes = state.live.last_quotes.read().await.clone();
+    let now = chrono::Utc::now();
+    if (now - account.last_updated).num_seconds() > MAX_ACCOUNT_AGE_SECONDS {
+        return Err(SkipReason::StaleAccount);
+    }
+    let quotes: HashMap<String, LastQuote> = state
+        .live
+        .last_quotes
+        .read()
+        .await
+        .iter()
+        .filter(|(_, q)| (now - q.at).num_seconds() <= MAX_QUOTE_AGE_SECONDS)
+        .map(|(k, q)| (k.clone(), q.clone()))
+        .collect();
+    if !quotes.contains_key(instrument) {
+        return Err(SkipReason::StaleQuote);
+    }
     let fx_rate = quote_currency(instrument)
         .and_then(|quote| quote_to_home_rate(&quotes, quote, &account.currency))
         .ok_or(SkipReason::FxRateUnavailable)?;
@@ -340,7 +366,13 @@ pub async fn check_concurrent_exposure(
     let existing_notional = positions_snapshot
         .iter()
         .map(|pos| -> Result<f64, SkipReason> {
-            let units = pos.units.parse::<f64>().unwrap_or(0.0).abs();
+            // An unreadable size can't be counted as zero exposure: refuse
+            // the new entry rather than understate what's already open.
+            let units = pos
+                .units
+                .parse::<f64>()
+                .map_err(|_| SkipReason::InvalidOpenPositionUnits)?
+                .abs();
             let price = quotes_snapshot
                 .get(&pos.instrument)
                 .map(|q| q.mid)

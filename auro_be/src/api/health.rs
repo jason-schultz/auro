@@ -45,13 +45,20 @@ pub async fn live_health(State(state): State<AppState>) -> Json<Value> {
 
     let open_positions_count = state.live.open_positions.read().await.len();
     let instrument_metadata_loaded = !state.live.instrument_metadata.read().await.is_empty();
-    let account_snapshot_age_seconds = state
+    let (account_snapshot_age_seconds, hedging_enabled) = state
         .live
         .account
         .read()
         .await
         .as_ref()
-        .map(|s| (now - s.last_updated).num_seconds().max(0));
+        .map_or((None, None), |s| {
+            (
+                Some((now - s.last_updated).num_seconds().max(0)),
+                s.hedging_enabled,
+            )
+        });
+    let untracked_trades = state.live.untracked_trades.read().await.clone();
+    let positions_known = *state.live.positions_known.read().await;
 
     Json(json!({
         "engine_uptime_seconds": engine_uptime_seconds,
@@ -61,5 +68,8 @@ pub async fn live_health(State(state): State<AppState>) -> Json<Value> {
         "open_positions_count": open_positions_count,
         "instrument_metadata_loaded": instrument_metadata_loaded,
         "account_snapshot_age_seconds": account_snapshot_age_seconds,
+        "hedging_enabled": hedging_enabled,
+        "untracked_trades": untracked_trades,
+        "positions_known": positions_known,
     }))
 }

@@ -40,20 +40,66 @@ pub(crate) struct ThresholdRow {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-pub fn instrument_to_class(instrument: &str) -> &'static str {
+/// What kind of market an OANDA instrument is: it sets financing, daily bar
+/// alignment and which validation thresholds apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstrumentClass {
+    FxMajor,
+    FxCross,
+    Metal,
+    Commodity,
+    Index,
+    Bond,
+}
+
+impl InstrumentClass {
+    /// The name `validation_thresholds.instrument_class` uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InstrumentClass::FxMajor => "fx_major",
+            InstrumentClass::FxCross => "fx_cross",
+            InstrumentClass::Metal => "metal",
+            InstrumentClass::Commodity => "commodity",
+            InstrumentClass::Index => "index",
+            InstrumentClass::Bond => "bond",
+        }
+    }
+}
+
+/// The class of an OANDA instrument; any pair not listed is an FX cross.
+pub fn instrument_class(instrument: &str) -> InstrumentClass {
     match instrument {
         "EUR_USD" | "GBP_USD" | "USD_JPY" | "USD_CHF" | "USD_CAD" | "AUD_USD" | "NZD_USD" => {
-            "fx_major"
+            InstrumentClass::FxMajor
         }
-        "XAU_USD" | "XAG_USD" | "XPT_USD" | "XPD_USD" | "XCU_USD" => "metal",
+        "XAU_USD" | "XAG_USD" | "XPT_USD" | "XPD_USD" | "XCU_USD" => InstrumentClass::Metal,
         "WTICO_USD" | "BCO_USD" | "NATGAS_USD" | "CORN_USD" | "WHEAT_USD" | "SOYBN_USD"
-        | "SUGAR_USD" => "commodity",
+        | "SUGAR_USD" => InstrumentClass::Commodity,
         "UK100_GBP" | "EU50_EUR" | "DE30_EUR" | "FR40_EUR" | "NL25_EUR" | "CH20_CHF"
         | "AU200_AUD" | "JP225_USD" | "HK33_HKD" | "CN50_USD" | "SG30_SGD" | "US30_USD"
-        | "SPX500_USD" | "NAS100_USD" | "US2000_USD" => "index",
-        "USB02Y_USD" | "USB10Y_USD" | "USB30Y_USD" | "DE10YB_EUR" | "UK10YB_GBP" => "bond",
-        _ => "fx_cross",
+        | "SPX500_USD" | "NAS100_USD" | "US2000_USD" => InstrumentClass::Index,
+        "USB02Y_USD" | "USB10Y_USD" | "USB30Y_USD" | "DE10YB_EUR" | "UK10YB_GBP" => {
+            InstrumentClass::Bond
+        }
+        _ => InstrumentClass::FxCross,
     }
+}
+
+/// The class's threshold name (`InstrumentClass::as_str`).
+pub fn instrument_to_class(instrument: &str) -> &'static str {
+    instrument_class(instrument).as_str()
+}
+
+/// Run CPU-bound backtest work on the blocking pool: on the async runtime it
+/// would starve the live price stream and candle feed that share it.
+async fn off_runtime<T, F>(work: F) -> AppResult<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| AppError::Internal(format!("backtest task failed: {e}")))
 }
 
 pub(crate) fn run_strategy(
@@ -396,7 +442,12 @@ pub async fn run_holdout(pool: &PgPool, config: &StrategyConfig) -> AppResult<Ev
     };
 
     let financing = load_financing(pool).await?;
-    let stats = match run_backtest_stats(&candles, config, Some(active_start_idx), &financing) {
+    let job = config.clone();
+    let stats = match off_runtime(move || {
+        run_backtest_stats(&candles, &job, Some(active_start_idx), &financing)
+    })
+    .await?
+    {
         Ok(stats) => stats,
         Err(e) => {
             let failure = e.to_string();
@@ -482,13 +533,15 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
     }
 
     let financing = load_financing(pool).await?;
-    let bt_stats = match run_backtest_stats(&candles, config, None, &financing) {
-        Ok(stats) => stats,
-        Err(e) => {
-            let failure = e.to_string();
-            return fail_stage(pool, evaluation_id, failure).await;
-        }
-    };
+    let job = config.clone();
+    let bt_stats =
+        match off_runtime(move || run_backtest_stats(&candles, &job, None, &financing)).await? {
+            Ok(stats) => stats,
+            Err(e) => {
+                let failure = e.to_string();
+                return fail_stage(pool, evaluation_id, failure).await;
+            }
+        };
 
     let mut stats_json = backtest_stats_to_json(&bt_stats);
     let timeframe_class = config.granularity.timeframe_class();
@@ -576,13 +629,23 @@ pub async fn run_walk_forward(
         return fail_stage(pool, evaluation_id, failure).await;
     }
 
+    let financing = load_financing(pool).await?;
+    let job = config.clone();
     // 70/30 split: IS is the first 70%, OOS is the last 30%
     let split = candles.len() * 7 / 10;
-    let is_candles = &candles[..split];
-    let oos_candles = &candles[split..];
+    let (is_count, oos_count) = (split, candles.len() - split);
+    let (is_run, oos_run, is_span, oos_span) = off_runtime(move || {
+        let (is_candles, oos_candles) = candles.split_at(split);
+        (
+            run_strategy(is_candles, &job, &financing),
+            run_strategy(oos_candles, &job, &financing),
+            span(is_candles),
+            span(oos_candles),
+        )
+    })
+    .await?;
 
-    let financing = load_financing(pool).await?;
-    let is_trades = match run_strategy(is_candles, config, &financing) {
+    let is_trades = match is_run {
         Ok(t) => t,
         Err(e) => {
             let failure = format!("IS run failed: {}", e);
@@ -590,7 +653,7 @@ pub async fn run_walk_forward(
         }
     };
 
-    let oos_trades = match run_strategy(oos_candles, config, &financing) {
+    let oos_trades = match oos_run {
         Ok(t) => t,
         Err(e) => {
             let failure = format!("OOS run failed: {}", e);
@@ -598,8 +661,8 @@ pub async fn run_walk_forward(
         }
     };
 
-    let (is_from, is_to) = span(is_candles);
-    let (oos_from, oos_to) = span(oos_candles);
+    let (is_from, is_to) = is_span;
+    let (oos_from, oos_to) = oos_span;
     let is_stats = calculate_backtest_stats(&is_trades, is_from, is_to);
     let oos_stats = calculate_backtest_stats(&oos_trades, oos_from, oos_to);
     let mut stats_json = walk_forward_stats_to_json(&is_stats, &oos_stats);
@@ -636,8 +699,8 @@ pub async fn run_walk_forward(
         strategy_type = %config.strategy_type,
         stage = "walk_forward",
         status = %status,
-        is_candles = is_candles.len(),
-        oos_candles = oos_candles.len(),
+        is_candles = is_count,
+        oos_candles = oos_count,
         is_sharpe = is_stats.sharpe_ratio,
         oos_sharpe = oos_stats.sharpe_ratio,
         "pipeline stage complete"
@@ -683,11 +746,9 @@ fn sim_stats_from_pnls(pnls: &[f64]) -> SimStats {
         if cumulative > peak {
             peak = cumulative;
         }
-        let dd = if peak > 0.0 {
-            (peak - cumulative) / (1.0 + peak)
-        } else {
-            0.0
-        };
+        // From the start too: a run that opens with losses is a drawdown
+        // (the same measure as the backtest's, `stats.rs`).
+        let dd = (peak - cumulative) / (1.0 + peak);
         if dd > max_drawdown {
             max_drawdown = dd;
         }
@@ -757,7 +818,8 @@ pub async fn run_monte_carlo(
     let candles = load_exploration_candles(pool, config).await?;
 
     let financing = load_financing(pool).await?;
-    let trades = match run_strategy(&candles, config, &financing) {
+    let job = config.clone();
+    let trades = match off_runtime(move || run_strategy(&candles, &job, &financing)).await? {
         Ok(t) => t,
         Err(e) => {
             let failure = e.to_string();
@@ -773,7 +835,8 @@ pub async fn run_monte_carlo(
         return fail_stage(pool, evaluation_id, failure).await;
     }
 
-    let mut stats_json = run_monte_carlo_sims(&trades);
+    let num_trades = trades.len();
+    let mut stats_json = off_runtime(move || run_monte_carlo_sims(&trades)).await?;
     let timeframe_class = config.granularity.timeframe_class();
     let instrument_class = instrument_to_class(&config.instrument);
     let thresholds = load_thresholds(
@@ -803,7 +866,7 @@ pub async fn run_monte_carlo(
         strategy_type = %config.strategy_type,
         stage = "monte_carlo",
         status = %status,
-        num_trades = trades.len(),
+        num_trades = num_trades,
         sims = MONTE_CARLO_SIMS,
         "pipeline stage complete"
     );
@@ -819,6 +882,12 @@ pub async fn run_monte_carlo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monte_carlo_drawdown_counts_losses_before_the_first_gain() {
+        let sim = sim_stats_from_pnls(&[-0.3, 0.1, 0.1]);
+        assert!((sim.max_drawdown - 0.3).abs() < 1e-12);
+    }
     use chrono::Utc;
 
     use crate::engine::types::{Direction, EntryReason, ExitReason, Trade};

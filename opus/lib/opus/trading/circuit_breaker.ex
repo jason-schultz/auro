@@ -36,6 +36,7 @@ defmodule Opus.Trading.CircuitBreaker do
   @initial_delay :timer.seconds(30)
   @min_trades 5
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -56,18 +57,21 @@ defmodule Opus.Trading.CircuitBreaker do
 
   @doc """
   Where a strategy stands against the breaker: its current losing streak
-  and its trades' summed return over the window, both since its last reset.
+  and its trades' summed return over the window, both since its last reset,
+  and whether each of its last six trades won (oldest first).
   """
   @spec standing(Ecto.UUID.t(), AccountLimits.t()) :: %{
           streak: non_neg_integer(),
           window_sum: float(),
-          window_trades: non_neg_integer()
+          window_trades: non_neg_integer(),
+          recent: [boolean()]
         }
   def standing(strategy_id, limits) do
     trades = trades_since_reset(strategy_id)
     window = in_window(trades, limits)
 
     %{
+      recent: trades |> Enum.take(6) |> Enum.reverse() |> Enum.map(&(&1.pnl >= 0)),
       streak: Enum.take_while(trades, &(&1.pnl < 0)) |> length(),
       window_sum: Enum.sum_by(window, & &1.pnl) / 1,
       window_trades: length(window)
@@ -81,6 +85,13 @@ defmodule Opus.Trading.CircuitBreaker do
     open_ids = open_suspension_ids(strategies)
     candidates = Enum.reject(strategies, &MapSet.member?(open_ids, &1.id))
     limits = AccountLimits.get()
+
+    if is_nil(limits) do
+      Logger.warning(
+        "[CircuitBreaker] No account limits stored (trading_config account_limits); " <>
+          "no strategy can be suspended"
+      )
+    end
 
     triggered =
       candidates

@@ -45,6 +45,13 @@ defmodule Opus.Accounts.IndexExposureTest do
              IndexExposure.for_month(closes(0.005), @month)
   end
 
+  test "a month without a single move is held in full, not divided by zero" do
+    result = IndexExposure.for_month(closes(0.0), @month)
+
+    assert result.realized_vol == 0.0
+    assert result.exposure == 1.0
+  end
+
   test "no bars, no answer" do
     assert IndexExposure.for_month([], @month) == nil
   end

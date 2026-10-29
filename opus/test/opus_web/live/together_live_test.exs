@@ -33,24 +33,34 @@ defmodule OpusWeb.TogetherLiveTest do
     :ok
   end
 
-  test "lists your strategies with the trading ones picked", %{conn: conn} do
+  test "starts the team with the strategies trading now", %{conn: conn} do
     {:ok, view, html} = live(conn, ~p"/together")
 
     assert html =~ "Strategies together"
-    assert html =~ "Run 1 together"
-    assert has_element?(view, "input[type=checkbox][checked]", "")
+    assert html =~ "1 strategy, all trading now"
+    assert html =~ "Run the team to see what it does."
 
-    html = view |> form("form[phx-submit=run]", %{"plays" => []}) |> render_change()
-    assert html =~ "Run 0 together"
+    html = view |> element("button[aria-label*=SPX500_USD]") |> render_click()
+    assert html =~ "nobody yet"
+  end
+
+  test "the picker adds a strategy that isn't on the team", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/together")
+
+    html = view |> element("button", "Add a strategy") |> render_click()
+    assert html =~ "EU50_EUR"
+
+    html = view |> element("li button", "Add") |> render_click()
+    assert html =~ "2 strategies, 1 trading now"
   end
 
   test "says so when the engine can't run them", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/together")
 
-    view |> form("form[phx-submit=run]") |> render_submit()
+    view |> element("button", "See how they do together") |> render_click()
     html = render_async(view, 10_000)
 
     refute html =~ "Running…"
-    assert html =~ "engine"
+    assert html =~ "Auro is not running."
   end
 end

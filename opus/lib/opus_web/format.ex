@@ -52,7 +52,7 @@ defmodule OpusWeb.Format do
   @spec pct(float() | nil, non_neg_integer()) :: String.t()
   def pct(share, decimals \\ 1)
   def pct(nil, _decimals), do: "—"
-  def pct(share, decimals), do: "#{:erlang.float_to_binary(share * 100, decimals: decimals)}%"
+  def pct(share, decimals), do: "#{:erlang.float_to_binary(share * 100.0, decimals: decimals)}%"
 
   @doc "Formats a share count: whole numbers without decimals, fractional with up to four."
   @spec shares(number()) :: String.t()

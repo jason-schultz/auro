@@ -53,60 +53,63 @@ defmodule OpusWeb.SafetyLiveTest do
     {:ok, _view, html} = live(conn, ~p"/safety")
 
     assert html =~ "Account safety"
+    assert html =~ "All clear"
     assert html =~ "No trade is open"
     assert html =~ "Stock indices"
     # Two losses since the last win.
-    assert html =~ "2 of 5 losses in a row"
+    assert html =~ "2 losses in a row"
   end
 
   test "tightening a rule saves at once and is logged", %{conn: conn, form: form} do
     {:ok, view, _html} = live(conn, ~p"/safety")
 
-    html =
-      view
-      |> form("form[phx-submit=save]", Map.put(form, "risk_budget_pct", "4"))
-      |> render_submit()
+    html = view |> form("#guardrails", Map.put(form, "risk_budget_pct", "4")) |> render_change()
+    assert html =~ "tighter: saves at once"
 
+    html = view |> form("#guardrails") |> render_submit()
     assert html =~ "Saved."
-    assert html =~ "Risk budget: 5"
+    assert html =~ "Risk budget: 5% → 4%"
     assert AccountLimits.get().risk_budget_pct == 4.0
   end
 
-  test "loosening a rule asks first", %{conn: conn, form: form} do
+  test "loosening a rule says so on the button", %{conn: conn, form: form} do
     {:ok, view, _html} = live(conn, ~p"/safety")
 
     html =
-      view
-      |> form("form[phx-submit=save]", Map.put(form, "drawdown_pause_pct", "15"))
-      |> render_submit()
+      view |> form("#guardrails", Map.put(form, "drawdown_pause_pct", "15")) |> render_change()
 
-    assert html =~ "This loosens a safety rule"
+    assert html =~ "looser: asks first"
+    assert html =~ "Yes, loosen it"
     assert AccountLimits.get().drawdown_pause_pct == 10
 
-    html = view |> element("button", "Yes, loosen it") |> render_click()
-    assert html =~ "Saved."
+    view |> form("#guardrails") |> render_submit()
     assert AccountLimits.get().drawdown_pause_pct == 15.0
   end
 
-  test "a value out of range says what's allowed", %{conn: conn, form: form} do
+  test "a value out of range says what's allowed and can't be saved", %{conn: conn, form: form} do
     {:ok, view, _html} = live(conn, ~p"/safety")
 
     html =
-      view
-      |> form("form[phx-submit=save]", Map.put(form, "max_open_per_group", "0"))
-      |> render_submit()
+      view |> form("#guardrails", Map.put(form, "max_open_per_group", "0")) |> render_change()
 
     assert html =~ "Pick a number from 1 to 10."
+    assert html =~ "A number is out of range"
   end
 
   test "exempting a strategy asks first", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/safety")
 
-    html = view |> element("#breaker-#{@id} button") |> render_click()
-    assert html =~ "won&#39;t switch it off"
+    html = view |> element("#breaker-#{@id} button", "Exempt it") |> render_click()
+    assert html =~ "won&#39;t be switched off"
     refute Repo.get!(LiveStrategy, @id).circuit_breaker_exempt
 
-    view |> element("button", "Yes, loosen it") |> render_click()
+    view |> element("#breaker-#{@id} button", "Yes, loosen it") |> render_click()
     assert Repo.get!(LiveStrategy, @id).circuit_breaker_exempt
+  end
+
+  test "show the numbers adds the figures", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/safety")
+    html = view |> element("button", "Show the numbers") |> render_click()
+    assert html =~ "all at once"
   end
 end

@@ -22,6 +22,11 @@ const AUTH_URL: &str = "https://login.questrade.com/oauth2/token";
 /// call is known to handle.
 const OPTION_QUOTE_BATCH: usize = 100;
 
+/// The longest a rate-limited request waits before its one retry. Questrade's
+/// market-data limits are per second; a reset further off (the hourly
+/// limit) isn't waited for, and the retry fails as the first did.
+const MAX_RATE_LIMIT_WAIT: StdDuration = StdDuration::from_secs(5);
+
 #[derive(Debug, Clone)]
 pub struct QuestradeClient {
     http: Client,
@@ -181,40 +186,33 @@ impl QuestradeClient {
         Ok(format!("{}v1/{}", server, path))
     }
 
+    /// Send `builder` once more after a 401 (re-authenticating first) or a
+    /// 429 (waiting out the rate limit first); any other failure, or a
+    /// second one, is the error.
     async fn request(&mut self, builder: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
         self.ensure_authenticated().await?;
 
-        // Clone before send so we can retry once on 401.
+        // Clone before send so we can retry once.
         // try_clone returns None only for streaming bodies; ours are GET or small JSON.
         let retry = builder.try_clone();
 
-        let resp = builder
-            .header("Authorization", self.bearer()?)
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("Questrade request failed: {}", e)))?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            if let Some(rb) = retry {
+        let resp = self.send(builder).await?;
+        let resp = match (resp.status(), retry) {
+            (reqwest::StatusCode::UNAUTHORIZED, Some(rb)) => {
                 tracing::warn!("Questrade 401 — forcing re-auth and retrying");
                 self.authenticate().await?;
-                let resp = rb
-                    .header("Authorization", self.bearer()?)
-                    .send()
-                    .await
-                    .map_err(|e| AppError::Internal(format!("Questrade retry failed: {}", e)))?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(AppError::BrokerHttp {
-                        broker: "Questrade",
-                        status: status.as_u16(),
-                        body,
-                    });
-                }
-                return Ok(resp);
+                self.send(rb).await?
             }
-        }
+            (reqwest::StatusCode::TOO_MANY_REQUESTS, Some(rb)) => {
+                let wait = rate_limit_wait(resp.headers(), Utc::now());
+                tracing::warn!(
+                    "Questrade 429 — waiting {wait:?} for the rate limit, then retrying"
+                );
+                tokio::time::sleep(wait).await;
+                self.send(rb).await?
+            }
+            _ => resp,
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -226,6 +224,14 @@ impl QuestradeClient {
             });
         }
         Ok(resp)
+    }
+
+    async fn send(&self, builder: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
+        builder
+            .header("Authorization", self.bearer()?)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("Questrade request failed: {}", e)))
     }
 
     pub async fn get_account_balances(
@@ -493,6 +499,19 @@ impl QuestradeClient {
     }
 }
 
+/// How long a 429 asks us to wait: until `X-RateLimit-Reset` (Unix seconds),
+/// at least a moment and at most `MAX_RATE_LIMIT_WAIT`; a second without it.
+fn rate_limit_wait(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) -> StdDuration {
+    headers
+        .get("X-RateLimit-Reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .and_then(|reset| DateTime::from_timestamp(reset, 0))
+        .map(|reset| (reset - now).to_std().unwrap_or_default())
+        .unwrap_or(StdDuration::from_secs(1))
+        .clamp(StdDuration::from_millis(250), MAX_RATE_LIMIT_WAIT)
+}
+
 /// Questrade's multi-id query format: "1234,5678".
 fn join_ids(symbol_ids: &[i64]) -> String {
     symbol_ids
@@ -519,7 +538,16 @@ impl BrokerClient for QuestradeClient {
 
         let mut broker_accounts = Vec::with_capacity(accounts.len());
         for acct in &accounts {
-            let balances = self.get_account_balances(&acct.number).await.ok();
+            let balances = match self.get_account_balances(&acct.number).await {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    tracing::warn!(
+                        "Questrade balances for account {} unavailable: {e}",
+                        acct.number
+                    );
+                    None
+                }
+            };
             let combined = balances.as_ref().and_then(|b| b.combined_balances.first());
             broker_accounts.push(BrokerAccount {
                 id: acct.number.clone(),
@@ -542,5 +570,42 @@ impl BrokerClient for QuestradeClient {
             error: None,
             accounts: broker_accounts,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    fn reset_at(secs: i64) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-RateLimit-Reset", HeaderValue::from(secs));
+        headers
+    }
+
+    #[test]
+    fn a_rate_limit_waits_until_the_reset_within_bounds() {
+        let now = Utc.timestamp_opt(1_000_000, 0).unwrap();
+        assert_eq!(
+            rate_limit_wait(&reset_at(1_000_002), now),
+            StdDuration::from_secs(2)
+        );
+        // Already reset: a moment, not zero.
+        assert_eq!(
+            rate_limit_wait(&reset_at(999_999), now),
+            StdDuration::from_millis(250)
+        );
+        // The hourly limit: no long wait.
+        assert_eq!(
+            rate_limit_wait(&reset_at(1_003_600), now),
+            MAX_RATE_LIMIT_WAIT
+        );
+        // No header: a second.
+        assert_eq!(
+            rate_limit_wait(&HeaderMap::new(), now),
+            StdDuration::from_secs(1)
+        );
     }
 }

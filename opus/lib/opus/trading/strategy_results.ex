@@ -17,6 +17,14 @@ defmodule Opus.Trading.StrategyResults do
   alias Opus.Trading.LiveStrategy
 
   @stages ~w(backtest walk_forward monte_carlo holdout)
+  # Database strings to atoms by explicit mapping, never String.to_atom.
+  @stage_keys Map.new(@stages, &{&1, String.to_atom(&1)})
+  @statuses %{
+    "pending" => :pending,
+    "running" => :running,
+    "passed" => :passed,
+    "failed" => :failed
+  }
 
   # The engine's failure text for one rule, and its operators in words.
   @failure ~r/^(\w+): (-?\d+\.\d+) (is below minimum|must be greater than|is above maximum|must be less than) (-?\d+\.\d+)$/
@@ -66,18 +74,20 @@ defmodule Opus.Trading.StrategyResults do
   Test runs of a recipe that isn't assigned anywhere yet, one per
   instrument it was tested on (the newest): `%{instrument, ran_at, stages}` with
   `stages` shaped as in `for_ids/1`. Matched by the recipe's rules: a run's
-  strategy JSON minus instrument, timeframe and sizing.
+  strategy JSON minus instrument, timeframe and sizing, on the recipe's
+  timeframe (the same rules on another timeframe are a different test).
   """
-  @spec for_recipe(map()) :: [map()]
-  def for_recipe(definition) do
+  @spec for_recipe(map(), String.t()) :: [map()]
+  def for_recipe(definition, granularity) do
     configs =
       from(sc in StrategyConfig,
         where:
-          fragment(
-            "(? - 'instrument' - 'granularity' - 'sizing') = ?",
-            sc.parameters,
-            type(^definition, :map)
-          ),
+          sc.granularity == ^granularity and
+            fragment(
+              "(? - 'instrument' - 'granularity' - 'sizing') = ?",
+              sc.parameters,
+              type(^definition, :map)
+            ),
         order_by: [asc: sc.instrument, desc: sc.inserted_at],
         distinct: sc.instrument,
         select: {sc.instrument, sc.id, sc.inserted_at}
@@ -101,18 +111,31 @@ defmodule Opus.Trading.StrategyResults do
   # the backtest); runs from before the holdout stage existed have none.
   defp stages(nil) do
     Map.new(@stages, fn stage ->
-      {String.to_atom(stage), not_run("Never run through the testing pipeline.")}
+      {@stage_keys[stage], not_run("Never run through the testing pipeline.")}
     end)
   end
 
   defp stages({ran_at, by_stage}),
-    do: Map.new(@stages, &{String.to_atom(&1), stage(&1, ran_at, by_stage)})
+    do: Map.new(@stages, &{@stage_keys[&1], stage(&1, ran_at, by_stage)})
 
   defp stage(stage, ran_at, by_stage) do
     case {by_stage[stage], by_stage[@previous[stage]]} do
+      # A pass from before Oct 28 was judged on looser rules and recorded
+      # no checks; it reads as that, not as meeting today's standard.
+      {%{status: "passed", stats: stats} = e, _previous}
+      when is_nil(stats) or not is_map_key(stats, "checks") ->
+        %{
+          status: :old_pass,
+          stats: e.stats,
+          at: e.evaluated_at,
+          reason:
+            "Passed the rules in use before Oct 28 and hasn't been re-run since. Re-test it to judge it by today's standard.",
+          checks: []
+        }
+
       {%{status: status} = e, _previous} ->
         %{
-          status: String.to_atom(status),
+          status: Map.fetch!(@statuses, status),
           stats: e.stats,
           at: e.evaluated_at,
           reason: if(status == "failed", do: e.failure_reason),
@@ -197,7 +220,7 @@ defmodule Opus.Trading.StrategyResults do
     from(sc in StrategyConfig,
       join: ls in LiveStrategy,
       on:
-        ls.instrument == sc.instrument and
+        ls.instrument == sc.instrument and ls.granularity == sc.granularity and
           fragment(
             "(? - 'instrument' - 'granularity' - 'sizing') = (? - 'instrument' - 'granularity' - 'sizing')",
             sc.parameters,

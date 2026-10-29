@@ -4,18 +4,26 @@ defmodule Opus.Pipeline.HoldoutWorker do
   stages never saw, taken only after a config has passed backtest,
   walk-forward and Monte Carlo (and, for evo lineages, won its lineage).
 
-    - pass → promote to live_strategies (disabled; you switch it on)
+    - pass → `PromoteWorker` adds it to live_strategies (disabled; you switch
+      it on). Promotion is its own job so a failed promote retries without
+      taking the holdout look again.
     - fail → terminal. The verdict is final: a failed config is not re-run
       against the same window, and the Rust side records every look so
       `holdout_looks` in the stats shows how many siblings have been judged on it.
   """
 
-  use Oban.Worker, queue: :pipeline, max_attempts: 3
+  # One attempt: a stage isn't re-run on its own (opus/AGENTS.md). Unique
+  # per config while a run is waiting or running, so a double enqueue
+  # doesn't run the stage twice.
+  use Oban.Worker,
+    queue: :pipeline,
+    max_attempts: 1,
+    unique: [keys: [:config_id], period: :infinity, states: :incomplete]
 
   require Logger
 
   alias Opus.Auro.Client
-  alias Opus.Pipeline.Coordinator
+  alias Opus.Pipeline.PromoteWorker
 
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok | {:error, term()}
@@ -30,7 +38,7 @@ defmodule Opus.Pipeline.HoldoutWorker do
             "num_trades=#{stats["num_trades"]}, holdout_looks=#{stats["holdout_looks"]}"
         )
 
-        Coordinator.promote_to_live(config_id)
+        {:ok, _job} = Oban.insert(PromoteWorker.new(%{config_id: config_id}))
         :ok
 
       {:ok, %{"status" => "failed", "failure_reason" => reason}} ->

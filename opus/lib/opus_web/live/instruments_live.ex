@@ -7,6 +7,8 @@ defmodule OpusWeb.InstrumentsLive do
   """
   use OpusWeb, :live_view
 
+  require Logger
+
   alias Opus.Auro.Client
   alias Opus.Instruments
   alias Opus.Instruments.Instrument
@@ -79,24 +81,44 @@ defmodule OpusWeb.InstrumentsLive do
     end
   end
 
+  # Asking Questrade takes up to a few minutes, so it runs in the
+  # background: the page stays usable and the button says it's busy.
+  def handle_event("enrich", _params, %{assigns: %{busy: true}} = socket),
+    do: {:noreply, socket}
+
   def handle_event("enrich", _params, socket) do
-    socket = assign(socket, busy: true)
+    {:noreply, socket |> assign(busy: true) |> start_async(:enrich, &Instruments.enrich/0)}
+  end
 
-    case Instruments.enrich() do
-      {:ok, %{"resolved" => resolved, "failed" => failed}} ->
-        {:noreply,
-         socket
-         |> put_flash(
-           :info,
-           "Questrade identified #{resolved} listings; #{length(failed)} failed."
-         )
-         |> assign(busy: false)
-         |> reload()}
+  @impl true
+  def handle_async(:enrich, {:ok, {:ok, %{"resolved" => resolved, "failed" => failed}}}, socket) do
+    {:noreply,
+     socket
+     |> put_flash(:info, "Questrade identified #{resolved} listings; #{length(failed)} failed.")
+     |> assign(busy: false)
+     |> reload()}
+  end
 
-      {:error, reason} ->
-        {:noreply,
-         socket |> put_flash(:error, Client.describe_error(reason)) |> assign(busy: false)}
-    end
+  def handle_async(:enrich, {:ok, {:error, reason}}, socket) do
+    {:noreply, socket |> put_flash(:error, Client.describe_error(reason)) |> assign(busy: false)}
+  end
+
+  def handle_async(:enrich, {:ok, other}, socket) do
+    Logger.error("[Instruments] Unexpected enrich answer: #{inspect(other)}")
+
+    {:noreply,
+     socket
+     |> put_flash(:error, "Auro gave an answer the page can't read.")
+     |> assign(busy: false)}
+  end
+
+  def handle_async(:enrich, {:exit, reason}, socket) do
+    Logger.error("[Instruments] Enrich crashed: #{inspect(reason)}")
+
+    {:noreply,
+     socket
+     |> put_flash(:error, "Asking Questrade failed. Check the Opus log.")
+     |> assign(busy: false)}
   end
 
   defp reload(socket) do

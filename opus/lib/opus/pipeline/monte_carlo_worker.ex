@@ -4,7 +4,13 @@ defmodule Opus.Pipeline.MonteCarloWorker do
   look; promotion happens there); fail → terminal.
   """
 
-  use Oban.Worker, queue: :pipeline, max_attempts: 3
+  # One attempt: a stage isn't re-run on its own (opus/AGENTS.md). Unique
+  # per config while a run is waiting or running, so a double enqueue
+  # doesn't run the stage twice.
+  use Oban.Worker,
+    queue: :pipeline,
+    max_attempts: 1,
+    unique: [keys: [:config_id], period: :infinity, states: :incomplete]
 
   require Logger
 

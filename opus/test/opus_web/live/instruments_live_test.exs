@@ -75,10 +75,13 @@ defmodule OpusWeb.InstrumentsLiveTest do
   end
 
   # config/test.exs points the Auro client at a closed port.
-  test "identifying via Questrade reports that Auro is unreachable", %{conn: conn} do
+  @tag :capture_log
+  test "identifying via Questrade runs in the background and reports the engine down",
+       %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/instruments")
 
-    html = view |> element("button", "Identify via Questrade") |> render_click()
-    assert html =~ "Auro is not running."
+    assert view |> element("button[phx-click=enrich]") |> render_click() =~ "Asking Questrade…"
+    assert render_async(view, 5_000) =~ "Auro is not running."
+    refute render(view) =~ "Asking Questrade…"
   end
 end

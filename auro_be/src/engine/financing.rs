@@ -26,16 +26,16 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::America::New_York;
 
-use crate::engine::pipeline::instrument_to_class;
+use crate::engine::pipeline::{instrument_class, InstrumentClass};
 use crate::engine::types::{Direction, Trade};
 
 /// Annual markup OANDA adds over the interbank carry, per instrument class
 /// (calibrated 2026-10-16; see module docs).
-fn markup(class: &str) -> f64 {
+fn markup(class: InstrumentClass) -> f64 {
     match class {
-        "fx_major" | "fx_cross" => 0.010,
-        "metal" => 0.012,
-        _ => 0.025,
+        InstrumentClass::FxMajor | InstrumentClass::FxCross => 0.010,
+        InstrumentClass::Metal => 0.012,
+        InstrumentClass::Commodity | InstrumentClass::Index | InstrumentClass::Bond => 0.025,
     }
 }
 
@@ -108,12 +108,14 @@ impl FinancingModel {
             };
         }
 
-        let class = instrument_to_class(instrument);
+        let class = instrument_class(instrument);
         let (base, quote) = instrument.split_once('_').unwrap_or((instrument, ""));
         let carry = match class {
-            "fx_major" | "fx_cross" => self.policy_rate(base, date) - self.policy_rate(quote, date),
-            "metal" | "index" => -self.policy_rate(quote, date),
-            _ => 0.0,
+            InstrumentClass::FxMajor | InstrumentClass::FxCross => {
+                self.policy_rate(base, date) - self.policy_rate(quote, date)
+            }
+            InstrumentClass::Metal | InstrumentClass::Index => -self.policy_rate(quote, date),
+            InstrumentClass::Commodity | InstrumentClass::Bond => 0.0,
         };
         let sign = match direction {
             Direction::Long => 1.0,

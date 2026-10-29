@@ -7,6 +7,7 @@ defmodule Opus.Trading.DriftCheck do
   """
   use Ecto.Schema
 
+  import Opus.Utils.Time, only: [parse_iso8601!: 1]
   import Ecto.Query
 
   alias Opus.Auro.Client
@@ -70,7 +71,11 @@ defmodule Opus.Trading.DriftCheck do
   end
 
   defp backtest(%{"trades" => trades, "from" => from, "to" => to}) do
-    %{trades: Enum.map(trades, &%{pnl: &1["pnl_percent"]}), from: at(from), to: at(to)}
+    %{
+      trades: Enum.map(trades, &%{pnl: &1["pnl_percent"]}),
+      from: parse_iso8601!(from),
+      to: parse_iso8601!(to)
+    }
   end
 
   defp fills(id) do
@@ -90,10 +95,5 @@ defmodule Opus.Trading.DriftCheck do
     |> Repo.all()
     |> ExecutionQuality.summarize()
     |> List.first()
-  end
-
-  defp at(text) do
-    {:ok, at, _} = DateTime.from_iso8601(text)
-    at
   end
 end

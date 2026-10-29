@@ -122,4 +122,5 @@ defmodule Opus.Dashboard.NotifyWorker do
 
   defp engine_line(:up), do: "Engine: running"
   defp engine_line({:down, _reason}), do: "Engine: NOT running"
+  defp engine_line(:unknown), do: "Engine: couldn't check (see the alerts)"
 end
