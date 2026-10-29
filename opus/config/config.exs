@@ -29,6 +29,9 @@ config :opus, Oban,
   repo: Opus.Repo,
   plugins: [
     Oban.Plugins.Lifeline,
+    # Delete finished jobs (completed, cancelled, discarded) after two weeks;
+    # Oban keeps them forever otherwise. The dashboard only reads the last day.
+    {Oban.Plugins.Pruner, max_age: {14, :days}},
     # UTC. 23:30 UTC is after the 16:00 ET close in both EDT and EST; the
     # worker's overlapping re-fetch picks up any post-market bars it misses.
     {Oban.Plugins.Cron,

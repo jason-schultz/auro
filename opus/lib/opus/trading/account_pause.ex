@@ -12,6 +12,8 @@ defmodule Opus.Trading.AccountPause do
 
   import Ecto.Query
 
+  require Logger
+
   alias Opus.Repo
   alias Opus.Trading.AccountLimits
 
@@ -45,8 +47,20 @@ defmodule Opus.Trading.AccountPause do
          true <- tripped?(peak, nav, limit) do
       Repo.insert!(%__MODULE__{triggered_at: now, peak_nav: peak, nav: nav, limit_pct: limit / 1})
     else
-      %__MODULE__{} = pause -> pause
-      _ -> nil
+      %__MODULE__{} = pause ->
+        pause
+
+      # Only AccountLimits.get/0 answers nil here.
+      nil ->
+        Logger.warning(
+          "[AccountPause] No account limits stored (trading_config account_limits); " <>
+            "the drawdown pause is off"
+        )
+
+        nil
+
+      _ ->
+        nil
     end
   end
 

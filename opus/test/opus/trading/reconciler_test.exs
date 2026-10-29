@@ -1,54 +1,87 @@
-# defmodule Opus.Trading.ReconcilerTest do
-#   use ExUnit.Case, async: true
+defmodule Opus.Trading.ReconcilerTest do
+  use Opus.DataCase, async: false
 
-#   alias Opus.Trading.Reconciler
+  alias Opus.Repo
+  alias Opus.Trading.Reconciler
 
-#   describe "determine_exit_reason/1" do
-#     test "returns StopLoss when stopLossOrder is FILLED" do
-#       trade_data = %{
-#         "stopLossOrder" => %{"state" => "FILLED"}
-#       }
+  # OANDA answers from a Req.Test stub (config/test.exs); the Rust engine is a
+  # closed port, so every engine delete fails here.
 
-#       assert Reconciler.determine_exit_reason(trade_data) == "StopLoss"
-#     end
+  setup do
+    Repo.query!("DELETE FROM live_trades")
+    :ok
+  end
 
-#     test "returns TakeProfit when takeProfitOrder is FILLED" do
-#       trade_data = %{
-#         "takeProfitOrder" => %{"state" => "FILLED"}
-#       }
+  defp open_trade(oanda_id) do
+    now = DateTime.utc_now()
 
-#       assert Reconciler.determine_exit_reason(trade_data) == "TakeProfit"
-#     end
+    Repo.insert_all("live_trades", [
+      %{
+        id: Ecto.UUID.dump!(Ecto.UUID.generate()),
+        oanda_trade_id: oanda_id,
+        instrument: "EUR_USD",
+        direction: "Long",
+        units: "1000",
+        status: "open",
+        entry_price: 1.1,
+        entry_time: DateTime.add(now, -7200),
+        created_at: now,
+        updated_at: now
+      }
+    ])
+  end
 
-#     test "returns TrailingStop when trailingStopLossOrder is FILLED" do
-#       trade_data = %{
-#         "trailingStopLossOrder" => %{"state" => "FILLED"}
-#       }
+  defp stub_oanda(trade) do
+    Req.Test.stub(Opus.Oanda.Client, fn conn ->
+      if String.ends_with?(conn.request_path, "/openTrades"),
+        do: Req.Test.json(conn, %{"trades" => []}),
+        else: Req.Test.json(conn, %{"trade" => trade})
+    end)
+  end
 
-#       assert Reconciler.determine_exit_reason(trade_data) == "TrailingStop"
-#     end
+  defp exit_time(oanda_id) do
+    from(t in "live_trades",
+      where: t.oanda_trade_id == ^oanda_id,
+      select: {t.status, type(t.exit_time, :utc_datetime_usec)}
+    )
+    |> Repo.one()
+  end
 
-#     test "returns ClosedByBroker when no order is FILLED" do
-#       trade_data = %{
-#         "stopLossOrder" => %{"state" => "PENDING"},
-#         "takeProfitOrder" => %{"state" => "CANCELLED"}
-#       }
+  @tag :capture_log
+  test "a trade OANDA closed is closed at OANDA's close time" do
+    open_trade("42")
 
-#       assert Reconciler.determine_exit_reason(trade_data) == "ClosedByBroker"
-#     end
+    stub_oanda(%{
+      "id" => "42",
+      "state" => "CLOSED",
+      "averageClosePrice" => "1.1050",
+      "realizedPL" => "5.0",
+      "closeTime" => "2026-10-27T14:03:07.123456789Z",
+      "stopLossOrder" => %{"state" => "FILLED", "price" => "1.0"}
+    })
 
-#     test "returns ClosedByBroker when trade_data is empty" do
-#       assert Reconciler.determine_exit_reason(%{}) == "ClosedByBroker"
-#     end
+    assert {:ok, 1, _pending} = Reconciler.reconcile_once()
+    assert {"closed", ~U[2026-10-27 14:03:07.123456Z]} = exit_time("42")
+  end
 
-#     test "prefers StopLoss over TakeProfit when both are FILLED" do
-#       # Shouldn't happen in practice, but verifies cond ordering is deterministic
-#       trade_data = %{
-#         "stopLossOrder" => %{"state" => "FILLED"},
-#         "takeProfitOrder" => %{"state" => "FILLED"}
-#       }
+  @tag :capture_log
+  test "a failed engine delete is kept and retried on later ticks" do
+    open_trade("43")
 
-#       assert Reconciler.determine_exit_reason(trade_data) == "StopLoss"
-#     end
-#   end
-# end
+    stub_oanda(%{
+      "id" => "43",
+      "state" => "CLOSED",
+      "averageClosePrice" => "1.1050",
+      "realizedPL" => "5.0"
+    })
+
+    # The engine is unreachable: the row closes, the delete stays pending.
+    assert {:ok, 1, pending} = Reconciler.reconcile_once()
+    assert MapSet.to_list(pending) == ["43"]
+    # No close time from OANDA: closed now instead.
+    assert {"closed", %DateTime{}} = exit_time("43")
+
+    # The next tick finds nothing new to close but retries the delete.
+    assert {:ok, 0, ^pending} = Reconciler.reconcile_once(pending)
+  end
+end

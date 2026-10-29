@@ -83,6 +83,28 @@ pub struct CreateLiveStrategy {
     pub parameters: Value,
 }
 
+/// Largest number a block setting may hold. Periods are bar counts; one far
+/// past any history overflows the indicator arithmetic.
+const MAX_BLOCK_SETTING: f64 = 100_000.0;
+
+/// The first block setting past `MAX_BLOCK_SETTING`, as (component, param, value).
+fn oversized_setting(parameters: &Value) -> Option<(String, String, f64)> {
+    parameters["components"]
+        .as_object()?
+        .iter()
+        .find_map(|(name, component)| {
+            component["params"]
+                .as_object()?
+                .iter()
+                .find_map(|(param, value)| {
+                    value
+                        .as_f64()
+                        .filter(|v| v.abs() > MAX_BLOCK_SETTING)
+                        .map(|v| (name.clone(), param.clone(), v))
+                })
+        })
+}
+
 /// Reject configs the evaluator could never trade: the parameters must be a
 /// composite strategy for this instrument/granularity, sized within the
 /// risk-per-trade ceiling.
@@ -96,6 +118,12 @@ fn validate_parameters(payload: &CreateLiveStrategy) -> AppResult<()> {
         return Err(AppError::BadRequest(format!(
             "parameters are for {} {}, row is {} {}",
             strategy.instrument, strategy.granularity, payload.instrument, payload.granularity
+        )));
+    }
+
+    if let Some((component, param, value)) = oversized_setting(&payload.parameters) {
+        return Err(AppError::BadRequest(format!(
+            "{component}.{param} = {value} is out of range (at most {MAX_BLOCK_SETTING})"
         )));
     }
 
@@ -400,6 +428,26 @@ pub async fn update_live_strategy(
 ) -> AppResult<Json<Value>> {
     validate_parameters(&payload)?;
 
+    // Moving a strategy to another instrument or timeframe while it holds a
+    // trade would orphan that trade: its exits run on the strategy's key.
+    let open_count = live_queries::open_trade_count_for_strategy(&state.db, id)
+        .await
+        .map_err(AppError::Database)?;
+    if open_count > 0 {
+        let current = live_strategies_repo::get_live_strategy_by_id(&state.db, id)
+            .await
+            .map_err(AppError::Database)?;
+        if let Some(current) = current {
+            if current.instrument != payload.instrument
+                || current.granularity != payload.granularity
+            {
+                return Err(AppError::BadRequest(format!(
+                    "strategy holds {open_count} open trade(s); its instrument and timeframe can't change until they close"
+                )));
+            }
+        }
+    }
+
     let rows_affected = live_strategies_repo::update_live_strategy(
         &state.db,
         id,
@@ -508,12 +556,16 @@ pub async fn update_trading_config(
     State(state): State<AppState>,
     Json(payload): Json<Value>,
 ) -> AppResult<Json<Value>> {
+    // All keys or none: a half-applied update would leave settings that
+    // were meant to change together out of step.
     if let Some(obj) = payload.as_object() {
+        let mut tx = state.db.begin().await.map_err(AppError::Database)?;
         for (key, value) in obj {
-            live_strategies_repo::upsert_trading_config(&state.db, key, value)
+            live_strategies_repo::upsert_trading_config(&mut *tx, key, value)
                 .await
                 .map_err(AppError::Database)?;
         }
+        tx.commit().await.map_err(AppError::Database)?;
     }
 
     tracing::info!("Trading config updated: {:?}", payload);
@@ -636,4 +688,17 @@ pub async fn get_live_trade_detail(
         "strategy": strategy,
         "live_aggregate": live_aggregate,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_block_setting_far_past_any_history_is_refused() {
+        let ok = serde_json::json!({"components": {"r": {"type": "RsiReversion", "params": {"rsi_period": 2}}}});
+        assert!(super::oversized_setting(&ok).is_none());
+
+        let huge = serde_json::json!({"components": {"m": {"type": "MaFilter", "params": {"period": 1e12}}}});
+        let (component, param, _) = super::oversized_setting(&huge).unwrap();
+        assert_eq!((component.as_str(), param.as_str()), ("m", "period"));
+    }
 }

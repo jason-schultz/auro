@@ -10,46 +10,46 @@ use crate::state::{AppState, LastQuote};
 
 use super::trade_management;
 
-pub fn spawn_quote_tracker(mut rx: broadcast::Receiver<StreamMessage>, state: AppState) {
-    tokio::spawn(async move {
-        tracing::info!("Quote tracker started");
+/// Consume the price broadcast until it closes. Started under a supervisor
+/// (`engine::live::spawn_supervised`) with a fresh subscription each time.
+pub async fn run_quote_tracker(mut rx: broadcast::Receiver<StreamMessage>, state: AppState) {
+    tracing::info!("Quote tracker started");
 
-        loop {
-            match rx.recv().await {
-                Ok(StreamMessage::PRICE(price)) => {
-                    let Some(quote) = parse_quote(&price) else {
-                        continue;
-                    };
-                    state
-                        .live
-                        .last_quotes
-                        .write()
-                        .await
-                        .insert(price.instrument.clone(), quote.clone());
+    loop {
+        match rx.recv().await {
+            Ok(StreamMessage::PRICE(price)) => {
+                let Some(quote) = parse_quote(&price) else {
+                    continue;
+                };
+                state
+                    .live
+                    .last_quotes
+                    .write()
+                    .await
+                    .insert(price.instrument.clone(), quote.clone());
 
-                    let positions: Vec<OpenPosition> = {
-                        let positions = state.live.open_positions.read().await;
-                        positions
-                            .values()
-                            .filter(|p| p.instrument == price.instrument)
-                            .cloned()
-                            .collect()
-                    };
-                    for pos in &positions {
-                        trade_management::update_mae_mfe(&state, pos, quote.mid).await;
-                    }
-                }
-                Ok(StreamMessage::HEARTBEAT(_)) => {}
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("Quote tracker lagged, skipped {} messages", n);
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    tracing::info!("Quote tracker channel closed");
-                    break;
+                let positions: Vec<OpenPosition> = {
+                    let positions = state.live.open_positions.read().await;
+                    positions
+                        .values()
+                        .filter(|p| p.instrument == price.instrument)
+                        .cloned()
+                        .collect()
+                };
+                for pos in &positions {
+                    trade_management::update_mae_mfe(&state, pos, quote.mid).await;
                 }
             }
+            Ok(StreamMessage::HEARTBEAT(_)) => {}
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!("Quote tracker lagged, skipped {} messages", n);
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                tracing::info!("Quote tracker channel closed");
+                break;
+            }
         }
-    });
+    }
 }
 
 fn parse_quote(price: &StreamPrice) -> Option<LastQuote> {

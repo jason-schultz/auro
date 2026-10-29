@@ -87,7 +87,7 @@ defmodule OpusWeb.StrategyBuilderLive do
             {:error, :too_complex} -> {RecipeForm.new(), true}
           end
 
-        runs = StrategyResults.for_recipe(recipe.definition)
+        runs = StrategyResults.for_recipe(recipe.definition, recipe.granularity)
 
         socket
         |> assign(

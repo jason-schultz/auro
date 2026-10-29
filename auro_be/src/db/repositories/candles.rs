@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
+use crate::engine::daily_bars;
 use crate::engine::types::{Candle, CandleRow, Granularity, OHLC};
 
 /// One `candles` row. The single DB → `Candle` mapping; every loader goes
@@ -59,7 +60,8 @@ const CANDLE_COLUMNS: &str = "timestamp, open, high, low, close, volume, \
 
 // The SELECT strings below are assembled from the constant `CANDLE_COLUMNS`
 // list only; every runtime value is bound, so they are safe to assert.
-/// Full complete-candle history for an instrument/granularity, oldest first.
+/// Full complete-candle history for an instrument/granularity, oldest first,
+/// with daily index stub bars folded into the next bar (`engine::daily_bars`).
 pub async fn load_candles(
     pool: &PgPool,
     instrument: &str,
@@ -75,7 +77,8 @@ pub async fn load_candles(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(CandleDbRow::into_candle).collect())
+    let candles = rows.into_iter().map(CandleDbRow::into_candle).collect();
+    Ok(daily_bars::fold_stubs(instrument, granularity, candles))
 }
 
 /// Close of the newest complete bar, or None when the instrument has none.
@@ -94,7 +97,9 @@ pub async fn latest_close(
     .await
 }
 
-/// The most recent `limit` complete candles, oldest first.
+/// The most recent `limit` complete candles, oldest first, with daily index
+/// stub bars folded into the next bar (`engine::daily_bars`), so a little
+/// fewer than `limit` for those.
 pub async fn load_recent_candles(
     pool: &PgPool,
     instrument: &str,
@@ -112,11 +117,12 @@ pub async fn load_recent_candles(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
+    let candles = rows
         .into_iter()
         .rev()
         .map(CandleDbRow::into_candle)
-        .collect())
+        .collect();
+    Ok(daily_bars::fold_stubs(instrument, granularity, candles))
 }
 
 /// Timestamp of the newest complete candle, if any.

@@ -21,13 +21,19 @@ pub struct SelectedContract {
 /// Contracts on `underlying` expiring within `expiries` and striking within
 /// `strikes` (both inclusive), nearest expiry first, then strike, then call
 /// before put. A strike missing one side's ID yields only the other side.
+///
+/// `option_contracts` keys a contract on expiry, strike and side, not on its
+/// root, so a contract the chain lists twice (a second root such as an
+/// adjusted one, or an expiry repeated mid-update) is kept once, the
+/// standard root's listing first, and the rest logged. Sent twice, it would
+/// fail the whole capture's upsert.
 pub fn select_contracts(
     chain: &[ChainExpiry],
     underlying: &str,
     expiries: (NaiveDate, NaiveDate),
     strikes: (f64, f64),
 ) -> AppResult<Vec<SelectedContract>> {
-    let mut out = Vec::new();
+    let mut out: Vec<(bool, SelectedContract)> = Vec::new();
     for expiry in chain {
         let expiration = expiry_date(&expiry.expiry_date)?;
         if expiration < expiries.0 || expiration > expiries.1 {
@@ -46,6 +52,7 @@ pub fn select_contracts(
                     (OptionKind::Call, strike.call_symbol_id),
                     (OptionKind::Put, strike.put_symbol_id),
                 ];
+                let standard = root.option_root == underlying && root.multiplier == 100;
                 for (kind, option_id) in sides {
                     let Some(option_id) = option_id else {
                         continue;
@@ -56,31 +63,47 @@ pub fn select_contracts(
                         kind,
                         strike: strike.strike_price,
                     };
-                    out.push(SelectedContract {
-                        spec: ContractSpec {
-                            ticker: ticker.to_string(),
-                            underlying: underlying.to_string(),
-                            kind,
-                            expiration,
-                            strike: strike.strike_price,
-                            shares_per_contract: root.multiplier,
-                            exercise_style: exercise_style.clone(),
-                            primary_exchange: expiry.listing_exchange.clone(),
+                    out.push((
+                        standard,
+                        SelectedContract {
+                            spec: ContractSpec {
+                                ticker: ticker.to_string(),
+                                underlying: underlying.to_string(),
+                                kind,
+                                expiration,
+                                strike: strike.strike_price,
+                                shares_per_contract: root.multiplier,
+                                exercise_style: exercise_style.clone(),
+                                primary_exchange: expiry.listing_exchange.clone(),
+                            },
+                            option_id,
                         },
-                        option_id,
-                    });
+                    ));
                 }
             }
         }
     }
-    out.sort_by(|a, b| {
-        a.spec
-            .expiration
-            .cmp(&b.spec.expiration)
-            .then(a.spec.strike.total_cmp(&b.spec.strike))
-            .then_with(|| a.spec.kind.as_str().cmp(b.spec.kind.as_str()))
-    });
-    Ok(out)
+    let same = |a: &ContractSpec, b: &ContractSpec| {
+        a.expiration
+            .cmp(&b.expiration)
+            .then(a.strike.total_cmp(&b.strike))
+            .then_with(|| a.kind.as_str().cmp(b.kind.as_str()))
+    };
+    out.sort_by(|(a_std, a), (b_std, b)| same(&a.spec, &b.spec).then(b_std.cmp(a_std)));
+    let mut kept: Vec<SelectedContract> = Vec::with_capacity(out.len());
+    for (_, contract) in out {
+        match kept.last() {
+            Some(prev) if same(&prev.spec, &contract.spec).is_eq() => tracing::warn!(
+                "Questrade lists {} twice (also as {}, id {}); keeping {}",
+                prev.spec.ticker,
+                contract.spec.ticker,
+                contract.option_id,
+                prev.option_id
+            ),
+            _ => kept.push(contract),
+        }
+    }
+    Ok(kept)
 }
 
 /// `2026-11-20T00:00:00.000000-05:00` → 2026-11-20. The calendar date is the
@@ -173,6 +196,31 @@ mod tests {
             .unwrap()
             .option_chain;
         assert_eq!(chain[0].chain_per_root[0].option_root, "SPY");
+    }
+
+    #[test]
+    fn a_contract_listed_twice_is_kept_once_from_the_standard_root() {
+        let mut chain = chain();
+        let mut adjusted = chain[0].chain_per_root[0].clone();
+        adjusted.option_root = "SPY1".into();
+        adjusted.multiplier = 100;
+        for strike in &mut adjusted.chain_per_strike_price {
+            strike.call_symbol_id = strike.call_symbol_id.map(|id| id + 100);
+            strike.put_symbol_id = strike.put_symbol_id.map(|id| id + 100);
+        }
+        chain[0].chain_per_root.insert(0, adjusted);
+        // The same expiry listed a second time.
+        chain.push(chain[1].clone());
+
+        let selected = select_contracts(
+            &chain,
+            "SPY",
+            (date(2026, 10, 22), date(2027, 12, 31)),
+            (640.0, 660.0),
+        )
+        .unwrap();
+        let ids: Vec<i64> = selected.iter().map(|c| c.option_id).collect();
+        assert_eq!(ids, [3, 4, 9, 10]);
     }
 
     #[test]

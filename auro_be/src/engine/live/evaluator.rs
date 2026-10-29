@@ -47,11 +47,16 @@ async fn extract_realized_pl(
         }
 
         if let Some(tx_id) = fill_tx.get("id").and_then(|v| v.as_str()) {
-            if let Ok(tx_resp) = oanda.get_transaction(tx_id).await {
-                let tx = tx_resp.get("transaction").unwrap_or(&tx_resp);
-                if let Some(pl) = parse_trade_realized_pl(tx, trade_id) {
-                    return Some(pl);
+            match oanda.get_transaction(tx_id).await {
+                Ok(tx_resp) => {
+                    let tx = tx_resp.get("transaction").unwrap_or(&tx_resp);
+                    if let Some(pl) = parse_trade_realized_pl(tx, trade_id) {
+                        return Some(pl);
+                    }
                 }
+                Err(e) => tracing::warn!(
+                    "[TRADE] realized P&L lookup failed for trade_id={trade_id} (transaction {tx_id}): {e}"
+                ),
             }
         }
     }
@@ -142,7 +147,7 @@ pub(crate) async fn evaluate_and_apply(
     let before_positions = state.live.open_positions.read().await.clone();
     let mut working_positions = before_positions.clone();
 
-    let reports = evaluate_strategies(
+    let result = evaluate_strategies(
         state,
         instrument,
         &granularity,
@@ -154,8 +159,11 @@ pub(crate) async fn evaluate_and_apply(
             scope,
         },
     )
-    .await?;
+    .await;
 
+    // Apply what changed even when the pass ended in an error: a trade
+    // already opened or closed at OANDA must be reflected here, or the next
+    // bar would open a duplicate or keep exiting a trade that is gone.
     let (removed, added) = position_key_deltas(&before_positions, &working_positions);
     if !removed.is_empty() || !added.is_empty() {
         let mut open_positions = state.live.open_positions.write().await;
@@ -167,7 +175,7 @@ pub(crate) async fn evaluate_and_apply(
         }
     }
 
-    Ok(reports)
+    result
 }
 
 pub(crate) async fn evaluate_strategies(
@@ -210,8 +218,23 @@ pub(crate) async fn evaluate_strategies(
     for strategy in &strategies {
         // All live strategies use the composite shape. `strategy_type` is a
         // lineage label (mean_reversion/trend_following/etc.), not a parse key.
+        let has_position = open_positions
+            .values()
+            .any(|p| p.strategy_id == strategy.id);
+
         let composite: Strategy = match serde_json::from_value(strategy.parameters.clone()) {
             Ok(s) => s,
+            // A strategy that holds a trade and can't be read can't run its
+            // exits: only its OANDA stop protects it now, so say so loudly.
+            Err(e) if has_position => {
+                tracing::error!(
+                    "[EXITS BLOCKED] {} {} holds a trade but its parameters don't parse; only its OANDA stop protects it: {}",
+                    strategy.instrument,
+                    strategy.granularity,
+                    e
+                );
+                continue;
+            }
             Err(e) => {
                 tracing::warn!(
                     "[SKIP] composite parse failure for {} {}: {}",
@@ -223,12 +246,10 @@ pub(crate) async fn evaluate_strategies(
             }
         };
 
-        let has_position = open_positions
-            .values()
-            .any(|p| p.strategy_id == strategy.id);
-
-        if has_position {
-            let exit_reports = evaluate_exit(
+        // One strategy's failure (a DB blip, a failed order) is logged and
+        // the others still run; the pass never aborts halfway.
+        let outcome = if has_position {
+            evaluate_exit(
                 state,
                 strategy,
                 &composite,
@@ -236,22 +257,32 @@ pub(crate) async fn evaluate_strategies(
                 buffer,
                 open_positions,
             )
-            .await?;
-            reports.extend(exit_reports);
+            .await
         } else if !entries_allowed || !strategy.enabled {
             continue;
-        } else if let Some(entry_report) = evaluate_entry(
-            state,
-            strategy,
-            &composite,
-            current_price,
-            buffer,
-            open_positions,
-            ctx.rules,
-        )
-        .await?
-        {
-            reports.push(entry_report);
+        } else {
+            evaluate_entry(
+                state,
+                strategy,
+                &composite,
+                current_price,
+                buffer,
+                open_positions,
+                ctx.rules,
+            )
+            .await
+            .map(|report| report.into_iter().collect())
+        };
+
+        match outcome {
+            Ok(strategy_reports) => reports.extend(strategy_reports),
+            Err(e) => tracing::error!(
+                "[EVAL FAILED] {} {} strategy {}: {}",
+                strategy.instrument,
+                strategy.granularity,
+                strategy.id,
+                e
+            ),
         }
     }
 
@@ -310,6 +341,71 @@ async fn evaluate_entry(
 
     if let Some(gated) = entry_gate_report(rules, strategy, current_price) {
         return Ok(Some(gated));
+    }
+
+    // After a restart, entries wait until the engine knows what's open at
+    // OANDA and has the account limits from Opus: either missing, a new
+    // trade could duplicate one already open or slip past the risk budget.
+    if let Some(waiting) = startup_gate(state, rules).await {
+        tracing::info!(
+            "[SKIP ENTRY] {} {} — {}",
+            strategy.instrument,
+            strategy.granularity,
+            waiting
+        );
+        return Ok(Some(entry_rejected(
+            strategy,
+            current_price,
+            waiting.to_string(),
+        )));
+    }
+
+    // A trade OANDA closed during this bar (its stop or target hit mid-bar)
+    // must not be followed by a new one on the same bar's close: the
+    // backtest resumes from the next bar, and live would otherwise re-enter
+    // or not depending on whether the reconciler noticed the stop before the
+    // bar closed. The strategy's own exits fill just after a bar closes and
+    // don't hold up the next bar.
+    if let Some(bar_open) = candles.last().map(|c| c.time) {
+        let last_exit = live_queries::last_broker_exit_time_for_strategy(&state.db, strategy.id)
+            .await
+            .map_err(AppError::Database)?;
+        if last_exit.is_some_and(|exit| exit >= bar_open) {
+            tracing::info!(
+                "[SKIP ENTRY] {} {} — OANDA closed its last trade during this bar; waiting for the next",
+                strategy.instrument,
+                strategy.granularity,
+            );
+            return Ok(Some(entry_rejected(
+                strategy,
+                current_price,
+                "re_entry: OANDA closed its last trade during this bar, so it waits for the next one, as the backtest does".to_string(),
+            )));
+        }
+    }
+
+    // The OANDA account nets opposite trades on one instrument: a short sent
+    // while another strategy holds a long would shrink or close that long
+    // instead of opening a trade. So an entry against an open trade on the
+    // same instrument waits until that trade closes.
+    if let Some(other) =
+        opposite_position(state, open_positions, &strategy.instrument, direction).await
+    {
+        tracing::info!(
+            "[SKIP ENTRY] {} {} {:?} — strategy {} holds the opposite side of this instrument",
+            strategy.instrument,
+            strategy.granularity,
+            direction,
+            other
+        );
+        return Ok(Some(entry_rejected(
+            strategy,
+            current_price,
+            format!(
+                "opposite_position: another strategy ({other}) holds the other side of {}; the account nets opposite trades",
+                strategy.instrument
+            ),
+        )));
     }
 
     let Some(sl_price) =
@@ -379,10 +475,6 @@ async fn evaluate_entry(
         entry_reason: format!("Composite {:?} entry", direction),
         indicators_at_entry,
         regime_at_entry: regime_reason.unwrap_or("unknown").to_string(),
-        entry_time: candles
-            .last()
-            .map(|c| c.time)
-            .unwrap_or_else(chrono::Utc::now),
     };
 
     execute_entry(state, strategy, entry, open_positions).await
@@ -401,7 +493,6 @@ struct PendingEntry {
     entry_reason: String,
     indicators_at_entry: serde_json::Value,
     regime_at_entry: String,
-    entry_time: chrono::DateTime<chrono::Utc>,
 }
 
 async fn execute_entry(
@@ -411,49 +502,73 @@ async fn execute_entry(
     open_positions: &mut HashMap<String, OpenPosition>,
 ) -> AppResult<Option<SignalReport>> {
     let sl_str = format_price(state, &strategy.instrument, entry.sl_price).await;
+    // Everything that can fail before the row is written is done before the
+    // order is sent, so a filled trade is never dropped on a local error.
+    let sizing_metadata = serde_json::to_value(&entry.sized.metadata)
+        .map_err(|e| AppError::Internal(format!("sizing metadata serialization: {e}")))?;
+    let client_id = format!("auro-{}", uuid::Uuid::new_v4().simple());
 
-    let resp = match state
+    // The units OANDA actually opened, which can be fewer than asked when
+    // part of the order netted against another trade.
+    let (trade_id, fill_price, units) = match state
         .oanda
-        .create_market_order(&strategy.instrument, &entry.sized.units, &sl_str)
+        .create_market_order(
+            &strategy.instrument,
+            &entry.sized.units,
+            &sl_str,
+            &client_id,
+        )
         .await
     {
-        Ok(resp) => resp,
-        Err(e) => {
-            tracing::error!(
-                "[ORDER FAILED] {} {} ({}): {}",
-                entry.direction,
-                strategy.instrument,
-                strategy.granularity,
-                e
-            );
-            return Ok(None);
+        Ok(resp) => {
+            let Some(trade_id) = resp["orderFillTransaction"]["tradeOpened"]["tradeID"]
+                .as_str()
+                .map(str::to_string)
+            else {
+                report_unopened_order(strategy, &entry, &resp);
+                return Ok(None);
+            };
+            let Some(fill_price) = entry_fill_price(&state.oanda, &resp, &trade_id).await else {
+                return abandon_untracked_trade(
+                    state,
+                    strategy,
+                    &trade_id,
+                    &entry,
+                    entry.current_price,
+                    "fill_price_unknown",
+                    open_positions,
+                )
+                .await;
+            };
+            let units = resp["orderFillTransaction"]["tradeOpened"]["units"]
+                .as_str()
+                .map_or_else(|| entry.sized.units.clone(), str::to_string);
+            (trade_id, fill_price, units)
         }
-    };
-
-    let Some(trade_id) = resp["orderFillTransaction"]["tradeOpened"]["tradeID"]
-        .as_str()
-        .map(str::to_string)
-    else {
-        tracing::error!(
-            "[ORDER FAILED] {} {} ({}) missing tradeID in OANDA response; skipping in-memory/DB insert",
-            entry.direction,
-            strategy.instrument,
-            strategy.granularity,
-        );
-        return Ok(None);
-    };
-
-    let Some(fill_price) = entry_fill_price(&state.oanda, &resp, &trade_id).await else {
-        return abandon_untracked_trade(
-            state,
-            strategy,
-            &trade_id,
-            &entry,
-            entry.current_price,
-            "fill_price_unknown",
-            open_positions,
-        )
-        .await;
+        // The request failed, but a timeout can come after OANDA filled the
+        // order: look for the trade by its label before giving up on it.
+        Err(e) => match find_trade_by_client_id(&state.oanda, &client_id).await {
+            Some(found) => {
+                tracing::warn!(
+                    "[ORDER RECOVERED] {} {} ({}): the order call failed ({e}) but OANDA opened trade_id={}",
+                    entry.direction,
+                    strategy.instrument,
+                    strategy.granularity,
+                    found.0
+                );
+                found
+            }
+            None => {
+                tracing::error!(
+                    "[ORDER FAILED] {} {} ({}): {}",
+                    entry.direction,
+                    strategy.instrument,
+                    strategy.granularity,
+                    e
+                );
+                return Ok(None);
+            }
+        },
     };
 
     tracing::info!(
@@ -461,7 +576,7 @@ async fn execute_entry(
         entry.direction,
         strategy.instrument,
         strategy.granularity,
-        entry.sized.units,
+        units,
         fill_price,
         sl_str,
         trade_id
@@ -472,14 +587,13 @@ async fn execute_entry(
         oanda_trade_id: &trade_id,
         instrument: &strategy.instrument,
         direction: entry.direction,
-        units: &entry.sized.units,
+        units: &units,
         entry_price: fill_price,
         stop_loss_price: entry.sl_price,
         entry_reason: &entry.entry_reason,
         indicators_at_entry: &entry.indicators_at_entry,
         regime_at_entry: &entry.regime_at_entry,
-        sizing_metadata: &serde_json::to_value(&entry.sized.metadata)
-            .map_err(|e| AppError::Internal(format!("sizing metadata serialization: {e}")))?,
+        sizing_metadata: &sizing_metadata,
         signal_price: entry.current_price,
         expected_entry_price: entry.expected_entry_price,
         entry_spread: entry.entry_spread,
@@ -514,8 +628,8 @@ async fn execute_entry(
             granularity: strategy.granularity,
             direction: entry.direction,
             entry_price: fill_price,
-            entry_time: entry.entry_time,
-            units: entry.sized.units.clone(),
+            entry_time: chrono::Utc::now(),
+            units: units.clone(),
             stop_loss_state: StopLossState::NotApplicable,
             worst_price: fill_price,
             best_price: fill_price,
@@ -570,6 +684,88 @@ async fn persist_open_trade(
 /// The price OANDA filled the opening order at: from the fill transaction,
 /// or from the trade itself when the fill omits it. `None` means OANDA could
 /// not say, and the caller must not invent one.
+/// Why entries must wait after a restart, if they must.
+async fn startup_gate(state: &AppState, rules: &Rules) -> Option<&'static str> {
+    if !*state.live.positions_known.read().await {
+        return Some(
+            "positions_unknown: open trades not yet checked against OANDA since the restart",
+        );
+    }
+    if rules.limits.is_none() {
+        return Some("limits_not_received: waiting for Opus to send the account limits");
+    }
+    None
+}
+
+/// The strategy holding the opposite side of `instrument`, if any: in this
+/// pass's positions or in the shared map (another key's pass may have
+/// opened one since this pass took its snapshot).
+async fn opposite_position(
+    state: &AppState,
+    working: &HashMap<String, OpenPosition>,
+    instrument: &str,
+    direction: Direction,
+) -> Option<uuid::Uuid> {
+    let shared = state.live.open_positions.read().await;
+    working
+        .values()
+        .chain(shared.values())
+        .find(|p| p.instrument == instrument && p.direction != direction)
+        .map(|p| p.strategy_id)
+}
+
+/// An order that filled without opening a trade: on an account that nets
+/// opposite trades, OANDA reduced or closed another trade on the instrument
+/// instead. Nothing new is tracked; the reconciler picks up the other trade's
+/// close. The entry guard (`opposite_position`) exists so this never happens.
+fn report_unopened_order(strategy: &LiveStrategy, entry: &PendingEntry, resp: &serde_json::Value) {
+    let fill = &resp["orderFillTransaction"];
+    if fill["tradeReduced"].is_object() || fill["tradesClosed"].is_array() {
+        tracing::error!(
+            "[NETTED] {} {} ({}) reduced or closed another trade instead of opening one: {}",
+            entry.direction,
+            strategy.instrument,
+            strategy.granularity,
+            fill
+        );
+    } else {
+        tracing::error!(
+            "[ORDER FAILED] {} {} ({}) missing tradeID in OANDA response; skipping in-memory/DB insert",
+            entry.direction,
+            strategy.instrument,
+            strategy.granularity,
+        );
+    }
+}
+
+/// The open trade OANDA labelled with `client_id`, as `(trade_id, price,
+/// units)`.
+async fn find_trade_by_client_id(
+    oanda: &OandaClient,
+    client_id: &str,
+) -> Option<(String, f64, String)> {
+    let trades = match oanda.get_open_trades().await {
+        Ok(body) => body,
+        Err(e) => {
+            tracing::error!(
+                "[ORDER CHECK] open trades unavailable while checking {client_id}: {e}"
+            );
+            return None;
+        }
+    };
+    trades["trades"].as_array()?.iter().find_map(|t| {
+        (t["clientExtensions"]["id"].as_str() == Some(client_id))
+            .then(|| {
+                Some((
+                    t["id"].as_str()?.to_string(),
+                    parse_price(&t["price"])?,
+                    t["currentUnits"].as_str()?.to_string(),
+                ))
+            })
+            .flatten()
+    })
+}
+
 async fn entry_fill_price(
     oanda: &OandaClient,
     order_response: &serde_json::Value,
@@ -661,7 +857,7 @@ async fn abandon_untracked_trade(
                     granularity: strategy.granularity,
                     direction: entry.direction,
                     entry_price: price,
-                    entry_time: entry.entry_time,
+                    entry_time: chrono::Utc::now(),
                     units: entry.sized.units.clone(),
                     stop_loss_state: StopLossState::NotApplicable,
                     worst_price: price,
@@ -703,31 +899,37 @@ async fn evaluate_exit(
         return Ok(vec![]);
     };
 
-    let Some(ports) = composite.compute_ports(&buffer.candles) else {
-        return Ok(vec![]);
-    };
-    let signal_exit = matches!(
-        composite.evaluate_exit(&ports, first.direction == Direction::Long),
-        ExitSignal::Exit
-    );
+    // Ports that can't be computed only rule out a signal exit: the time
+    // stop still applies.
+    let ports = composite.compute_ports(&buffer.candles);
+    let signal_exit = ports.as_ref().is_some_and(|ports| {
+        matches!(
+            composite.evaluate_exit(ports, first.direction == Direction::Long),
+            ExitSignal::Exit
+        )
+    });
 
     let mut reports = Vec::<SignalReport>::new();
 
     for pos in &positions_for_strategy {
+        // Bars that closed after the fill: `entry_time` is the fill time
+        // (in memory and in the row a restart rebuilds from), so the bar the
+        // signal came from never counts, as in the backtest's `j - i`.
+        let bar = chrono::Duration::minutes(pos.granularity.minutes());
         let bars_held = buffer
             .candles
             .iter()
-            .filter(|c| c.time > pos.entry_time)
+            .filter(|c| c.time + bar > pos.entry_time)
             .count();
         let time_stop_reason = composite
             .max_hold_bars
             .filter(|limit| bars_held >= *limit)
             .map(|limit| format!("TimeStop (bars_held={} max_hold_bars={})", bars_held, limit));
 
-        let close_reason = match time_stop_reason {
-            Some(reason) => reason,
-            None if signal_exit => format!("CompositeExit (ports={:?})", ports),
-            None => continue,
+        let close_reason = match (time_stop_reason, &ports) {
+            (Some(reason), _) => reason,
+            (None, Some(ports)) if signal_exit => format!("CompositeExit (ports={:?})", ports),
+            (None, _) => continue,
         };
 
         tracing::info!(
@@ -1002,6 +1204,15 @@ mod tests {
             margin_available: 100_000.0,
             margin_used: 0.0,
             last_updated: Utc::now(),
+            hedging_enabled: Some(false),
+        });
+        // As after a successful startup: positions checked against OANDA and
+        // limits received from Opus (wide open, so they never bind here).
+        *state.live.positions_known.write().await = true;
+        state.live.rules.write().await.limits = Some(crate::engine::rules::AccountLimits {
+            risk_budget: 1.0,
+            max_open_per_group: 100,
+            groups: HashMap::new(),
         });
         state.live.last_quotes.write().await.insert(
             INSTRUMENT.to_string(),
@@ -1248,6 +1459,78 @@ mod tests {
             closed_exit_price(&state).await,
             (Some("closed".into()), Some(0.5))
         );
+
+        cleanup(&state, &[id]).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn an_entry_against_an_open_trade_on_the_instrument_waits() {
+        let (oanda_url, server) = mock_oanda().await;
+        let state = trading_state(&oanda_url).await;
+        let id = seed_strategy(&state, tf_parameters("netting", -0.2)).await;
+
+        // Another strategy holds a long on the instrument.
+        let mut held = make_position("other-long", 4.0);
+        held.strategy_id = Uuid::new_v4();
+        held.instrument = INSTRUMENT.to_string();
+        held.direction = Direction::Long;
+        state
+            .live
+            .open_positions
+            .write()
+            .await
+            .insert(held.trade_id.clone(), held);
+
+        // A bearish cross: this strategy would go short.
+        let bars = buffer_from_closes(&[1.0, 2.0, 3.0, 0.0]);
+        let reports = evaluate_and_apply(
+            &state,
+            INSTRUMENT,
+            Granularity::H1,
+            &bars,
+            0.5,
+            EvalScope::Full,
+        )
+        .await
+        .unwrap();
+
+        assert!(reports
+            .iter()
+            .any(|r| matches!(r.action, SignalAction::EntryRejected)
+                && r.reason.starts_with("opposite_position")));
+        assert_eq!(state.live.open_positions.read().await.len(), 1);
+
+        cleanup(&state, &[id]).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn entries_wait_for_the_account_limits_after_a_restart() {
+        let (oanda_url, server) = mock_oanda().await;
+        let state = trading_state(&oanda_url).await;
+        state.live.rules.write().await.limits = None;
+        let id = seed_strategy(&state, tf_parameters("no_limits_yet", -0.2)).await;
+
+        let bars = buffer_from_closes(&[3.0, 2.0, 1.0, 4.0]);
+        let reports = evaluate_and_apply(
+            &state,
+            INSTRUMENT,
+            Granularity::H1,
+            &bars,
+            4.0,
+            EvalScope::Full,
+        )
+        .await
+        .unwrap();
+
+        assert!(reports
+            .iter()
+            .any(|r| matches!(r.action, SignalAction::EntryRejected)
+                && r.reason.starts_with("limits_not_received")));
+        assert!(state.live.open_positions.read().await.is_empty());
 
         cleanup(&state, &[id]).await;
         server.abort();

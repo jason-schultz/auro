@@ -10,6 +10,8 @@ pub struct AccountSnapshot {
     pub margin_available: f64,
     pub margin_used: f64,
     pub last_updated: DateTime<Utc>,
+    /// The account's hedging setting, when OANDA reports it.
+    pub hedging_enabled: Option<bool>,
 }
 
 fn parse_f64(field: &str, value: &str) -> Option<f64> {
@@ -27,17 +29,14 @@ fn parse_f64(field: &str, value: &str) -> Option<f64> {
     }
 }
 
-pub fn spawn_account_refresher(state: AppState) {
-    tokio::spawn(async move {
-        refresh_once(&state).await;
-
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+/// Refresh the account snapshot now and every minute. Runs forever; started
+/// under a supervisor (`engine::live::spawn_supervised`).
+pub async fn run_account_refresher(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    loop {
         interval.tick().await;
-        loop {
-            interval.tick().await;
-            refresh_once(&state).await;
-        }
-    });
+        refresh_once(&state).await;
+    }
 }
 
 pub(crate) async fn refresh_once(state: &AppState) {
@@ -68,6 +67,7 @@ pub(crate) async fn refresh_once(state: &AppState) {
         margin_available,
         margin_used,
         last_updated: Utc::now(),
+        hedging_enabled: account.hedging_enabled,
     };
 
     let open_position_count = {

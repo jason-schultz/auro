@@ -273,13 +273,19 @@ pub enum ExitSignal {
 }
 
 impl Strategy {
-    /// Minimum candle count required to compute all component ports.
+    /// Minimum candle count required to compute all component ports and
+    /// the stop (an ATR stop needs `period + 1` bars).
     pub fn warmup(&self) -> usize {
+        let stop = match &self.stop {
+            StopConfig::AtrMultiple { period, .. } => period + 1,
+            StopConfig::FixedPct { .. } | StopConfig::FromComponent { .. } => 0,
+        };
         self.components
             .values()
             .map(|c| c.warmup())
             .max()
             .unwrap_or(0)
+            .max(stop)
     }
 
     /// Compute all component port values against the candle buffer ending at
@@ -675,9 +681,8 @@ pub fn compute_stop_price(
         StopConfig::FromComponent { component } => {
             // Component computes the absolute stop price (it can anchor wherever
             // makes sense — MR uses MA ± k·stdev, not entry ± distance).
-            // entry_price is unused here but kept in the signature so the
-            // backtest runner and live evaluator can call uniformly.
-            let _ = entry_price;
+            // The entry price doesn't enter into it; the signature keeps it
+            // so the backtest runner and live evaluator call uniformly.
             let comp = strategy.components.get(component)?;
             comp.stop_price(candles, direction)
         }

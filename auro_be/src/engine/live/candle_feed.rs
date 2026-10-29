@@ -42,6 +42,7 @@ use tokio::time::sleep;
 use crate::brokers::oanda::backfill::fetch_complete_since;
 use crate::brokers::oanda::{is_forex_market_open_at, INSTRUMENTS};
 use crate::db::repositories::{candles as candles_repo, live_queries, signal_events};
+use crate::engine::daily_bars;
 use crate::engine::types::{Candle, CandleBuffer, CandleRow, Granularity};
 use crate::state::AppState;
 
@@ -121,22 +122,36 @@ impl Cursor {
     }
 }
 
-pub fn spawn_candle_feed(state: AppState) {
-    tokio::spawn(async move {
-        prefill::run_prefill_rules(&state).await;
-        prefill::run_prefill_open_positions(&state).await;
-        prefill::run_prefill_buffers(&state).await;
+/// Attempts at the startup open-position load before carrying on without it
+/// (entries then wait for the minute-by-minute position sync).
+const PREFILL_ATTEMPTS: u32 = 3;
 
-        tracing::info!(
-            "Candle feed started ({} instruments x {} granularities)",
-            INSTRUMENTS.len(),
-            Granularity::ALL.len()
-        );
+/// Prefill, then run both lanes. Runs forever; started under a supervisor
+/// (`engine::live::spawn_supervised`), and the two lanes share this task so
+/// a panic in either restarts both together.
+pub async fn run_candle_feed(state: AppState) {
+    prefill::run_prefill_rules(&state).await;
+    for attempt in 1..=PREFILL_ATTEMPTS {
+        if prefill::run_prefill_open_positions(&state).await {
+            break;
+        }
+        if attempt < PREFILL_ATTEMPTS {
+            sleep(std::time::Duration::from_secs(5 * u64::from(attempt))).await;
+        }
+    }
+    prefill::run_prefill_buffers(&state).await;
 
-        let live_keys: LiveKeys = Arc::new(RwLock::new(HashSet::new()));
-        tokio::spawn(fast_lane(state.clone(), live_keys.clone()));
-        sweep(state, live_keys).await;
-    });
+    tracing::info!(
+        "Candle feed started ({} instruments x {} granularities)",
+        INSTRUMENTS.len(),
+        Granularity::ALL.len()
+    );
+
+    let live_keys: LiveKeys = Arc::new(RwLock::new(HashSet::new()));
+    tokio::join!(
+        fast_lane(state.clone(), live_keys.clone()),
+        sweep(state, live_keys)
+    );
 }
 
 /// Poll the enabled-strategy keys two seconds past every minute.
@@ -355,8 +370,10 @@ async fn ingest_closed_candles(
 
     for candle in candles {
         let is_newest = Some(candle.time) == newest_time;
-        let scope = if is_newest {
-            newest_is_fresh.then_some(EvalScope::Full)
+        // A late newest bar can't open a trade, but an open position still
+        // takes its exit on it, like any catch-up bar.
+        let scope = if is_newest && newest_is_fresh {
+            Some(EvalScope::Full)
         } else if has_open_position(state, instrument, granularity).await {
             Some(EvalScope::ExitsOnly)
         } else {
@@ -367,6 +384,20 @@ async fn ingest_closed_candles(
             let mut buffers = state.live.buffers.write().await;
             let Some(buffer) = buffers.get_mut(&key) else {
                 return Ok(());
+            };
+            // The weekend's stub bar waits at the end of the buffer for the
+            // bar after it, then folds into it (`daily_bars`), as the loaders
+            // fold stored history.
+            let candle = match buffer.candles.last() {
+                Some(last)
+                    if candle.time > last.time
+                        && daily_bars::is_stub(instrument, granularity, last) =>
+                {
+                    let merged = daily_bars::merge(last, &candle);
+                    buffer.candles.pop();
+                    merged
+                }
+                _ => candle,
             };
             if !buffer.push(candle) {
                 continue;
@@ -441,12 +472,18 @@ async fn evaluate_bar(
     }
 }
 
-/// A bar "just closed" if its close is no more than one bar-length ago. Bars
-/// older than that are catch-up history and must not trigger trades.
+/// Longest a bar's close may be past for it to still open a trade: the
+/// backtest fills at the close, so an entry long after it (a daily bar seen
+/// hours late after a restart) trades a price the strategy never tested.
+const ENTRY_LATENESS_CAP: Duration = Duration::minutes(15);
+
+/// A bar "just closed" if its close is no more than one bar-length ago, and
+/// never more than `ENTRY_LATENESS_CAP`. Older bars are catch-up history and
+/// must not trigger trades.
 fn just_closed(candle: &Candle, granularity: Granularity, now: DateTime<Utc>) -> bool {
     let bar = Duration::minutes(granularity.minutes());
     let close_time = candle.time + bar;
-    now - close_time <= bar
+    now - close_time <= bar.min(ENTRY_LATENESS_CAP)
 }
 
 /// Poll while OANDA's weekly session is open and for a short grace after
@@ -487,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn just_closed_accepts_bar_within_one_bar_length_of_close() {
+    fn just_closed_accepts_a_bar_up_to_the_lateness_cap() {
         let open = Utc.with_ymd_and_hms(2026, 10, 13, 14, 0, 0).unwrap();
         let c = candle_at(open);
         let close = open + Duration::hours(1);
@@ -500,12 +537,25 @@ mod tests {
         assert!(just_closed(
             &c,
             Granularity::H1,
-            close + Duration::minutes(60)
+            close + Duration::minutes(15)
         ));
         assert!(!just_closed(
             &c,
             Granularity::H1,
-            close + Duration::minutes(61)
+            close + Duration::minutes(16)
+        ));
+        // A 5-minute bar is late after one bar length, before the cap.
+        let m5 = candle_at(open);
+        let m5_close = open + Duration::minutes(5);
+        assert!(just_closed(
+            &m5,
+            Granularity::M5,
+            m5_close + Duration::minutes(5)
+        ));
+        assert!(!just_closed(
+            &m5,
+            Granularity::M5,
+            m5_close + Duration::minutes(6)
         ));
     }
 
@@ -520,6 +570,8 @@ mod tests {
             Granularity::D,
             close + Duration::minutes(5)
         ));
+        // Hours late is too late to enter on, though within a day.
+        assert!(!just_closed(&c, Granularity::D, close + Duration::hours(3)));
         assert!(!just_closed(&c, Granularity::D, close + Duration::days(2)));
     }
 

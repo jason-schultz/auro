@@ -9,6 +9,7 @@ defmodule Opus.Trading.SignalChart do
   from the first candle in the window.
   """
 
+  import Opus.Utils.Time, only: [parse_iso8601!: 1]
   alias Opus.Trading.{Blocks, StrategyWords}
 
   @type trade :: %{
@@ -54,17 +55,12 @@ defmodule Opus.Trading.SignalChart do
 
   defp candle(bar) do
     %{
-      time: datetime(bar["time"]),
+      time: parse_iso8601!(bar["time"]),
       open: bar["open"],
       high: bar["high"],
       low: bar["low"],
       close: bar["close"]
     }
-  end
-
-  defp datetime(text) do
-    {:ok, at, _offset} = DateTime.from_iso8601(text)
-    at
   end
 
   # Signals come in pairs, entry then exit; an entry with no exit is the
@@ -86,7 +82,7 @@ defmodule Opus.Trading.SignalChart do
     )
     |> Enum.with_index()
     |> Enum.flat_map(fn {{entry, exit}, id} ->
-      entry_at = datetime(entry["time"])
+      entry_at = parse_iso8601!(entry["time"])
 
       case Map.fetch(index, entry_at) do
         {:ok, entry_index} -> [trade(id, entry, entry_index, entry_at, exit, index)]
@@ -96,7 +92,7 @@ defmodule Opus.Trading.SignalChart do
   end
 
   defp trade(id, entry, entry_index, entry_at, exit, index) do
-    exit_at = exit && datetime(exit["time"])
+    exit_at = exit && parse_iso8601!(exit["time"])
 
     %{
       id: id,

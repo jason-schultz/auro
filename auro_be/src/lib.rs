@@ -10,15 +10,18 @@ use std::sync::Arc;
 
 use crate::brokers::massive::client::MassiveClient;
 use brokers::oanda::client::OandaClient;
-use brokers::oanda::stream::spawn_price_stream;
+use brokers::oanda::stream::run_price_stream;
 use brokers::oanda::{is_forex_market_open, INSTRUMENTS};
 use brokers::questrade::client::QuestradeClient;
 use brokers::wealthsimple::client::WealthsimpleClient;
 use config::Config;
-use engine::live::account_cache::spawn_account_refresher;
-use engine::live::candle_feed::spawn_candle_feed;
+use engine::live::account_cache::run_account_refresher;
+use engine::live::candle_feed::run_candle_feed;
 use engine::live::instrument_cache::load_instrument_metadata;
-use engine::live::quotes::spawn_quote_tracker;
+use engine::live::instrument_cache::run_metadata_reload;
+use engine::live::position_sync::spawn_position_sync;
+use engine::live::quotes::run_quote_tracker;
+use engine::live::spawn_supervised;
 use state::{AppState, LiveState};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -149,12 +152,38 @@ pub async fn run() -> anyhow::Result<()> {
         *cache = instrument_metadata;
     }
 
-    spawn_quote_tracker(price_tx.subscribe(), state.clone());
-    spawn_candle_feed(state.clone());
-    spawn_account_refresher(state.clone());
+    // Long-lived tasks run supervised: one that stops or panics starts again.
+    {
+        let (state, tx) = (state.clone(), price_tx.clone());
+        spawn_supervised("quote tracker", move || {
+            run_quote_tracker(tx.subscribe(), state.clone())
+        });
+    }
+    {
+        let state = state.clone();
+        spawn_supervised("candle feed", move || run_candle_feed(state.clone()));
+    }
+    {
+        let state = state.clone();
+        spawn_supervised("account refresher", move || {
+            run_account_refresher(state.clone())
+        });
+    }
+    spawn_position_sync(state.clone());
+    {
+        let state = state.clone();
+        spawn_supervised("instrument metadata reload", move || {
+            run_metadata_reload(state.clone())
+        });
+    }
 
     let stream_instruments: Vec<String> = INSTRUMENTS.iter().map(|s| s.to_string()).collect();
-    spawn_price_stream(state.oanda.clone(), stream_instruments, price_tx.clone());
+    {
+        let (oanda, tx) = (state.oanda.clone(), price_tx.clone());
+        spawn_supervised("price stream", move || {
+            run_price_stream(oanda.clone(), stream_instruments.clone(), tx.clone())
+        });
+    }
 
     let app = api::router()
         .layer(

@@ -24,46 +24,113 @@ defmodule Opus.Dashboard do
   alias Opus.Repo
   alias Opus.Trading.Strategies
 
+  require Logger
+
   @day_seconds 86_400
+
+  # What the alert calls each part of the gather when it fails.
+  @section_names %{
+    health: "engine health",
+    books: "paper options books",
+    ideas: "options ideas",
+    exposure: "index exposure",
+    live_open: "open live trades",
+    suspensions: "circuit-breaker suspensions",
+    drift: "live vs backtest checks",
+    account_pause: "drawdown pause",
+    failed_jobs: "failed jobs",
+    live_closes: "live trades closed today",
+    nav_age: "account numbers",
+    paper: "open paper trades",
+    paper_events: "paper book events",
+    book_tiles: "paper book tiles",
+    live: "live trading tile"
+  }
+
+  @no_live %{engine_up: false, open_trades: 0, nav: nil, nav_change: nil}
 
   @doc """
   Everything but the broker balances: `:input` for the alert rules and the
   data for the tiles.
+
+  Each part is read on its own (`section/4`): one that raises is logged,
+  shown empty and named in an alert, so the others (the safety alerts above
+  all) still go out.
   """
   @spec gather(DateTime.t()) :: map()
   def gather(now \\ DateTime.utc_now()) do
-    health = Client.get_live_health()
-    books = Enum.map(Paper.books(), &{&1, Paper.book(&1)})
-    {scanned_on, ideas} = Options.latest_ideas()
-    exposure = IndexExposure.current(DateTime.to_date(now))
+    today = DateTime.to_date(now)
 
-    live_open = live_positions()
+    {s, failed} =
+      {%{}, []}
+      |> section(:health, {:error, :unread}, &Client.get_live_health/0)
+      |> section(:books, [], fn -> Enum.map(Paper.books(), &{&1, Paper.book(&1)}) end)
+      |> section(:ideas, {nil, []}, &Options.latest_ideas/0)
+      |> section(:exposure, nil, fn -> IndexExposure.current(today) end)
+      |> section(:live_open, [], &live_positions/0)
+      |> section(:suspensions, [], &suspensions/0)
+      |> section(:drift, [], &drift/0)
+      |> section(:account_pause, nil, &account_pause/0)
+      |> section(:failed_jobs, [], fn -> failed_jobs(now) end)
+      |> section(:live_closes, [], fn -> live_closes(now) end)
+      |> section(:nav_age, nil, fn -> nav_age(now) end)
+
+    {s, failed} =
+      {s, failed}
+      |> section(:paper, [], fn -> Enum.flat_map(s.books, &paper_trades/1) end)
+      |> section(:paper_events, [], fn -> paper_events(s.books) end)
+      |> section(:book_tiles, [], fn -> Enum.map(s.books, &book_tile/1) end)
+      |> section(:live, @no_live, fn -> live(s.health) end)
+
+    {scanned_on, ideas} = s.ideas
 
     input = %{
       now: now,
-      today: DateTime.to_date(now),
-      engine: engine(health),
-      candle_age: candle_age(health),
-      suspensions: suspensions(),
-      drift: drift(),
-      account_pause: account_pause(),
-      failed_jobs: failed_jobs(now),
+      today: today,
+      engine: if(:health in failed, do: :unknown, else: engine(s.health)),
+      candle_age: candle_age(s.health),
+      untracked_trades: untracked_trades(s.health),
+      hedging: hedging(s.health),
+      nav_age: s.nav_age,
+      suspensions: s.suspensions,
+      drift: s.drift,
+      account_pause: s.account_pause,
+      failed_jobs: s.failed_jobs,
+      failed_sections: failed |> Enum.reverse() |> Enum.map(&Map.fetch!(@section_names, &1)),
       offline_brokers: [],
-      exposure: exposure,
-      paper: Enum.flat_map(books, &paper_trades/1),
-      paper_events: paper_events(books),
-      live_opens: Enum.filter(live_open, &opened_since?(&1, now)),
-      live_closes: live_closes(now),
+      exposure: s.exposure,
+      paper: s.paper,
+      paper_events: s.paper_events,
+      live_opens: Enum.filter(s.live_open, &opened_since?(&1, now)),
+      live_closes: s.live_closes,
       ideas: scanned_on && %{count: length(ideas), scanned_on: scanned_on}
     }
 
     %{
       input: input,
-      live: live(health),
-      books: Enum.map(books, &book_tile/1),
-      positions: live_open ++ input.paper,
-      exposure: exposure
+      live: s.live,
+      books: s.book_tiles,
+      positions: s.live_open ++ input.paper,
+      exposure: s.exposure
     }
+  end
+
+  @doc """
+  Runs one part of the gather, adding its value under `name` to the
+  accumulated `{values, failed}`. A part that raises or exits is logged
+  with its name and stands in as `default`, and its name joins `failed`.
+  """
+  @spec section({map(), [atom()]}, atom(), term(), (-> term())) :: {map(), [atom()]}
+  def section({values, failed}, name, default, fun) do
+    {Map.put(values, name, fun.()), failed}
+  rescue
+    e ->
+      Logger.error("[Dashboard] #{name} failed: " <> Exception.format(:error, e, __STACKTRACE__))
+      {Map.put(values, name, default), [name | failed]}
+  catch
+    :exit, reason ->
+      Logger.error("[Dashboard] #{name} exited: #{inspect(reason)}")
+      {Map.put(values, name, default), [name | failed]}
   end
 
   @doc "The alerts for gathered inputs, with any offline brokers added."
@@ -106,6 +173,20 @@ defmodule Opus.Dashboard do
     do: age
 
   defp candle_age(_health), do: nil
+
+  # Trades open at OANDA the engine isn't tracking. An older engine doesn't
+  # report them: nothing to say.
+  defp untracked_trades({:ok, %{"untracked_trades" => trades}}) when is_list(trades) do
+    for %{"id" => id} = t <- trades,
+        do: %{id: to_string(id), instrument: t["instrument"], units: t["units"]}
+  end
+
+  defp untracked_trades(_health), do: []
+
+  # Whether the OANDA account allows opposite trades on one instrument; nil
+  # when the engine doesn't say.
+  defp hedging({:ok, %{"hedging_enabled" => hedging}}) when is_boolean(hedging), do: hedging
+  defp hedging(_health), do: nil
 
   defp account_pause do
     case AccountPause.open() do
@@ -484,13 +565,26 @@ defmodule Opus.Dashboard do
     }
   end
 
+  # Seconds since the engine last stored the account's numbers, or nil
+  # before it ever has.
+  defp nav_age(now) do
+    from(s in "account_snapshots",
+      order_by: [desc: s.timestamp],
+      limit: 1,
+      select: type(s.timestamp, :utc_datetime_usec)
+    )
+    |> Repo.one()
+    |> then(&(&1 && DateTime.diff(now, &1)))
+  end
+
   defp latest_nav do
     from(s in "account_snapshots", order_by: [desc: s.timestamp], limit: 1, select: s.nav)
     |> Repo.one()
   end
 
   defp first_nav_today do
-    midnight = DateTime.new!(Date.utc_today(), ~T[00:00:00])
+    # Today starts at midnight New York, like every other "today" on the page.
+    midnight = Opus.Clock.midnight(Opus.Clock.today())
 
     from(s in "account_snapshots",
       where: s.timestamp >= ^midnight,

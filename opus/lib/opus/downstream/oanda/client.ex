@@ -112,13 +112,18 @@ defmodule Opus.Oanda.Client do
 
   defp client do
     Req.new(
-      base_url: base_url(),
-      headers: [
-        {"Authorization", "Bearer #{api_key()}"},
-        {"Content-Type", "application/json"}
-      ]
+      [
+        base_url: base_url(),
+        headers: [
+          {"Authorization", "Bearer #{api_key()}"},
+          {"Content-Type", "application/json"}
+        ]
+      ] ++ req_options()
     )
   end
+
+  # Extra Req options from config (tests route requests to a Req.Test stub).
+  defp req_options, do: Application.get_env(:opus, __MODULE__, [])[:req_options] || []
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}})
        when status in 200..299 do

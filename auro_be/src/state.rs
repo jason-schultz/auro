@@ -40,6 +40,21 @@ pub struct LiveState {
     pub last_candle_persisted: RwLock<Option<DateTime<Utc>>>,
     pub last_quotes: RwLock<HashMap<String, LastQuote>>,
     pub rules: RwLock<Rules>,
+    /// Whether `open_positions` has been checked against OANDA since
+    /// startup (prefill or a position sync). Entries wait until it has:
+    /// a map that missed a trade OANDA holds would open a duplicate.
+    pub positions_known: RwLock<bool>,
+    /// Trades open at OANDA with no `live_trades` row, so nothing manages
+    /// them beyond their own stop; from the last position sync.
+    pub untracked_trades: RwLock<Vec<UntrackedTrade>>,
+}
+
+/// A trade OANDA holds that Auro has no record of.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UntrackedTrade {
+    pub id: String,
+    pub instrument: String,
+    pub units: String,
 }
 
 impl LiveState {
@@ -54,6 +69,8 @@ impl LiveState {
             last_candle_persisted: RwLock::new(None),
             last_quotes: RwLock::new(HashMap::new()),
             rules: RwLock::new(Rules::default()),
+            positions_known: RwLock::new(false),
+            untracked_trades: RwLock::new(Vec::new()),
         }
     }
 }

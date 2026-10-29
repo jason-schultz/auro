@@ -185,7 +185,17 @@ fn backtest_all(
             })
             .collect::<Vec<_>>()
             .into_iter()
-            .flat_map(|handle| handle.join().unwrap_or_default())
+            .zip(jobs.chunks(per_thread))
+            .flat_map(|(handle, chunk)| {
+                // A worker that panicked loses its chunk; each of its plays
+                // is reported as failed rather than silently missing.
+                handle.join().unwrap_or_else(|_| {
+                    chunk
+                        .iter()
+                        .map(|job| (job.0.clone(), Err("its backtest crashed".to_string())))
+                        .collect()
+                })
+            })
             .collect()
     });
 

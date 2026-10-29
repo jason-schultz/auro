@@ -34,15 +34,20 @@ defmodule Opus.Journal do
     agg =
       from(lt in base_query,
         select: %{
+          # Wins and losses by the money made, or by the price move where
+          # an old trade never had its money recorded (pnl NULL, May–Aug):
+          # a stop-out is a loss either way, never a scratch.
           trade_count: fragment("COUNT(*)::int"),
-          win_count: fragment("COUNT(*) FILTER (WHERE ? > 0)::int", lt.pnl),
-          loss_count: fragment("COUNT(*) FILTER (WHERE ? < 0)::int", lt.pnl),
-          breakeven_count:
-            fragment("COUNT(*) FILTER (WHERE abs(COALESCE(?, 0)) <= 1)::int", lt.pnl),
+          win_count:
+            fragment("COUNT(*) FILTER (WHERE COALESCE(?, ?) > 0)::int", lt.pnl, lt.pnl_percent),
+          loss_count:
+            fragment("COUNT(*) FILTER (WHERE COALESCE(?, ?) < 0)::int", lt.pnl, lt.pnl_percent),
+          breakeven_count: fragment("COUNT(*) FILTER (WHERE abs(?) <= 1)::int", lt.pnl),
           win_rate_pct:
             fragment(
-              "COALESCE(ROUND((COUNT(*) FILTER (WHERE ? > 0)::numeric / NULLIF(COUNT(*), 0)::numeric) * 100, 1), 0)::float8",
-              lt.pnl
+              "COALESCE(ROUND((COUNT(*) FILTER (WHERE COALESCE(?, ?) > 0)::numeric / NULLIF(COUNT(*), 0)::numeric) * 100, 1), 0)::float8",
+              lt.pnl,
+              lt.pnl_percent
             ),
           total_pnl_cad: fragment("COALESCE(SUM(?), 0)::float8", lt.pnl),
           avg_win_cad:

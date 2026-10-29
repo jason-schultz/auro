@@ -52,12 +52,18 @@ defmodule OpusWeb.OptionsLive do
      )
      |> assign_chain(nil, nil)
      |> assign_ideas()
-     |> assign(paper: nil, all_books: [], paper_counts: Paper.open_counts())}
+     |> assign(
+       paper: nil,
+       all_books: [],
+       paper_counts: Paper.open_counts(),
+       paper_pnl: Paper.total_pnl()
+     )}
   end
 
   # Three views behind tabs, each with its own URL so they can be
-  # bookmarked: `/options` is the workbench, `?view=custom` a contract typed
-  # by hand, `?view=paper` the books. On the books `&book=` picks a book (all
+  # bookmarked: `/options` (or `?view=paper`) the paper books, which open
+  # first, `?view=workbench` the workbench and `?view=custom` a contract
+  # typed by hand. On the books `&book=` picks a book (all
   # five side by side by default), `&trade=` one of its trades (the wheel's
   # by underlying, the others' by id) and `&leg=` one of its legs.
   @impl true
@@ -67,12 +73,15 @@ defmodule OpusWeb.OptionsLive do
       else: all_books_params(socket)
   end
 
+  def handle_params(%{"view" => "workbench"}, _uri, socket),
+    do: {:noreply, assign(socket, view: "workbench")}
+
   def handle_params(%{"view" => "custom"}, _uri, socket) do
     params = socket.assigns.params
     {:noreply, socket |> assign(view: "custom") |> fill_from_chain(params, params)}
   end
 
-  def handle_params(_params, _uri, socket), do: {:noreply, assign(socket, view: "workbench")}
+  def handle_params(_params, _uri, socket), do: all_books_params(socket)
 
   defp all_books_params(socket) do
     {:noreply,
@@ -81,6 +90,7 @@ defmodule OpusWeb.OptionsLive do
        paper: nil,
        all_books: Enum.map(Paper.books(), &Paper.book/1),
        paper_counts: Paper.open_counts(),
+       paper_pnl: Paper.total_pnl(),
        trade: nil,
        leg: nil,
        paper_analysis: nil
@@ -97,6 +107,7 @@ defmodule OpusWeb.OptionsLive do
        view: "paper",
        paper: paper,
        paper_counts: Paper.open_counts(),
+       paper_pnl: Paper.total_pnl(),
        paper_underlyings: paper_underlyings(book, paper),
        trade: trade,
        leg: leg,
@@ -405,7 +416,7 @@ defmodule OpusWeb.OptionsLive do
   defp parse_date(_), do: nil
 
   defp expiry_option(date),
-    do: "#{Calendar.strftime(date, "%b %-d, %Y")} · #{Date.diff(date, Date.utc_today())}d"
+    do: "#{Calendar.strftime(date, "%b %-d, %Y")} · #{Date.diff(date, Opus.Clock.today())}d"
 
   defp strike_option(%{at_the_money: true} = row), do: "#{plain(row.strike)} · at the money"
   defp strike_option(row), do: plain(row.strike)
@@ -441,20 +452,24 @@ defmodule OpusWeb.OptionsLive do
         </header>
 
         <nav aria-label="Options views" class="flex gap-1 border-b border-base-300">
-          <.view_tab view="workbench" current={@view} path={~p"/options"}>
+          <.view_tab view="paper" current={@view} path={~p"/options"}>
+            <.t {copy("Paper book")} />
+            <span
+              :if={@paper_counts != %{}}
+              title={open_words(@paper_counts |> Map.values() |> Enum.sum())}
+              class={[
+                "rounded-full px-1.5 text-[11px] font-medium tabular-nums",
+                if(@paper_pnl >= 0, do: "bg-success/15 text-success", else: "bg-error/15 text-error")
+              ]}
+            >
+              {signed_money(@paper_pnl)}
+            </span>
+          </.view_tab>
+          <.view_tab view="workbench" current={@view} path={~p"/options?view=workbench"}>
             <.t {copy("Workbench")} />
           </.view_tab>
           <.view_tab view="custom" current={@view} path={~p"/options?view=custom"}>
             <.t {copy("Your own contract")} />
-          </.view_tab>
-          <.view_tab view="paper" current={@view} path={~p"/options?view=paper"}>
-            <.t {copy("Paper book")} />
-            <span
-              :if={@paper_counts != %{}}
-              class="rounded-full bg-base-300 px-1.5 text-[11px] font-medium text-base-content"
-            >
-              {@paper_counts |> Map.values() |> Enum.sum()} open
-            </span>
           </.view_tab>
         </nav>
 
@@ -829,7 +844,7 @@ defmodule OpusWeb.OptionsLive do
               value={Date.to_iso8601(e)}
               selected={e == @chain.expiration}
             >
-              {Calendar.strftime(e, "%b %-d")} · {Date.diff(e, Date.utc_today())}d
+              {Calendar.strftime(e, "%b %-d")} · {Date.diff(e, Opus.Clock.today())}d
             </option>
           </select>
         </label>
@@ -1407,4 +1422,7 @@ defmodule OpusWeb.OptionsLive do
   defp odds_tone(p) when is_number(p) and p >= 0.5, do: :good
   defp odds_tone(p) when is_number(p), do: :bad
   defp odds_tone(_), do: :neutral
+
+  defp open_words(1), do: "1 trade open"
+  defp open_words(n), do: "#{n} trades open"
 end

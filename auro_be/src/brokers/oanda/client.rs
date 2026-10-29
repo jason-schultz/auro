@@ -8,7 +8,7 @@ use tokio::time::Instant;
 use super::models::*;
 use crate::brokers::client::BrokerClient;
 use crate::brokers::{BrokerAccount, BrokerKind, BrokerStatus};
-use crate::engine::pipeline::instrument_to_class;
+use crate::engine::pipeline::{instrument_class, InstrumentClass};
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone)]
@@ -96,7 +96,7 @@ impl OandaClient {
             AppError::Oanda(format!(
                 "Failed to parse account response: {} | Body: {}",
                 e,
-                &body[..body.len().min(500)]
+                body.chars().take(500).collect::<String>()
             ))
         })?;
 
@@ -240,11 +240,16 @@ impl OandaClient {
     // --- Orders ---
     /// Market order with a server-side stop loss. Every live entry carries
     /// the stop its strategy config computed; exits are strategy-driven.
+    /// A fill-or-kill market order with its stop attached. `client_id`
+    /// labels the trade it opens (`tradeClientExtensions.id`), so a trade
+    /// whose response was lost (a timeout after the fill) can be found in
+    /// the open trades and tracked instead of left unmanaged.
     pub async fn create_market_order(
         &self,
         instrument: &str,
         units: &str,
         stop_loss_price: &str,
+        client_id: &str,
     ) -> AppResult<serde_json::Value> {
         let url = format!("{}/v3/accounts/{}/orders", self.base_url, self.account_id);
 
@@ -256,6 +261,7 @@ impl OandaClient {
                 "timeInForce": "FOK",
                 "positionFill": "DEFAULT",
                 "stopLossOnFill": {"price": stop_loss_price, "timeInForce": "GTC"},
+                "tradeClientExtensions": {"id": client_id, "tag": "auro"},
             }
         });
 
@@ -512,7 +518,7 @@ fn candle_query(
         ("granularity", granularity.to_string()),
         ("price", "BAM".to_string()),
     ];
-    if granularity == "D" && instrument_to_class(instrument) == "index" {
+    if granularity == "D" && instrument_class(instrument) == InstrumentClass::Index {
         query.push(("dailyAlignment", "16".to_string()));
         query.push(("alignmentTimezone", "America/New_York".to_string()));
     }

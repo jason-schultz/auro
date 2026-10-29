@@ -70,7 +70,7 @@ defmodule OpusWeb.OptionsIdeasTest do
   end
 
   test "the page lists the latest scan's ideas and Analyze fills the form from one", %{conn: conn} do
-    {:ok, view, html} = live(conn, ~p"/options")
+    {:ok, view, html} = live(conn, ~p"/options?view=workbench")
 
     assert html =~ "Oct 24 scan · 1 idea"
     assert html =~ "IWM $235.00 call"
@@ -93,7 +93,7 @@ defmodule OpusWeb.OptionsIdeasTest do
   end
 
   test "dismissing an idea takes it off the list", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/options")
+    {:ok, view, _html} = live(conn, ~p"/options?view=workbench")
     [%Idea{id: id}] = Repo.all(Idea)
 
     html = view |> element("#idea-#{id} button[aria-label=Dismiss]") |> render_click()
@@ -104,7 +104,7 @@ defmodule OpusWeb.OptionsIdeasTest do
 
   test "with no scan recorded the section says so", %{conn: conn} do
     Repo.delete_all(Idea)
-    {:ok, _view, html} = live(conn, ~p"/options")
+    {:ok, _view, html} = live(conn, ~p"/options?view=workbench")
     assert html =~ "The scan runs on trading days at 9:15 and 10:15 New York"
   end
 end

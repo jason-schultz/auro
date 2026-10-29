@@ -1,5 +1,8 @@
 # Auro TODO
 
+> **Current roadmap: [`research/roadmap.md`](research/roadmap.md)** (Oct 29, 2026).
+> The list below is the original from the project's start and is mostly out of date.
+
 ## Bugs / Refinements
 - [ ] Real-time candle update overwrites OHLC — should only update close and extend high/low
 - [ ] Price panel order jumps around — add consistent sorting (alphabetical or by category)

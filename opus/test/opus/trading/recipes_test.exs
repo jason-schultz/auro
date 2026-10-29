@@ -136,6 +136,6 @@ defmodule Opus.Trading.RecipesTest do
              Recipes.run_tests(recipe, "SPX500_USD")
 
     assert [%{instrument: "SPX500_USD", stages: %{backtest: %{status: :pending}}}] =
-             StrategyResults.for_recipe(recipe.definition)
+             StrategyResults.for_recipe(recipe.definition, "D")
   end
 end

@@ -187,12 +187,13 @@ defmodule Opus.Options.PaperBooksTest do
     assert html =~ "half was sold at double"
   end
 
+  # A held contract quoted during the session (`Opus.Options.IntradayWorker`).
   defp quote_at(captured_at, contract_id, bid, ask, spot \\ @spot) do
     Repo.insert_all("option_quotes", [
       %{
         ticker: "Q",
         captured_at: captured_at,
-        source: "questrade",
+        source: "questrade_legs",
         spot: spot,
         bid: bid,
         ask: ask,
@@ -200,6 +201,21 @@ defmodule Opus.Options.PaperBooksTest do
         contract_id: contract_id
       }
     ])
+  end
+
+  test "a later session quote of the held contracts doesn't replace the chain", %{ids: ids} do
+    {:ok, _} = Paper.run("put_spread", "QQQ")
+    quote_at(~N[2026-10-23 14:15:00], ids[{"put", 590.0}], 3.0, 3.05)
+    quote_at(~N[2026-10-23 14:15:00], ids[{"put", 560.0}], 1.0, 1.04)
+
+    chain = Opus.Options.snapshot("QQQ")
+    assert length(chain) == length(@chain)
+    assert Enum.all?(chain, &(&1.captured_at == ~N[2026-10-23 14:00:03.000000]))
+
+    # Another book still picks from the whole chain: the condor's call legs
+    # aren't among the held contracts.
+    {:ok, _} = Paper.run("iron_condor", "QQQ")
+    assert Paper.open_contracts()["QQQ"] |> length() == 6
   end
 
   test "an intraday quote that reaches the take-profit fills it, like a resting order",

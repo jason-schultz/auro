@@ -6,7 +6,7 @@ defmodule OpusWeb.OptionsLiveTest do
   alias Opus.Options
 
   test "renders the form with a cash-secured put as the default", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/options")
+    {:ok, _view, html} = live(conn, ~p"/options?view=workbench")
     assert html =~ "Your own contract"
     refute html =~ "Show me what happens"
 

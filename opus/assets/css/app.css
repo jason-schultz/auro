@@ -129,10 +129,14 @@
   --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
 }
 
-/* WSB headings get the chunkier display face. */
+/* Each theme is one typeface throughout: the serious theme Instrument Sans,
+   WSB Bricolage Grotesque (chunky at headline size, calm at body size). */
+[data-theme="wsb"] {
+  --font-sans: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+}
+
 [data-theme="wsb"] h1,
 [data-theme="wsb"] h2 {
-  font-family: "Space Grotesk", "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
   font-weight: 700;
   letter-spacing: -0.02em;
 }

@@ -365,8 +365,13 @@ pub struct SnapshotChain {
     pub window: ChainWindow,
 }
 
-/// Which vendor's quote a snapshot row holds.
-const QUOTE_SOURCE: &str = "questrade";
+/// Which vendor's quote a row holds, and from which capture: a whole-chain
+/// snapshot, or the held contracts quoted during the session. Opus reads
+/// "the latest chain" from chain snapshots only, so a few held-contract
+/// quotes never stand in for the chain (`Opus.Options.latest_quotes/1`).
+/// `option_quotes.source` is varchar(16).
+const CHAIN_SOURCE: &str = "questrade";
+const HELD_SOURCE: &str = "questrade_legs";
 
 /// The underlying's price for the strike band and the stored `spot`: the
 /// last trade, or the bid/ask mid when nothing has traded.
@@ -417,7 +422,7 @@ pub async fn snapshot_option_chain(
     let stored = options_repo::upsert_contracts(&state.db, instrument.id, &specs, captured_at)
         .await
         .map_err(AppError::Database)?;
-    let rows = quote_rows(&selected, &stored, &quotes, spot, captured_at);
+    let rows = quote_rows(&selected, &stored, &quotes, spot, captured_at, CHAIN_SOURCE);
     let quotes_stored = options_repo::insert_quotes(&state.db, &rows)
         .await
         .map_err(AppError::Database)?;
@@ -509,7 +514,7 @@ pub async fn quote_option_contracts(
     };
     drop(client);
 
-    let rows = quote_rows(&selected, &stored, &quotes, spot, captured_at);
+    let rows = quote_rows(&selected, &stored, &quotes, spot, captured_at, HELD_SOURCE);
     let quotes_stored = options_repo::insert_quotes(&state.db, &rows)
         .await
         .map_err(AppError::Database)?;
@@ -563,6 +568,7 @@ fn quote_rows(
     quotes: &[OptionQuote],
     spot: f64,
     captured_at: DateTime<Utc>,
+    source: &str,
 ) -> Vec<OptionQuoteRow> {
     let tickers: HashMap<i64, &str> = selected
         .iter()
@@ -578,7 +584,7 @@ fn quote_rows(
                 contract_id,
                 ticker: ticker.to_string(),
                 captured_at,
-                source: QUOTE_SOURCE.to_string(),
+                source: source.to_string(),
                 spot,
                 bid: q.bid_price,
                 ask: q.ask_price,
@@ -769,6 +775,7 @@ mod tests {
             &[option_quote(42), option_quote(43)],
             769.05,
             captured_at,
+            CHAIN_SOURCE,
         );
         assert_eq!(rows.len(), 1);
         let row = &rows[0];

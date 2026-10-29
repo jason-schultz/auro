@@ -71,18 +71,44 @@ defmodule Opus.Options.PaperTest do
     assert book.started_on == ~D[2026-10-23]
   end
 
+  @tag :capture_log
+  test "a chain captured before the 09:30 New York open isn't traded on" do
+    # 13:00 UTC is 09:00 New York: the pre-open capture, yesterday's quotes.
+    Repo.update_all("option_quotes", set: [captured_at: ~N[2026-10-23 13:00:03]])
+
+    assert {:skipped, :stale_snapshot} = Paper.run_underlying("SPY")
+    assert Repo.all(Event) == []
+  end
+
+  @tag :capture_log
+  test "a book and underlying that raises doesn't stop the others" do
+    config = Application.fetch_env!(:opus, Paper)
+    on_exit(fn -> Application.put_env(:opus, Paper, config) end)
+    # Without a commission the SPY wheel can't book its sale.
+    Application.put_env(:opus, Paper, Keyword.delete(config, :commission))
+
+    results = Paper.run()
+
+    assert {"wheel", "SPY", {:error, %ArithmeticError{}}} =
+             List.keyfind(results, "wheel", 0)
+
+    assert {"wheel", "IWM", {:skipped, :no_snapshot}} in results
+    assert length(results) > 2
+    assert Repo.all(Position) == []
+  end
+
   test "an underlying with no stored chain is skipped" do
     assert {:skipped, :no_snapshot} = Paper.run_underlying("IWM")
   end
 
   test "the paper book has its own tab", %{conn: conn} do
-    {:ok, view, html} = live(conn, ~p"/options")
+    {:ok, view, html} = live(conn, ~p"/options?view=workbench")
     assert html =~ "Paper book"
     refute html =~ "the first trades open at the next 10:30"
 
-    # The tab opens on all five books side by side.
+    # The tab, first in line, opens on all the books side by side.
     html = view |> element("nav a", "Paper book") |> render_click()
-    assert_patch(view, ~p"/options?view=paper")
+    assert_patch(view, ~p"/options")
     assert html =~ "All books"
     assert html =~ "not started"
 
@@ -91,7 +117,7 @@ defmodule Opus.Options.PaperTest do
 
     Paper.run_underlying("SPY")
     {:ok, _view, html} = live(conn, ~p"/options?view=paper")
-    assert html =~ "1 open"
+    assert html =~ "1 trade open"
     assert html =~ "Too early to judge"
 
     {:ok, _view, html} = live(conn, ~p"/options?view=paper&book=wheel")

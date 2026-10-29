@@ -42,3 +42,6 @@ config :opus, start_scheduled_workers: false
 config :opus, Opus.Dashboard.Discord,
   webhook_url: "https://discord.test/api/webhooks/1/test",
   req_options: [plug: {Req.Test, Opus.Dashboard.Discord}, retry: false]
+
+# OANDA calls go to a Req.Test stub, never to the real account.
+config :opus, Opus.Oanda.Client, req_options: [plug: {Req.Test, Opus.Oanda.Client}, retry: false]

@@ -62,6 +62,28 @@ defmodule Opus.Trading.AccountLimits do
     {min, max}
   end
 
+  @doc """
+  Whether changing `setting` (as the change log names it) from `old` to
+  `new` loosens it: a higher limit, or exempting a strategy from the breaker.
+  """
+  @spec loosens?(String.t() | atom(), term(), term()) :: boolean()
+  def loosens?(setting, old, new) when is_binary(setting) and setting != "circuit_breaker_exempt",
+    do: loosens?(String.to_existing_atom(setting), number(old), number(new))
+
+  def loosens?("circuit_breaker_exempt", _old, new), do: new in [true, "true"]
+
+  def loosens?(key, old, new) when is_atom(key) do
+    {^key, _kind, _min, _max, raising_loosens} = List.keyfind!(@settings, key, 0)
+    raising_loosens and new > old
+  end
+
+  defp number(value) when is_number(value), do: value
+
+  defp number(text) when is_binary(text) do
+    {value, _} = Float.parse(text)
+    value
+  end
+
   @doc "The limits, or nil before the migration that sets them has run."
   @spec get() :: t() | nil
   def get do
@@ -71,11 +93,9 @@ defmodule Opus.Trading.AccountLimits do
   end
 
   defp parse(%{"since" => since} = value) do
-    {:ok, since, _} = DateTime.from_iso8601(since)
-
     keys()
     |> Map.new(&{&1, Map.fetch!(value, Atom.to_string(&1))})
-    |> Map.put(:since, since)
+    |> Map.put(:since, Opus.Utils.Time.parse_iso8601!(since))
   end
 
   defp parse(nil), do: nil
@@ -88,8 +108,7 @@ defmodule Opus.Trading.AccountLimits do
   @spec diff(t(), map()) :: {:ok, [map()]} | {:error, %{atom() => String.t()}}
   def diff(current, params) do
     {changes, errors} =
-      Enum.reduce(@settings, {[], %{}}, fn {key, kind, min, max, raising_loosens},
-                                           {changes, errors} ->
+      Enum.reduce(@settings, {[], %{}}, fn {key, kind, min, max, _loosens}, {changes, errors} ->
         old = Map.fetch!(current, key)
 
         case cast(params[Atom.to_string(key)], kind, min, max) do
@@ -97,7 +116,7 @@ defmodule Opus.Trading.AccountLimits do
             {changes, errors}
 
           {:ok, new} ->
-            change = %{key: key, old: old, new: new, loosens?: raising_loosens and new > old}
+            change = %{key: key, old: old, new: new, loosens?: loosens?(key, old, new)}
             {[change | changes], errors}
 
           :error ->

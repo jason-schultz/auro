@@ -1,5 +1,6 @@
 pub mod adx_filter;
 pub mod bollinger;
+pub mod daily_bars;
 pub mod donchian;
 pub mod event_window;
 pub mod financing;

@@ -88,6 +88,39 @@ defmodule Opus.Dashboard.AlertsTest do
     assert Alerts.build(input(%{candle_age: 5000, now: saturday})) == []
   end
 
+  test "stale account numbers are an act-now alert while the market is open" do
+    assert [%{level: :act, key: "stale_nav"} = alert] = Alerts.build(input(%{nav_age: 900}))
+    assert alert.what_to_do =~ "drawdown pause"
+    assert Alerts.build(input(%{nav_age: 600})) == []
+    assert Alerts.build(input(%{nav_age: nil})) == []
+
+    saturday = ~U[2026-10-31 15:00:00Z]
+    assert Alerts.build(input(%{nav_age: 5000, now: saturday})) == []
+  end
+
+  test "a trade OANDA holds that Auro doesn't track is an act-now alert" do
+    trade = %{id: "123", instrument: "EUR_USD", units: "1000"}
+    [alert] = Alerts.build(input(%{untracked_trades: [trade]}))
+    assert alert.level == :act
+    assert alert.key == "untracked:123"
+    assert alert.title == "OANDA has a trade Auro isn't managing"
+    assert alert.detail =~ "EUR_USD"
+  end
+
+  test "hedging off is a check; on or unknown says nothing" do
+    [alert] = Alerts.build(input(%{hedging: false}))
+    assert alert.level == :check
+    assert alert.title == "Your OANDA account nets opposite trades"
+    assert Alerts.build(input(%{hedging: true})) == []
+    assert Alerts.build(input(%{hedging: nil})) == []
+  end
+
+  test "a part of the dashboard that failed is named in an act-now alert" do
+    [alert] = Alerts.build(input(%{failed_sections: ["paper options books"]}))
+    assert alert.level == :act
+    assert alert.title == "Part of the dashboard failed to load: paper options books"
+  end
+
   test "the forex week runs Sunday 17:00 to Friday 17:00 New York" do
     # Daylight time (UTC−4): 17:00 New York is 21:00 UTC.
     refute Alerts.forex_open?(~U[2026-10-25 20:59:00Z])
@@ -256,6 +289,24 @@ defmodule Opus.Dashboard.AlertsTest do
       )
 
     assert Enum.map(alerts, & &1.level) == [:act, :check, :fyi]
+  end
+
+  test "a bought idea losing half says its own rule sells it, not the 21-day hold" do
+    idea =
+      wheel_put(%{
+        book: "ideas",
+        key: "ideas:9",
+        label: "SPY 780 call",
+        shorts: [],
+        longs: [%{id: 4, kind: "call", strike: 780.0}],
+        max_loss: 400.0,
+        pnl: -200.0,
+        take_profit: nil
+      })
+
+    [alert] = Alerts.build(input(%{paper: [idea]}))
+    assert alert.what_to_do =~ "its rule sells once the option is worth half"
+    refute alert.what_to_do =~ "21-day"
   end
 
   test "losing half the most a trade can lose is act-now, crash puts aside" do

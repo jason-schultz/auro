@@ -1,5 +1,5 @@
 use sqlx::PgPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::brokers::oanda::client::OandaClient;
 use crate::db::repositories::{
@@ -10,7 +10,7 @@ use crate::engine::types::{
     BufferKey, CandleBuffer, Direction, Granularity, OpenPosition, StopLossState,
 };
 use crate::error::{AppError, AppResult};
-use crate::state::AppState;
+use crate::state::{AppState, UntrackedTrade};
 
 /// Pre-fill the in-memory rules cache from the `rules` table.
 /// Closes the gap between Rust startup and Opus's first push (~5min) — without
@@ -62,52 +62,88 @@ async fn prefill_buffers(state: &AppState) -> Result<usize, sqlx::Error> {
     Ok(count)
 }
 
-pub(crate) async fn run_prefill_open_positions(state: &AppState) {
-    let mut prefetched = HashMap::new();
-    match prefill_open_positions(&state.db, &state.oanda, &mut prefetched).await {
-        Ok(count) => {
-            let mut positions = state.live.open_positions.write().await;
-            for (trade_id, position) in prefetched {
-                positions.insert(trade_id, position);
+/// Fill `open_positions` from OANDA's open trades at startup. Returns whether
+/// it worked; until it has (here or in a later position sync), entries wait.
+pub(crate) async fn run_prefill_open_positions(state: &AppState) -> bool {
+    match oanda_positions(&state.db, &state.oanda).await {
+        Ok(found) => {
+            let count = found.tracked.len();
+            {
+                let mut positions = state.live.open_positions.write().await;
+                for (trade_id, position) in found.tracked {
+                    positions.insert(trade_id, position);
+                }
             }
-            tracing::info!("Pre-filled {} open positions from OANDA", count)
+            *state.live.untracked_trades.write().await = found.untracked;
+            *state.live.positions_known.write().await = true;
+            tracing::info!("Pre-filled {} open positions from OANDA", count);
+            true
         }
-        Err(e) => tracing::error!("Failed to pre-fill open positions: {}", e),
+        Err(e) => {
+            tracing::error!(
+                "Failed to pre-fill open positions (entries wait until a sync succeeds): {}",
+                e
+            );
+            false
+        }
     }
 }
 
-async fn prefill_open_positions(
+/// What OANDA holds right now, matched to `live_trades` rows.
+pub(crate) struct OandaPositions {
+    /// Every open trade id at OANDA, tracked or not.
+    pub ids: HashSet<String>,
+    /// Trades with an open `live_trades` row, as positions.
+    pub tracked: HashMap<String, OpenPosition>,
+    /// Trades with no row: nothing manages them beyond their stop.
+    pub untracked: Vec<UntrackedTrade>,
+}
+
+/// OANDA's open trades, matched to their rows. A malformed trade is logged
+/// and skipped, never the whole answer.
+pub(crate) async fn oanda_positions(
     pool: &PgPool,
     oanda: &OandaClient,
-    open_positions: &mut HashMap<String, OpenPosition>,
-) -> AppResult<usize> {
+) -> AppResult<OandaPositions> {
     let oanda_trades = oanda.get_open_trades().await?;
     let trades = oanda_trades["trades"]
         .as_array()
         .ok_or_else(|| AppError::Oanda("get_open_trades did not return a trades array".into()))?;
 
-    let mut count = 0;
+    let mut found = OandaPositions {
+        ids: HashSet::new(),
+        tracked: HashMap::new(),
+        untracked: Vec::new(),
+    };
     for trade in trades {
-        let trade_id = trade["id"]
-            .as_str()
-            .ok_or_else(|| AppError::Oanda("open trade missing id".into()))?;
-        let units = trade["currentUnits"].as_str().unwrap_or("0").to_string();
-
-        let row =
-            live_trades_repo::find_open_trade_with_strategy_by_oanda_id(pool, trade_id).await?;
-
-        let Some(row) = row else {
-            tracing::warn!(
-                "OANDA has open trade {} but no matching live_trades row — skipping",
-                trade_id
+        let (Some(trade_id), Some(units)) = (trade["id"].as_str(), trade["currentUnits"].as_str())
+        else {
+            tracing::error!(
+                "OANDA open trade without an id or units, skipped: {}",
+                trade
             );
+            continue;
+        };
+        found.ids.insert(trade_id.to_string());
+
+        let Some(row) =
+            live_trades_repo::find_open_trade_with_strategy_by_oanda_id(pool, trade_id).await?
+        else {
+            found.untracked.push(UntrackedTrade {
+                id: trade_id.to_string(),
+                instrument: trade["instrument"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                units: units.to_string(),
+            });
             continue;
         };
 
         let (worst_price, best_price) =
             reconstruct_extremes(row.direction, row.entry_price, row.mae_pct, row.mfe_pct);
 
-        open_positions.insert(
+        found.tracked.insert(
             trade_id.to_string(),
             OpenPosition {
                 strategy_id: row.live_strategy_id,
@@ -117,17 +153,16 @@ async fn prefill_open_positions(
                 direction: row.direction,
                 entry_price: row.entry_price,
                 entry_time: row.entry_time,
-                units,
+                units: units.to_string(),
                 stop_loss_state: determine_stop_loss_state(trade, trade_id),
                 worst_price,
                 best_price,
                 strategy_type: row.strategy_type,
             },
         );
-        count += 1;
     }
 
-    Ok(count)
+    Ok(found)
 }
 
 /// Load every granularity's buffer for one instrument from the DB, replacing
