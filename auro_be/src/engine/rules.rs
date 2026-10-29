@@ -18,7 +18,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::engine::types::{LiveStrategy, SignalAction, SignalReport};
+use crate::engine::types::{LiveStrategy, OpenPosition, SignalAction, SignalReport};
+
+/// What an open trade counts against the risk budget when its strategy sent
+/// no sizing (the house default: 1% of NAV per trade).
+const DEFAULT_POSITION_RISK: f64 = 0.01;
 
 /// In-memory rules cache. Single source of truth on the Rust side after a push.
 ///
@@ -30,6 +34,25 @@ pub struct Rules {
     pub by_strategy_id: HashMap<Uuid, RuleEntry>,
     /// When this snapshot was computed (set by Opus, preserved through push).
     pub computed_at: Option<DateTime<Utc>>,
+    /// Account-wide limits checked when a trade opens. None until Opus pushes
+    /// them (after a restart, its first push), and then nothing is enforced.
+    pub limits: Option<AccountLimits>,
+}
+
+/// The account limits Opus configures (`trading_config.account_limits`) and
+/// Rust enforces at entry, so two strategies firing in the same minute can't
+/// both slip under them.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountLimits {
+    /// Most of NAV at risk across open trades at once (0.05 = 5%); each trade
+    /// counts as the risk its strategy sizes at (`RuleEntry::risk_pct`).
+    pub risk_budget: f64,
+    /// Open trades allowed per group at once.
+    pub max_open_per_group: usize,
+    /// Each instrument's group (asset class, e.g. "index"). An instrument
+    /// missing here is a group of its own.
+    #[serde(default)]
+    pub groups: HashMap<String, String>,
 }
 
 /// Decision for one strategy. Just the result + audit string. The condition
@@ -39,8 +62,12 @@ pub struct RuleEntry {
     /// May this strategy fire entry signals right now?
     pub enabled: bool,
     /// Human-readable reason for the decision (logged when an entry is gated).
-    /// Example: "trending regime, ADX 32.4" or "choppy regime, TF disabled".
+    /// Example: "clear: no safety rule is holding it".
     pub reason: String,
+    /// The share of NAV each of this strategy's trades risks (0.01 = 1%), for
+    /// the account risk budget.
+    #[serde(default)]
+    pub risk_pct: Option<f64>,
 }
 
 /// Wire format Opus POSTs to `/api/rules`. Replaces the entire cache.
@@ -51,6 +78,8 @@ pub struct RuleEntry {
 pub struct RulesPayload {
     pub rules: HashMap<Uuid, RuleEntry>,
     pub computed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub limits: Option<AccountLimits>,
 }
 
 impl Rules {
@@ -91,6 +120,7 @@ impl Rules {
         );
         self.by_strategy_id = payload.rules;
         self.computed_at = Some(payload.computed_at);
+        self.limits = payload.limits;
     }
 
     /// Build a Rules cache from raw DB rows queried out of the `rules` table.
@@ -107,6 +137,7 @@ impl Rules {
                 RuleEntry {
                     enabled,
                     reason: reason.unwrap_or_else(|| "(no reason recorded)".to_string()),
+                    risk_pct: None,
                 },
             );
             if latest.is_none_or(|t| computed_at > t) {
@@ -117,6 +148,7 @@ impl Rules {
         Self {
             by_strategy_id,
             computed_at: latest,
+            limits: None,
         }
     }
 }
@@ -163,13 +195,63 @@ pub fn entry_gate_report(
     })
 }
 
+impl Rules {
+    /// Why a new trade on `instrument` risking `new_risk` of NAV would break
+    /// an account limit given the trades already open, or None when it fits.
+    /// Nothing is checked before Opus has pushed limits.
+    pub fn account_limit_breach<'a>(
+        &self,
+        instrument: &str,
+        new_risk: f64,
+        open: impl IntoIterator<Item = &'a OpenPosition>,
+    ) -> Option<String> {
+        let limits = self.limits.as_ref()?;
+        let group_of = |i: &'a str| limits.groups.get(i).map_or(i, String::as_str);
+        let group = limits
+            .groups
+            .get(instrument)
+            .map_or(instrument, String::as_str);
+
+        let (open_risk, in_group) = open.into_iter().fold((0.0, 0), |(risk, n), p| {
+            let p_risk = self
+                .by_strategy_id
+                .get(&p.strategy_id)
+                .and_then(|r| r.risk_pct)
+                .unwrap_or(DEFAULT_POSITION_RISK);
+            (
+                risk + p_risk,
+                n + usize::from(group_of(&p.instrument) == group),
+            )
+        });
+
+        if in_group >= limits.max_open_per_group {
+            return Some(format!(
+                "concentration_cap: {in_group} {group} trades open, the limit is {}",
+                limits.max_open_per_group
+            ));
+        }
+        // A whisker of slack so 5 × 1% doesn't fail a 5% budget on rounding.
+        if open_risk + new_risk > limits.risk_budget + 1e-9 {
+            return Some(format!(
+                "risk_budget: {:.1}% of NAV at risk plus {:.1}% is over the {:.1}% budget",
+                open_risk * 100.0,
+                new_risk * 100.0,
+                limits.risk_budget * 100.0
+            ));
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::types::{Direction, Granularity, StopLossState};
 
     fn entry(enabled: bool, reason: &str) -> RuleEntry {
         RuleEntry {
             enabled,
+            risk_pct: Some(0.01),
             reason: reason.to_string(),
         }
     }
@@ -235,6 +317,7 @@ mod tests {
         let payload = RulesPayload {
             rules: new_map,
             computed_at: Utc::now(),
+            limits: None,
         };
         rules.apply_payload(payload);
 
@@ -242,5 +325,79 @@ mod tests {
         assert!(rules.decision(&old_id).0); // old defaults to enabled (not in map)
         assert!(!rules.decision(&new_id).0);
         assert!(rules.computed_at.is_some());
+    }
+
+    fn position(strategy_id: Uuid, instrument: &str) -> OpenPosition {
+        OpenPosition {
+            strategy_id,
+            trade_id: Uuid::new_v4().to_string(),
+            instrument: instrument.to_string(),
+            granularity: Granularity::D,
+            direction: Direction::Long,
+            entry_price: 100.0,
+            entry_time: Utc::now(),
+            units: "1".to_string(),
+            stop_loss_state: StopLossState::NotApplicable,
+            worst_price: 100.0,
+            best_price: 100.0,
+            strategy_type: "composite".to_string(),
+        }
+    }
+
+    /// Indices and metals as groups, 5% budget, 2 per group.
+    fn limited(rules: &mut Rules) {
+        rules.limits = Some(AccountLimits {
+            risk_budget: 0.05,
+            max_open_per_group: 2,
+            groups: HashMap::from([
+                ("SPX500_USD".to_string(), "index".to_string()),
+                ("NAS100_USD".to_string(), "index".to_string()),
+                ("EU50_EUR".to_string(), "index".to_string()),
+                ("XAU_USD".to_string(), "metal".to_string()),
+            ]),
+        });
+    }
+
+    #[test]
+    fn nothing_is_checked_before_limits_arrive() {
+        let rules = Rules::default();
+        let open = vec![position(Uuid::new_v4(), "SPX500_USD"); 9];
+        assert_eq!(rules.account_limit_breach("NAS100_USD", 0.01, &open), None);
+    }
+
+    #[test]
+    fn a_third_trade_in_one_group_is_blocked_but_another_group_is_not() {
+        let mut rules = Rules::default();
+        limited(&mut rules);
+        let open = vec![
+            position(Uuid::new_v4(), "SPX500_USD"),
+            position(Uuid::new_v4(), "NAS100_USD"),
+        ];
+
+        let blocked = rules.account_limit_breach("EU50_EUR", 0.01, &open).unwrap();
+        assert!(blocked.starts_with("concentration_cap: 2 index"));
+        assert_eq!(rules.account_limit_breach("XAU_USD", 0.01, &open), None);
+    }
+
+    #[test]
+    fn the_risk_budget_counts_each_open_trade_at_its_strategy_risk() {
+        let mut rules = Rules::default();
+        limited(&mut rules);
+        rules.limits.as_mut().unwrap().max_open_per_group = 10;
+
+        let small = Uuid::new_v4();
+        rules.by_strategy_id.insert(small, entry(true, "clear"));
+        rules.by_strategy_id.get_mut(&small).unwrap().risk_pct = Some(0.005);
+
+        // Four open at 1% (unknown strategies count as 1%) and one at 0.5%.
+        let mut open: Vec<_> = (0..4)
+            .map(|_| position(Uuid::new_v4(), "XAU_USD"))
+            .collect();
+        open.push(position(small, "XAU_USD"));
+
+        // 4.5% open: another 0.5% fits exactly, 1% doesn't.
+        assert_eq!(rules.account_limit_breach("XAU_USD", 0.005, &open), None);
+        let blocked = rules.account_limit_breach("XAU_USD", 0.01, &open).unwrap();
+        assert!(blocked.starts_with("risk_budget: 4.5% of NAV"));
     }
 }

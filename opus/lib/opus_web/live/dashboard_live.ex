@@ -12,6 +12,7 @@ defmodule OpusWeb.DashboardLive do
   use OpusWeb, :live_view
 
   import OpusWeb.Format
+  import OpusWeb.Components.PaperParts, only: [book_name: 1]
 
   alias Opus.Dashboard
   alias Opus.Dashboard.Alerts
@@ -105,10 +106,10 @@ defmodule OpusWeb.DashboardLive do
         <header class="flex flex-wrap items-baseline justify-between gap-3">
           <div class="flex flex-wrap items-baseline gap-3">
             <h1 class="text-[22px] font-semibold tracking-tight">
-              <.t s="Dashboard" wsb="War room" />
+              <.t {copy("Dashboard")} />
             </h1>
             <span :if={@data} class={["text-[14px] font-medium", status_tone(@urgent)]}>
-              <.t s={status_line(@urgent, :serious)} wsb={status_line(@urgent, :wsb)} />
+              <.t {status_line(@urgent)} />
             </span>
           </div>
           <div class="flex items-baseline gap-4 text-[13px] text-muted">
@@ -124,19 +125,19 @@ defmodule OpusWeb.DashboardLive do
         </header>
 
         <p :if={@data == nil} class="text-[13px] text-muted">
-          <.t s="Checking everything…" wsb="Checking the bags…" />
+          <.t {copy("Checking everything…")} />
         </p>
 
         <%= if @data do %>
           <section aria-label="Needs you" class="flex flex-col gap-3">
             <span class="text-[15px] font-semibold">
-              <.t s="Needs you" wsb="GUH alerts" />
+              <.t {copy("Needs you")} />
             </span>
             <p
               :if={@urgent == []}
               class="rounded-box border border-success/40 bg-base-200 px-5 py-4 text-[14px]"
             >
-              <.t s="Nothing needs you." wsb="Sir, this is a Wendy's. Nothing to do." />
+              <.t {copy("Nothing needs you.")} />
             </p>
             <.alert_card :for={alert <- @urgent} alert={alert} />
           </section>
@@ -151,7 +152,7 @@ defmodule OpusWeb.DashboardLive do
           <section aria-label="Open positions" class="flex flex-col gap-3">
             <div class="flex flex-wrap items-baseline justify-between gap-2">
               <span class="text-[15px] font-semibold">
-                <.t s="Open positions" wsb="Bags currently held" />
+                <.t {copy("Open positions")} />
               </span>
               <span class="text-[13px] text-muted">
                 Live and paper. Click one for the details.
@@ -162,7 +163,7 @@ defmodule OpusWeb.DashboardLive do
 
           <section :if={@fyi != []} aria-label="What happened" class="flex flex-col gap-2">
             <span class="text-[15px] font-semibold">
-              <.t s="What happened" wsb="Tendies report" />
+              <.t {copy("What happened")} />
             </span>
             <ul class="m-0 flex list-none flex-col gap-1 p-0 text-[13px]">
               <li :for={item <- @fyi} class="flex flex-wrap justify-between gap-x-4">
@@ -186,7 +187,7 @@ defmodule OpusWeb.DashboardLive do
   defp positions_table(assigns) do
     ~H"""
     <p :if={@positions == []} class="text-[13px] text-muted">
-      <.t s="Nothing open." wsb="No bags. Cash gang." />
+      <.t {copy("Nothing open.")} />
     </p>
     <div
       :if={@positions != []}
@@ -199,7 +200,7 @@ defmodule OpusWeb.DashboardLive do
             <th class="border-b border-base-300 py-2.5 font-medium">Book</th>
             <th class="border-b border-base-300 py-2.5 font-medium">Opened</th>
             <th class="border-b border-base-300 py-2.5 text-right font-medium">
-              <.t s="P&L so far" wsb="Tendies so far" />
+              <.t {copy("P&L so far")} />
             </th>
             <th class="border-b border-base-300 py-2.5 pl-6 font-medium">Next decision</th>
           </tr>
@@ -216,7 +217,7 @@ defmodule OpusWeb.DashboardLive do
               </span>
             </td>
             <td class="py-2.5 text-muted">
-              <.t s={book_label(p.book, :serious)} wsb={book_label(p.book, :wsb)} />
+              <.t {book_label(p.book)} />
             </td>
             <td class="py-2.5 text-muted">{day(p.opened_on)}</td>
             <td class={["py-2.5 text-right", tone(p.pnl)]}>{signed_money(p.pnl)}</td>
@@ -228,10 +229,8 @@ defmodule OpusWeb.DashboardLive do
     """
   end
 
-  defp book_label("live", :serious), do: "Live (OANDA)"
-  defp book_label("live", :wsb), do: "Live (fake) money"
-  defp book_label(book, :serious), do: book |> Opus.Options.Paper.book_name() |> elem(0)
-  defp book_label(book, :wsb), do: book |> Opus.Options.Paper.book_name() |> elem(1)
+  defp book_label("live"), do: copy("Live (OANDA)")
+  defp book_label(book), do: book_name(book)
 
   defp next_decision(%{book: "live", stop_loss_price: stop}) when is_number(stop),
     do: "The engine closes it; stop at #{num(stop)}"
@@ -255,17 +254,13 @@ defmodule OpusWeb.DashboardLive do
           "text-[12px] font-medium",
           if(@alert.level == :act, do: "text-error", else: "text-warning")
         ]}>
-          <.t
-            :if={@alert.level == :act}
-            s="Act now"
-            wsb="GUH alert"
-          />
-          <.t :if={@alert.level == :check} s="Check soon" wsb="Keep an eye on it" />
+          <.t :if={@alert.level == :act} {copy("Act now")} />
+          <.t :if={@alert.level == :check} {copy("Check soon")} />
         </span>
       </div>
       <p :if={@alert.detail} class="text-[13px] text-muted">{@alert.detail}</p>
       <p class="text-[13px]">
-        <span class="font-medium"><.t s="What to do:" wsb="The play:" /></span>
+        <span class="font-medium"><.t {copy("What to do:")} /></span>
         {@alert.what_to_do}
       </p>
       <.link
@@ -282,7 +277,7 @@ defmodule OpusWeb.DashboardLive do
         phx-value-worker={@alert.clear_worker}
         class="min-h-9 self-start text-[13px] font-medium text-primary hover:brightness-110"
       >
-        <.t s="Clear" wsb="Cope and clear" />
+        <.t {copy("Clear")} />
       </button>
     </article>
     """
@@ -292,7 +287,7 @@ defmodule OpusWeb.DashboardLive do
 
   defp live_tile(assigns) do
     ~H"""
-    <.tile title="Live trading" wsb="Live (fake) money" link={~p"/strategies"}>
+    <.tile title={copy("Live trading")} link={~p"/strategies"}>
       <span class="text-[22px] font-semibold">{money(@live.nav)}</span>
       <span class={["text-[13px]", tone(@live.nav_change)]}>
         {signed_money(@live.nav_change)} today
@@ -313,11 +308,11 @@ defmodule OpusWeb.DashboardLive do
 
   defp paper_tile(assigns) do
     ~H"""
-    <.tile title="Paper options" wsb="Casino chips" link={~p"/options?view=paper"}>
+    <.tile title={copy("Paper options")} link={~p"/options?view=paper"}>
       <ul class="m-0 flex list-none flex-col gap-1 p-0 text-[13px]">
         <li :for={book <- @books} class="flex items-baseline justify-between gap-3">
           <.link navigate={book.link} class="relative z-10 min-w-0 truncate hover:text-primary">
-            <.t s={book.name} wsb={book.wsb} />
+            <.t {book_name(book.book)} />
             <span :if={book.open > 0} class="text-muted">· {book.open} open</span>
           </.link>
           <span :if={book.started} class={["shrink-0 whitespace-nowrap", tone(book.pnl)]}>
@@ -334,7 +329,7 @@ defmodule OpusWeb.DashboardLive do
 
   defp accounts_tile(assigns) do
     ~H"""
-    <.tile title="Accounts" wsb="The bag" link={~p"/accounts"}>
+    <.tile title={copy("Accounts")} link={~p"/accounts"}>
       <%= case @accounts do %>
         <% {:ok, total} -> %>
           <span class="text-[22px] font-semibold">{money(total)}</span>
@@ -354,7 +349,7 @@ defmodule OpusWeb.DashboardLive do
 
   defp exposure_tile(assigns) do
     ~H"""
-    <.tile title="Index exposure" wsb="YOLO meter" link={~p"/accounts"}>
+    <.tile title={copy("Index exposure")} link={~p"/accounts"}>
       <%= if @exposure do %>
         <span class="text-[22px] font-semibold">{pct(@exposure.exposure)}</span>
         <span class="text-[13px] text-muted">
@@ -368,8 +363,7 @@ defmodule OpusWeb.DashboardLive do
     """
   end
 
-  attr :title, :string, required: true
-  attr :wsb, :string, required: true
+  attr :title, :map, required: true, doc: "copy/1"
   attr :link, :string, required: true
   slot :inner_block, required: true
 
@@ -381,19 +375,17 @@ defmodule OpusWeb.DashboardLive do
     ~H"""
     <div class="relative flex flex-col gap-1 rounded-box border border-base-300 bg-base-200 px-5 py-4 hover:border-primary">
       <.link navigate={@link} class="text-[12px] text-muted after:absolute after:inset-0">
-        <.t s={@title} wsb={@wsb} />
+        <.t {@title} />
       </.link>
       {render_slot(@inner_block)}
     </div>
     """
   end
 
-  defp status_line([], :serious), do: "All clear"
-  defp status_line([], :wsb), do: "No GUH today"
-  defp status_line([_], :serious), do: "1 thing needs you"
-  defp status_line([_], :wsb), do: "1 thing needs you, regard"
-  defp status_line(urgent, :serious), do: "#{length(urgent)} things need you"
-  defp status_line(urgent, :wsb), do: "#{length(urgent)} things need you, regard"
+  defp status_line([]), do: copy("All clear")
+
+  defp status_line(urgent),
+    do: copy_n("%{count} thing needs you", "%{count} things need you", length(urgent))
 
   defp status_tone([]), do: "text-success"
 

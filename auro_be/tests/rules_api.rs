@@ -56,6 +56,7 @@ async fn push_rules_replaces_prior_snapshot() {
         RuleEntry {
             enabled: false,
             reason: "old".to_string(),
+            risk_pct: None,
         },
     );
 
@@ -64,6 +65,7 @@ async fn push_rules_replaces_prior_snapshot() {
         rules.apply_payload(RulesPayload {
             rules: old_map,
             computed_at: Utc.with_ymd_and_hms(2026, 5, 8, 9, 0, 0).unwrap(),
+            limits: None,
         });
     }
 
@@ -160,11 +162,13 @@ async fn push_rules_empty_payload_clears_existing_snapshot() {
             RuleEntry {
                 enabled: false,
                 reason: "old".to_string(),
+                risk_pct: None,
             },
         );
         rules.apply_payload(RulesPayload {
             rules: old,
             computed_at: Utc.with_ymd_and_hms(2026, 5, 8, 8, 0, 0).unwrap(),
+            limits: None,
         });
     }
 

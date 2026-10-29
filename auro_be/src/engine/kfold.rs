@@ -317,6 +317,7 @@ mod tests {
                 avg_loss: -0.01,
                 max_drawdown: -0.05,
                 sharpe_ratio: sharpe,
+                annual_sharpe: 0.0,
                 num_trades: 10,
             },
         };

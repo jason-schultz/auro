@@ -10,15 +10,25 @@ defmodule OpusWeb.Components.PaperParts do
   import OpusWeb.Copy
   import OpusWeb.Format
 
-  attr :label, :string, required: true
-  attr :wsb, :string, required: true
+  @doc "A paper book's name (`Opus.Options.Paper.books/0`), in both voices."
+  @spec book_name(String.t()) :: OpusWeb.Copy.voices()
+  def book_name("wheel"), do: copy("Wheel")
+  def book_name("put_spread"), do: copy("Put spreads")
+  def book_name("iron_condor"), do: copy("Iron condors")
+  def book_name("ideas"), do: pcopy("paper book", "Ideas")
+  def book_name("ideas_half"), do: copy("Ideas · half at double")
+  def book_name("crash_puts"), do: copy("Crash puts")
+  def book_name("crash_puts_half"), do: copy("Crash puts · half at double")
+  def book_name(other), do: %{s: other, wsb: other}
+
+  attr :label, :map, required: true, doc: "copy/1"
   attr :value, :string, required: true
   attr :tone, :string, default: nil
 
   def stat(assigns) do
     ~H"""
     <div class="flex flex-col gap-0.5">
-      <span class="text-[12px] text-muted"><.t s={@label} wsb={@wsb} /></span>
+      <span class="text-[12px] text-muted"><.t {@label} /></span>
       <span class={["text-[15px] font-semibold", @tone]}>{@value}</span>
     </div>
     """

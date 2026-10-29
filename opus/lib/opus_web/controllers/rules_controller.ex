@@ -36,11 +36,10 @@ defmodule OpusWeb.RulesController do
 
     trading_count = Enum.count(strategies, & &1.rules_enabled)
     live_count = length(strategies)
-    curator_enabled = curator_enabled?()
 
     json(conn, %{
       computed_at: rows |> List.first() |> then(&(&1 && &1.max_computed_at)),
-      summary: %{trading: trading_count, live: live_count, curator_enabled: curator_enabled},
+      summary: %{trading: trading_count, live: live_count},
       strategies: strategies
     })
   end
@@ -60,37 +59,4 @@ defmodule OpusWeb.RulesController do
       frames: frames
     }
   end
-
-  defp curator_enabled? do
-    case Repo.query("SELECT to_regclass('public.trading_config')") do
-      {:ok, %{rows: [[nil]]}} ->
-        false
-
-      {:ok, _} ->
-        from(c in "trading_config",
-          where: c.key == "curator_enabled",
-          select: c.value
-        )
-        |> Repo.one()
-        |> to_bool_value(false)
-
-      {:error, _reason} ->
-        false
-    end
-  end
-
-  defp to_bool_value(nil, default), do: default
-  defp to_bool_value(value, _default) when is_boolean(value), do: value
-
-  defp to_bool_value(value, default) when is_binary(value) do
-    case String.downcase(value) do
-      "true" -> true
-      "false" -> false
-      _ -> default
-    end
-  end
-
-  defp to_bool_value(%{"value" => nested}, default), do: to_bool_value(nested, default)
-  defp to_bool_value(%{value: nested}, default), do: to_bool_value(nested, default)
-  defp to_bool_value(_value, default), do: default
 end

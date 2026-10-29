@@ -1,6 +1,20 @@
 defmodule Opus.Trading.CircuitBreaker do
   @moduledoc """
-  Per-strategy circuit breaker that suspends live strategies on loss patterns.
+  Per-strategy circuit breaker: suspends a live strategy whose recent trades
+  go badly, until a person resets it (`Opus.Trading.Strategies.reset_suspension/1`).
+  An open suspension makes `Opus.Trading.RulesEngine` hold the strategy back.
+
+  The same limits for every strategy:
+
+  - `@consecutive_losses` losing trades in a row, or
+  - its trades' returns summing below `@rolling_drawdown` over the last
+    `@rolling_window_days` days, once it has at least `@rolling_min_sample`.
+
+  Only trades closed since the strategy's last reset count, so a reset
+  gives it a fresh start instead of tripping again on the same losses.
+  Strategies marked `circuit_breaker_exempt` are left alone.
+
+  Trade returns (`live_trades.pnl_percent`) are fractions: -0.08 is -8%.
   """
 
   use GenServer
@@ -17,13 +31,10 @@ defmodule Opus.Trading.CircuitBreaker do
 
   @poll_interval :timer.minutes(20)
   @initial_delay :timer.seconds(30)
+  @consecutive_losses 5
+  @rolling_drawdown -0.08
   @rolling_window_days 30
   @rolling_min_sample 5
-
-  @thresholds %{
-    "trend_following" => %{consecutive_losses: 5, rolling_drawdown_pct: -8.0},
-    "mean_reversion" => %{consecutive_losses: 7, rolling_drawdown_pct: -10.0}
-  }
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -45,12 +56,11 @@ defmodule Opus.Trading.CircuitBreaker do
     strategies = list_enabled_strategies()
     open_ids = open_suspension_ids(strategies)
     candidates = Enum.reject(strategies, &MapSet.member?(open_ids, &1.id))
-    stats = precompute_stats(candidates)
 
     triggered =
       candidates
       |> Enum.reduce(0, fn strategy, acc ->
-        case maybe_suspend(strategy, stats) do
+        case maybe_suspend(strategy) do
           :inserted -> acc + 1
           _ -> acc
         end
@@ -98,8 +108,8 @@ defmodule Opus.Trading.CircuitBreaker do
 
   defp list_enabled_strategies do
     from(s in LiveStrategy,
-      where: s.enabled == true,
-      select: %{id: s.id, strategy_type: s.strategy_type}
+      where: s.enabled == true and s.circuit_breaker_exempt == false,
+      select: %{id: s.id}
     )
     |> Repo.all()
   end
@@ -117,121 +127,63 @@ defmodule Opus.Trading.CircuitBreaker do
     |> MapSet.new()
   end
 
-  defp maybe_suspend(strategy, stats) do
-    thresholds =
-      Map.get(@thresholds, strategy.strategy_type, %{
-        consecutive_losses: nil,
-        rolling_drawdown_pct: nil
-      })
+  defp maybe_suspend(strategy) do
+    trades = trades_since_reset(strategy.id)
 
     cond do
-      tripped_by_consecutive_losses?(strategy.id, thresholds, stats.consecutive) ->
-        create_suspension(strategy.id, "consecutive_losses", consecutive_detail(thresholds))
-
-      tripped_by_rolling_drawdown?(strategy.id, thresholds, stats.rolling) ->
+      losing_streak?(trades) ->
         create_suspension(
           strategy.id,
-          "rolling_drawdown",
-          rolling_detail(Map.get(stats.rolling, strategy.id))
+          "consecutive_losses",
+          "#{@consecutive_losses} losing trades in a row"
         )
+
+      rolling = rolling_drawdown(trades) ->
+        create_suspension(strategy.id, "rolling_drawdown", rolling_detail(rolling))
 
       true ->
         :ok
     end
   end
 
-  defp tripped_by_consecutive_losses?(
-         _strategy_id,
-         %{consecutive_losses: nil},
-         _consecutive_stats
-       ),
-       do: false
-
-  defp tripped_by_consecutive_losses?(
-         strategy_id,
-         %{consecutive_losses: limit},
-         consecutive_stats
-       ) do
-    losses = Map.get(consecutive_stats, strategy_id, [])
-
-    length(losses) == limit and Enum.all?(losses, &(&1 < 0.0))
+  defp losing_streak?(trades) do
+    latest = Enum.take(trades, @consecutive_losses)
+    length(latest) == @consecutive_losses and Enum.all?(latest, &(&1.pnl < 0))
   end
 
-  defp tripped_by_rolling_drawdown?(_strategy_id, %{rolling_drawdown_pct: nil}, _rolling_stats),
-    do: false
+  # The window's trades when they sum below the limit, else nil.
+  defp rolling_drawdown(trades) do
+    window_start = DateTime.add(DateTime.utc_now(), -@rolling_window_days, :day)
+    window = Enum.filter(trades, &(DateTime.compare(&1.exit_time, window_start) != :lt))
+    sum = Enum.sum_by(window, & &1.pnl)
 
-  defp tripped_by_rolling_drawdown?(
-         strategy_id,
-         %{rolling_drawdown_pct: threshold},
-         rolling_stats
-       ) do
-    stats = Map.get(rolling_stats, strategy_id, %{count: 0, sum_pnl: 0.0})
-
-    stats.count >= @rolling_min_sample and stats.sum_pnl < threshold
+    if length(window) >= @rolling_min_sample and sum < @rolling_drawdown,
+      do: %{count: length(window), sum: sum}
   end
 
-  defp precompute_stats([]), do: %{consecutive: %{}, rolling: %{}}
-
-  defp precompute_stats(strategies) do
-    strategy_ids = Enum.map(strategies, & &1.id)
-
-    max_consecutive_limit =
-      strategies
-      |> Enum.map(fn strategy ->
-        Map.get(@thresholds, strategy.strategy_type, %{consecutive_losses: nil})
-        |> Map.get(:consecutive_losses, 0)
-      end)
-      |> Enum.reject(&is_nil/1)
-      |> Enum.max(fn -> 0 end)
-
-    %{
-      consecutive: fetch_recent_pnl_by_strategy(strategy_ids, max_consecutive_limit),
-      rolling: fetch_rolling_stats_by_strategy(strategy_ids)
-    }
-  end
-
-  defp fetch_recent_pnl_by_strategy(_strategy_ids, max_limit) when max_limit <= 0, do: %{}
-
-  defp fetch_recent_pnl_by_strategy(strategy_ids, max_limit) do
-    ranked_query =
-      from(t in LiveTrade,
-        where:
-          t.live_strategy_id in ^strategy_ids and t.status == "closed" and
-            not is_nil(t.pnl_percent),
-        windows: [per_strategy: [partition_by: t.live_strategy_id, order_by: [desc: t.exit_time]]],
-        select: %{
-          live_strategy_id: t.live_strategy_id,
-          pnl_percent: t.pnl_percent,
-          rn: over(row_number(), :per_strategy)
-        }
+  # Closed trades since the strategy's last reset, newest first. Only the
+  # last `@rolling_window_days` matter, plus enough for a losing streak.
+  defp trades_since_reset(strategy_id) do
+    since =
+      from(s in Suspension,
+        where: s.live_strategy_id == ^strategy_id and not is_nil(s.cleared_at),
+        select: max(s.cleared_at)
       )
-
-    from(r in subquery(ranked_query),
-      where: r.rn <= ^max_limit,
-      order_by: [asc: r.live_strategy_id, asc: r.rn],
-      select: {r.live_strategy_id, r.pnl_percent}
-    )
-    |> Repo.all()
-    |> Enum.reduce(%{}, fn {strategy_id, pnl_percent}, acc ->
-      Map.update(acc, strategy_id, [pnl_percent], &(&1 ++ [pnl_percent]))
-    end)
-  end
-
-  defp fetch_rolling_stats_by_strategy(strategy_ids) do
-    window_start = DateTime.add(DateTime.utc_now(), -@rolling_window_days * 86_400, :second)
+      |> Repo.one()
 
     from(t in LiveTrade,
       where:
-        t.live_strategy_id in ^strategy_ids and t.status == "closed" and
-          not is_nil(t.pnl_percent) and t.exit_time >= ^window_start,
-      group_by: t.live_strategy_id,
-      select: {t.live_strategy_id, count(t.id), coalesce(sum(t.pnl_percent), 0.0)}
+        t.live_strategy_id == ^strategy_id and t.status == "closed" and
+          not is_nil(t.pnl_percent) and not is_nil(t.exit_time),
+      order_by: [desc: t.exit_time],
+      select: %{pnl: t.pnl_percent, exit_time: t.exit_time}
     )
+    |> after_reset(since)
     |> Repo.all()
-    |> Map.new(fn {strategy_id, count, sum_pnl} ->
-      {strategy_id, %{count: count, sum_pnl: sum_pnl}}
-    end)
   end
+
+  defp after_reset(query, nil), do: query
+  defp after_reset(query, since), do: where(query, [t], t.exit_time > ^since)
 
   defp create_suspension(strategy_id, trigger_kind, trigger_detail) do
     attrs = %{
@@ -257,11 +209,7 @@ defmodule Opus.Trading.CircuitBreaker do
     end
   end
 
-  defp consecutive_detail(%{consecutive_losses: limit}), do: "#{limit} losing trades in a row"
-
-  defp rolling_detail(nil), do: "0.0% over #{@rolling_window_days}d across 0 trades"
-
-  defp rolling_detail(%{count: count, sum_pnl: sum_pnl}) do
-    "#{Float.round(sum_pnl, 2)}% over #{@rolling_window_days}d across #{count} trades"
+  defp rolling_detail(%{count: count, sum: sum}) do
+    "#{Float.round(sum * 100, 1)}% over #{@rolling_window_days}d across #{count} trades"
   end
 end

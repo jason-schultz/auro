@@ -121,16 +121,13 @@ defmodule OpusWeb.InstrumentsLive do
         <header class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
           <div class="flex items-baseline gap-3">
             <h1 class="text-[22px] font-semibold tracking-tight">
-              <.t s="Instruments" wsb="Tickers" />
+              <.t {copy("Instruments")} />
             </h1>
             <span class="text-[13px] text-muted">{length(@instruments)}
-            <.t s="listings shown" wsb="tickers in the book" /></span>
+            <.t {copy("listings shown")} /></span>
           </div>
           <p class="text-[13px] text-muted">
-            <.t
-              s="Every listing Auro knows and which feeds store data for it. Changes apply on the next run."
-              wsb="Every ticker Auro knows and which feeds hoard data for it. Changes land on the next run."
-            />
+            <.t {copy("Every listing Auro knows and which feeds store data for it. Changes apply on the next run.")} />
           </p>
         </header>
 
@@ -170,7 +167,7 @@ defmodule OpusWeb.InstrumentsLive do
               class="checkbox checkbox-sm"
               checked={@show_inactive}
               phx-click="inactive"
-            /> <.t s="Show retired" wsb="Show the dead ones" />
+            /> <.t {copy("Show retired")} />
           </label>
         </div>
 
@@ -199,14 +196,14 @@ defmodule OpusWeb.InstrumentsLive do
               class="text-[14px] font-medium text-primary hover:brightness-110 disabled:opacity-60"
             >
               <span :if={@busy}>Asking Questrade…</span>
-              <.t :if={!@busy} s="Identify via Questrade" wsb="Ask Questrade who dis" />
+              <.t :if={!@busy} {copy("Identify via Questrade")} />
             </button>
             <span class="text-[12px] text-muted">fills the symbol id, exchange and currency for new listings</span>
           </div>
         </div>
 
         <p :if={@instruments == []} class="text-[13px] text-muted">
-          <.t s="Nothing matches." wsb="Sir, this is a Wendy's." />
+          <.t {copy("Nothing matches.")} />
         </p>
 
         <div
@@ -217,13 +214,13 @@ defmodule OpusWeb.InstrumentsLive do
             <thead>
               <tr class="text-left text-xs text-muted">
                 <th class="border-b border-base-300 py-2.5 font-medium">
-                  <.t s="Listing" wsb="Ticker" />
+                  <.t {copy("Listing")} />
                 </th>
                 <th class="border-b border-base-300 py-2.5 font-medium">
-                  <.t s="Vendor names" wsb="Aliases" />
+                  <.t {copy("Vendor names")} />
                 </th>
                 <th class="border-b border-base-300 py-2.5 text-center font-medium">
-                  <.t s="Active" wsb="Alive" />
+                  <.t {copy("Active")} />
                 </th>
                 <th
                   :for={{_flag, label} <- @feeds}

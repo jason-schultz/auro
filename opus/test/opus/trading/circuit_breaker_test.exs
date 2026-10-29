@@ -22,7 +22,7 @@ defmodule Opus.Trading.CircuitBreakerTest do
 
     Repo.insert!(%LiveStrategy{
       id: strategy_id,
-      strategy_type: "trend_following",
+      strategy_type: "composite",
       instrument: "EUR_USD",
       granularity: "H1",
       parameters: %{},
@@ -35,7 +35,7 @@ defmodule Opus.Trading.CircuitBreakerTest do
       Repo.insert!(%LiveTrade{
         live_strategy_id: strategy_id,
         status: "closed",
-        pnl_percent: -1.0 * n,
+        pnl_percent: -0.01 * n,
         exit_time: DateTime.add(now, -n * 3_600, :second),
         created_at: now,
         updated_at: now
@@ -67,7 +67,7 @@ defmodule Opus.Trading.CircuitBreakerTest do
       updated_at: now
     })
 
-    pnl_samples = [-4.0, -3.5, 1.0, -2.8, -2.2]
+    pnl_samples = [-0.04, -0.035, 0.01, -0.028, -0.022]
 
     Enum.with_index(pnl_samples, 1)
     |> Enum.each(fn {pnl, n} ->
@@ -107,7 +107,7 @@ defmodule Opus.Trading.CircuitBreakerTest do
       Repo.insert!(%LiveTrade{
         live_strategy_id: strategy_id,
         status: "closed",
-        pnl_percent: -3.0,
+        pnl_percent: -0.03,
         exit_time: DateTime.add(now, -n * 86_400, :second),
         created_at: now,
         updated_at: now
@@ -119,6 +119,63 @@ defmodule Opus.Trading.CircuitBreakerTest do
 
     count = active_suspension_count(strategy_id)
     assert count == 0
+  end
+
+  test "after a reset only newer trades count, so the same losses don't trip it again" do
+    strategy_id = "44444444-4444-4444-4444-444444444444"
+    now = DateTime.utc_now()
+    insert_strategy(strategy_id, "XAU_USD")
+    insert_losses(strategy_id, now, 5)
+
+    assert CircuitBreaker.run_cycle().triggered == 1
+
+    from(s in Suspension, where: s.live_strategy_id == ^strategy_id)
+    |> Repo.update_all(set: [cleared_at: now, cleared_by: "manual"])
+
+    assert CircuitBreaker.run_cycle().triggered == 0
+    assert active_suspension_count(strategy_id) == 0
+  end
+
+  test "leaves a strategy marked exempt alone" do
+    strategy_id = "55555555-5555-5555-5555-555555555555"
+    now = DateTime.utc_now()
+    insert_strategy(strategy_id, "NAS100_USD", circuit_breaker_exempt: true)
+    insert_losses(strategy_id, now, 5)
+
+    assert CircuitBreaker.run_cycle().triggered == 0
+  end
+
+  defp insert_strategy(id, instrument, attrs \\ []) do
+    now = DateTime.utc_now()
+
+    Repo.insert!(
+      struct!(
+        %LiveStrategy{
+          id: id,
+          strategy_type: "composite",
+          instrument: instrument,
+          granularity: "H1",
+          parameters: %{},
+          enabled: true,
+          created_at: now,
+          updated_at: now
+        },
+        attrs
+      )
+    )
+  end
+
+  defp insert_losses(strategy_id, now, count) do
+    Enum.each(1..count, fn n ->
+      Repo.insert!(%LiveTrade{
+        live_strategy_id: strategy_id,
+        status: "closed",
+        pnl_percent: -0.005,
+        exit_time: DateTime.add(now, -n * 3_600, :second),
+        created_at: now,
+        updated_at: now
+      })
+    end)
   end
 
   defp active_suspension_count(strategy_id) do

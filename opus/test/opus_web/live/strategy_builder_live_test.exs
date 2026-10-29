@@ -118,6 +118,42 @@ defmodule OpusWeb.StrategyBuilderLiveTest do
     refute html =~ ~s(name="form[rules][entry_long][refs][]" value="r.long")
   end
 
+  test "the builder runs the rules over the whole history and offers the fragility check", %{
+    conn: conn
+  } do
+    {:ok, spx} = Opus.Instruments.add("SPX500_USD", "index")
+    today = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    Repo.insert_all(
+      "candles",
+      for i <- 1..5 do
+        %{
+          instrument_id: spx.id,
+          instrument: "SPX500_USD",
+          granularity: "D",
+          timestamp: DateTime.add(today, -i * 86_400, :second),
+          open: 100.0,
+          high: 101.0,
+          low: 99.0,
+          close: 100.0,
+          volume: 1,
+          complete: true
+        }
+      end
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/strategies/new")
+    html = view |> element("button", "+ RSI") |> render_click()
+
+    assert html =~ "Over its whole history on SPX500_USD"
+    # These bars are all inside the holdout: nothing to run it on.
+    assert html =~ "No history from before the holdout to run it on."
+
+    html = view |> element("button", ~r/Check \d+ nearby settings/) |> render_click()
+    assert html =~ "Checking"
+    assert render_async(view) =~ "Auro is not running."
+  end
+
   test "a trading strategy opens locked, and unlocking can make a copy", %{conn: conn} do
     recipe_id = trading_recipe!(false)
     {:ok, view, html} = live(conn, ~p"/strategies/recipes/#{recipe_id}/edit")

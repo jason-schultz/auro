@@ -44,7 +44,7 @@ defmodule OpusWeb.Components.PaperTrades do
             if(@trade, do: "text-muted hover:text-base-content", else: "bg-base-300 font-medium")
           ]}
         >
-          <.t s="Overview" wsb="The whole degenerate book" />
+          <.t {copy("Overview")} />
         </.link>
         <div :for={trade <- @book.trades} class="flex flex-col">
           <.link
@@ -232,7 +232,7 @@ defmodule OpusWeb.Components.PaperTrades do
 
       <div :if={@trade.status == "open"} class="flex flex-col gap-1.5">
         <span class="text-[13px] font-medium">
-          <.t s="What happens next" wsb="The plan, regard" />
+          <.t {copy("What happens next")} />
         </span>
         <ol class="m-0 flex list-decimal flex-col gap-1.5 pl-4 text-[13px]">
           <.plan trade={@trade} manage_on={@manage_on} book={@book.strategy} />
@@ -394,7 +394,7 @@ defmodule OpusWeb.Components.PaperTrades do
     ~H"""
     <div class="grid gap-3 sm:grid-cols-2">
       <.play_card tone="success">
-        <:title><.t s="If it goes well" wsb="If it prints (first one is free)" /></:title>
+        <:title><.t {copy("If it goes well")} /></:title>
         <li>
           {@trade.symbol} stays above {money(@short.strike)}, and the spread loses value every day.
         </li>
@@ -407,7 +407,7 @@ defmodule OpusWeb.Components.PaperTrades do
         <li>At the same check a new spread is sold the same way.</li>
       </.play_card>
       <.play_card tone="error">
-        <:title><.t s="If it goes wrong" wsb="If it goes GUH" /></:title>
+        <:title><.t {copy("If it goes wrong")} /></:title>
         <li>
           {@trade.symbol} falls below {money(@short.strike)}: the loss grows, but only until {money(
             @long.strike
@@ -443,7 +443,7 @@ defmodule OpusWeb.Components.PaperTrades do
     ~H"""
     <div class="grid gap-3 sm:grid-cols-2">
       <.play_card tone="success">
-        <:title><.t s="If it goes well" wsb="If it prints (first one is free)" /></:title>
+        <:title><.t {copy("If it goes well")} /></:title>
         <li>
           {@trade.symbol} stays between {money(@short_put.strike)} and {money(@short_call.strike)}:
           both spreads lose value every day.
@@ -456,7 +456,7 @@ defmodule OpusWeb.Components.PaperTrades do
         <li>At the same check a new condor is sold the same way.</li>
       </.play_card>
       <.play_card tone="error">
-        <:title><.t s="If it goes wrong" wsb="If it goes GUH" /></:title>
+        <:title><.t {copy("If it goes wrong")} /></:title>
         <li>
           A big move either way: below {money(@short_put.strike)} or above {money(@short_call.strike)} the loss grows until the bought wing takes over. The most it
           can lose is {money(@trade.summary.max_loss)}.
@@ -494,7 +494,7 @@ defmodule OpusWeb.Components.PaperTrades do
     ~H"""
     <div class="grid gap-3 sm:grid-cols-2">
       <.play_card tone="success">
-        <:title><.t s="If it goes well" wsb="If it prints (first one is free)" /></:title>
+        <:title><.t {copy("If it goes well")} /></:title>
         <li :if={@book == "ideas"}>
           {@trade.symbol} bounces off the dip and the call doubles: sold at {money(
             @call.open_price * 2
@@ -517,7 +517,7 @@ defmodule OpusWeb.Components.PaperTrades do
         />
       </.play_card>
       <.play_card tone="error">
-        <:title><.t s="If it goes wrong" wsb="If it goes GUH" /></:title>
+        <:title><.t {copy("If it goes wrong")} /></:title>
         <li :if={@call.quantity > 1 or @book == "ideas"}>
           The dip keeps going and the call halves: sold at {money(@call.open_price / 2)}, about {money(
             @paid / 2
@@ -556,7 +556,7 @@ defmodule OpusWeb.Components.PaperTrades do
     ~H"""
     <div class="grid gap-3 sm:grid-cols-2">
       <.play_card tone="success">
-        <:title><.t s="If the market crashes" wsb="If it all burns (the put prints)" /></:title>
+        <:title><.t {copy("If the market crashes")} /></:title>
         <li :if={@book == "crash_puts"}>
           {@trade.symbol} drops through {money(@put.strike)} and the put gains. It's held to the
           21-day roll and sold there, so the gain lands then.
@@ -577,7 +577,7 @@ defmodule OpusWeb.Components.PaperTrades do
         />
       </.play_card>
       <.play_card tone="error">
-        <:title><.t s="If it stays calm" wsb="If nothing happens (insurance wasted)" /></:title>
+        <:title><.t {copy("If it stays calm")} /></:title>
         <li>
           The put decays and is sold at 21 days for what's left, and the next month's is bought.
           The difference is what the insurance costs: at most the {money(@paid)} paid this month.

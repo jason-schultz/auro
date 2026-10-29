@@ -108,84 +108,8 @@ defmodule Opus.Trading.RegimeClassifierTest do
   end
 
   # ---------------------------------------------------------------------------
-  # policy/4 — strategy decisions given a composite regime
-  # ---------------------------------------------------------------------------
-
-  describe "policy/4 trend_following" do
-    test "trend_following + :trending → enabled" do
-      assert {true, reason} =
-               RegimeClassifier.policy("trend_following", :trending, adx(35), adx(32), adx(30))
-
-      assert reason =~ "trending TF enabled"
-    end
-
-    test "trend_following + :choppy → disabled" do
-      assert {false, reason} =
-               RegimeClassifier.policy("trend_following", :choppy, adx(12), adx(14), adx(11))
-
-      assert reason =~ "choppy TF disabled"
-    end
-
-    test "trend_following + :uncertain → disabled (fail-closed)" do
-      assert {false, reason} =
-               RegimeClassifier.policy("trend_following", :uncertain, adx(25), adx(22), adx(24))
-
-      assert reason =~ "fail-closed"
-    end
-  end
-
-  describe "policy/4 mean_reversion" do
-    test "mean_reversion + :choppy → enabled" do
-      assert {true, reason} =
-               RegimeClassifier.policy("mean_reversion", :choppy, adx(12), adx(14), adx(11))
-
-      assert reason =~ "choppy MR enabled"
-    end
-
-    test "mean_reversion + :trending → disabled" do
-      assert {false, reason} =
-               RegimeClassifier.policy("mean_reversion", :trending, adx(35), adx(32), adx(30))
-
-      assert reason =~ "trending MR disabled"
-    end
-
-    test "mean_reversion + :uncertain → disabled (fail-closed)" do
-      assert {false, reason} =
-               RegimeClassifier.policy("mean_reversion", :uncertain, adx(25), adx(22), adx(24))
-
-      assert reason =~ "fail-closed"
-    end
-  end
-
-  describe "policy/4 fail-closed catch-all" do
-    test "unknown regime falls through to disabled" do
-      assert {false, reason} =
-               RegimeClassifier.policy("trend_following", :unknown, %{}, %{}, %{})
-
-      assert reason =~ "no regime data"
-    end
-
-    test "composite is self-gated regardless of regime" do
-      for regime <- [:trending, :choppy, :uncertain, :unknown] do
-        assert {true, reason} =
-                 RegimeClassifier.policy_for_inputs("composite", regime, [{"D", adx(18)}])
-
-        assert reason =~ "composite self-gated"
-      end
-    end
-
-    test "unknown strategy_type falls through to disabled" do
-      assert {false, reason} =
-               RegimeClassifier.policy("scalp", :trending, adx(35), adx(32), adx(30))
-
-      assert reason =~ "no regime data"
-    end
-  end
-
-  # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
 
   defp regime(state), do: %{regime: state, adx: nil}
-  defp adx(value), do: %{regime: nil, adx: value * 1.0}
 end

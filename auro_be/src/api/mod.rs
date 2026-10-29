@@ -13,6 +13,7 @@ mod positions;
 mod questrade;
 mod rules;
 mod signal_preview;
+mod strategy_report;
 mod wealthsimple;
 mod ws;
 
@@ -39,6 +40,11 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/strategy/signal-preview",
             post(signal_preview::preview_signals),
+        )
+        .route("/api/strategy/report", post(strategy_report::equity_report))
+        .route(
+            "/api/strategy/sensitivity",
+            post(strategy_report::sensitivity),
         )
         .route("/api/open-trades", get(account::get_open_trades))
         .route(
@@ -87,10 +93,6 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/live/strategies/{id}/toggle",
             post(live_strategies::toggle_live_strategy),
-        )
-        .route(
-            "/api/live/strategies/{id}/curator/auto",
-            post(live_strategies::reset_live_strategy_curator_auto),
         )
         .route(
             "/api/live/strategies/{id}",

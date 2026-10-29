@@ -8,10 +8,6 @@
                     :label="`${summary.trading} trading / ${summary.live} live`"
                     extra-class="bg-emerald-500/12 text-emerald-300"
                 />
-                <BadgePill
-                    :label="`curator: ${summary.curator_enabled ? 'on' : 'off'}`"
-                    :extra-class="summary.curator_enabled ? 'bg-blue-500/12 text-blue-300' : 'bg-muted text-muted-foreground'"
-                />
                 <span class="text-muted-foreground">As of {{ asOfLabel }}</span>
             </div>
         </div>

@@ -4,23 +4,9 @@ defmodule OpusWeb.RulesControllerTest do
   alias Opus.Repo
   alias Opus.Trading.{LiveStrategy, Rule}
 
-  import Ecto.Query
-
   setup do
     Repo.delete_all(Rule)
     Repo.delete_all(LiveStrategy)
-
-    case Repo.query("SELECT to_regclass('public.trading_config')") do
-      {:ok, %{rows: [[nil]]}} ->
-        :ok
-
-      {:ok, _} ->
-        from(c in "trading_config", where: c.key == "curator_enabled")
-        |> Repo.delete_all()
-
-      {:error, _reason} ->
-        :ok
-    end
 
     :ok
   end
@@ -30,7 +16,7 @@ defmodule OpusWeb.RulesControllerTest do
     body = json_response(conn, 200)
 
     assert body["computed_at"] == nil
-    assert body["summary"] == %{"trading" => 0, "live" => 0, "curator_enabled" => false}
+    assert body["summary"] == %{"trading" => 0, "live" => 0}
     assert body["strategies"] == []
   end
 
@@ -55,7 +41,7 @@ defmodule OpusWeb.RulesControllerTest do
     body = json_response(conn, 200)
 
     assert body["computed_at"] == nil
-    assert body["summary"] == %{"trading" => 0, "live" => 0, "curator_enabled" => false}
+    assert body["summary"] == %{"trading" => 0, "live" => 0}
     assert body["strategies"] == []
   end
 
@@ -134,24 +120,11 @@ defmodule OpusWeb.RulesControllerTest do
       }
     ])
 
-    case Repo.query("SELECT to_regclass('public.trading_config')") do
-      {:ok, %{rows: [[nil]]}} ->
-        :ok
-
-      {:ok, _} ->
-        Repo.query!(
-          "INSERT INTO trading_config (key, value, updated_at) VALUES ('curator_enabled', 'true'::jsonb, NOW()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()"
-        )
-
-      {:error, _reason} ->
-        :ok
-    end
-
     conn = get(conn, "/api/rules/state")
     body = json_response(conn, 200)
 
     assert body["computed_at"]
-    assert body["summary"] == %{"trading" => 1, "live" => 2, "curator_enabled" => true}
+    assert body["summary"] == %{"trading" => 1, "live" => 2}
 
     assert [%{"live_strategy_id" => first_id} | _] = body["strategies"]
     assert first_id == tactical_on_id

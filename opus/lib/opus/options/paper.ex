@@ -38,20 +38,6 @@ defmodule Opus.Options.Paper do
   @spec books() :: [String.t()]
   def books, do: Trade.strategies()
 
-  @book_names %{
-    "wheel" => {"Wheel", "Theta gang"},
-    "put_spread" => {"Put spreads", "Spread degen"},
-    "iron_condor" => {"Iron condors", "Condor prayers"},
-    "ideas" => {"Ideas", "Dip YOLOs"},
-    "ideas_half" => {"Ideas · half at double", "Dip YOLOs · house money"},
-    "crash_puts" => {"Crash puts", "Doomsday puts"},
-    "crash_puts_half" => {"Crash puts · half at double", "Doomsday puts · house money"}
-  }
-
-  @doc "A book's display names, serious and WSB."
-  @spec book_name(String.t()) :: {String.t(), String.t()}
-  def book_name(book), do: Map.get(@book_names, book, {book, book})
-
   @doc "The underlyings a book trades: configured, or every stored chain for ideas."
   @spec underlyings(String.t()) :: [String.t()]
   def underlyings(book) when book in ~w(ideas ideas_half),

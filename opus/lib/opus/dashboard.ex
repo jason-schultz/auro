@@ -19,6 +19,7 @@ defmodule Opus.Dashboard do
   alias Opus.Journal.TradeStory
   alias Opus.Options
   alias Opus.Options.Paper
+  alias Opus.Trading.AccountPause
   alias Opus.Options.Paper.{Legs, Wheel}
   alias Opus.Repo
   alias Opus.Trading.Strategies
@@ -44,6 +45,7 @@ defmodule Opus.Dashboard do
       engine: engine(health),
       candle_age: candle_age(health),
       suspensions: suspensions(),
+      account_pause: account_pause(),
       failed_jobs: failed_jobs(now),
       offline_brokers: [],
       exposure: exposure,
@@ -103,6 +105,21 @@ defmodule Opus.Dashboard do
     do: age
 
   defp candle_age(_health), do: nil
+
+  defp account_pause do
+    case AccountPause.open() do
+      nil ->
+        nil
+
+      p ->
+        %{
+          down: AccountPause.drawdown(p.peak_nav, p.nav),
+          peak: p.peak_nav,
+          nav: p.nav,
+          limit: p.limit_pct
+        }
+    end
+  end
 
   defp suspensions do
     for %{suspension: %{} = s} = row <- Strategies.list() do
@@ -428,12 +445,8 @@ defmodule Opus.Dashboard do
         do: Enum.count(data.trades, &(&1.short || &1.shares)),
         else: Enum.count(data.trades, &(&1.status == "open"))
 
-    {name, wsb} = Paper.book_name(book)
-
     %{
       book: book,
-      name: name,
-      wsb: wsb,
       value: data.value,
       pnl: data.pnl,
       return: data.return,

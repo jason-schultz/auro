@@ -429,34 +429,26 @@ defmodule OpusWeb.OptionsLive do
         <header class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
           <div class="flex flex-wrap items-baseline gap-3">
             <h1 class="text-[22px] font-semibold tracking-tight">
-              <.t s="Options" wsb="The Casino" />
+              <.t {copy("Options")} />
             </h1>
             <span class="text-[13px] text-muted">
-              <.t
-                s={scan_line(@ideas_scanned_on, @ideas, @chain, "ideas")}
-                wsb={
-                  scan_line(@ideas_scanned_on, @ideas, @chain, "plays · the regards have assembled")
-                }
-              />
+              <.t {scan_line(@ideas_scanned_on, @ideas, @chain)} />
             </span>
           </div>
           <span class="text-[13px] text-muted">
-            <.t
-              s="Nothing here places a trade."
-              wsb="Not financial advice. This page places nothing. It eats crayons."
-            />
+            <.t {copy("Nothing here places a trade.")} />
           </span>
         </header>
 
         <nav aria-label="Options views" class="flex gap-1 border-b border-base-300">
           <.view_tab view="workbench" current={@view} path={~p"/options"}>
-            <.t s="Workbench" wsb="The casino floor" />
+            <.t {copy("Workbench")} />
           </.view_tab>
           <.view_tab view="custom" current={@view} path={~p"/options?view=custom"}>
-            <.t s="Your own contract" wsb="Type your own degen contract" />
+            <.t {copy("Your own contract")} />
           </.view_tab>
           <.view_tab view="paper" current={@view} path={~p"/options?view=paper"}>
-            <.t s="Paper book" wsb="Theta gang" />
+            <.t {copy("Paper book")} />
             <span
               :if={@paper_counts != %{}}
               class="rounded-full bg-base-300 px-1.5 text-[11px] font-medium text-base-content"
@@ -482,10 +474,10 @@ defmodule OpusWeb.OptionsLive do
         >
           <button
             :for={
-              {pane, label, meme} <- [
-                {"ideas", "Ideas", "Plays"},
-                {"chain", "Chain", "The menu"},
-                {"position", "Position", "The play"}
+              {pane, label} <- [
+                {"ideas", copy("Ideas")},
+                {"chain", copy("Chain")},
+                {"position", copy("Position")}
               ]
             }
             type="button"
@@ -497,7 +489,7 @@ defmodule OpusWeb.OptionsLive do
               if(pane == @pane, do: "bg-base-300 font-medium", else: "text-muted")
             ]}
           >
-            <.t s={label} wsb={meme} />
+            <.t {label} />
           </button>
         </div>
 
@@ -524,10 +516,7 @@ defmodule OpusWeb.OptionsLive do
               <.position analysis={@analysis} params={@params} form={@form} busy={@busy} />
             <% else %>
               <div class="flex flex-col gap-2 rounded-box border border-base-300 bg-base-200 px-5 py-4">
-                <span class="text-[15px] font-semibold"><.t
-                  s="Pick a contract"
-                  wsb="Pick a play, regard"
-                /></span>
+                <span class="text-[15px] font-semibold"><.t {copy("Pick a contract")} /></span>
                 <p class="text-[13px] text-muted">
                   Choose an idea or a strike from the chain and the position shows up here: what you pay,
                   the payoff by price, and what happens at expiry.
@@ -543,7 +532,7 @@ defmodule OpusWeb.OptionsLive do
             class="flex w-full min-w-0 flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4 sm:w-[420px] sm:flex-none"
           >
             <span class="text-[15px] font-semibold">
-              <.t s="Type a contract" wsb="Type your own degen contract" />
+              <.t {copy("Type a contract")} />
             </span>
             <p class="text-[13px] text-muted">
               For a contract the scan and the stored chains don't have: copy its numbers from your
@@ -615,13 +604,22 @@ defmodule OpusWeb.OptionsLive do
   defp pane_class(pane, pane), do: "flex"
   defp pane_class(_pane, _name), do: "hidden sm:flex"
 
-  defp scan_line(nil, _ideas, _chain, _noun), do: "no scan yet"
+  defp scan_line(nil, _ideas, _chain), do: copy("no scan yet")
 
-  defp scan_line(scanned_on, ideas, chain, noun) do
-    captured =
-      if chain.captured_at, do: " · chains captured #{stamp(chain.captured_at)} UTC", else: ""
+  defp scan_line(scanned_on, ideas, %{captured_at: nil}) do
+    copy_n("%{day} scan · %{count} idea", "%{day} scan · %{count} ideas", length(ideas),
+      day: Calendar.strftime(scanned_on, "%b %-d")
+    )
+  end
 
-    "#{Calendar.strftime(scanned_on, "%b %-d")} scan · #{length(ideas)} #{noun}#{captured}"
+  defp scan_line(scanned_on, ideas, chain) do
+    copy_n(
+      "%{day} scan · %{count} idea · chains captured %{at} UTC",
+      "%{day} scan · %{count} ideas · chains captured %{at} UTC",
+      length(ideas),
+      day: Calendar.strftime(scanned_on, "%b %-d"),
+      at: stamp(chain.captured_at)
+    )
   end
 
   attr :ideas, :list, required: true
@@ -651,23 +649,20 @@ defmodule OpusWeb.OptionsLive do
       @class
     ]}>
       <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-4 pt-3.5 pb-2.5">
-        <span class="text-[15px] font-semibold"><.t s="Ideas" wsb="Today's plays" /></span>
+        <span class="text-[15px] font-semibold"><.t {pcopy("heading", "Ideas")} /></span>
         <span :if={@scanned_on} class="text-[12px] text-muted">
-          <.t
-            s="implied vs realized, at the money · cheapest first"
-            wsb="vol tax at the money · cheapest first"
-          />
+          <.t {copy("implied vs realized, at the money · cheapest first")} />
         </span>
         <span :if={!@scanned_on} class="text-[12px] text-muted">no scan yet</span>
       </div>
       <div :if={@scanned_on} class="flex flex-wrap gap-1.5 px-4 pb-2.5">
         <button
           :for={
-            {filter, label, meme} <- [
-              {"all", "All #{length(@live)}", "All #{length(@live)}"},
-              {"dip_buy", "Dip-buy #{@dip_buy}", "Buy the dip #{@dip_buy}"},
-              {"calls", "Calls", "Calls 🚀"},
-              {"puts", "Puts", "Puts 🌈🐻"}
+            {filter, label} <- [
+              {"all", copy("All %{count}", count: length(@live))},
+              {"dip_buy", copy("Dip-buy %{count}", count: @dip_buy)},
+              {"calls", copy("Calls")},
+              {"puts", copy("Puts")}
             ]
           }
           type="button"
@@ -682,7 +677,7 @@ defmodule OpusWeb.OptionsLive do
             )
           ]}
         >
-          <.t s={label} wsb={meme} />
+          <.t {label} />
         </button>
       </div>
       <p :if={!@scanned_on} class="border-t border-base-300 px-4 py-3 text-[13px] text-muted">
@@ -706,10 +701,10 @@ defmodule OpusWeb.OptionsLive do
               <th class="border-b border-base-300 px-4 py-2 font-medium">Contract</th>
               <th class="border-b border-base-300 px-2 py-2 text-right font-medium">Ask</th>
               <th class="border-b border-base-300 px-2 py-2 text-right font-medium">
-                <.t s="IV / RV" wsb="Vol tax" />
+                <.t {copy("IV / RV")} />
               </th>
               <th class="border-b border-base-300 py-2 pr-2 pl-2 text-right font-medium">
-                <.t s="Needs · gets" wsb="Needs · wiggle" />
+                <.t {copy("Needs · gets")} />
               </th>
               <th class="border-b border-base-300 py-2 pr-2"></th>
             </tr>
@@ -741,7 +736,7 @@ defmodule OpusWeb.OptionsLive do
                     <span
                       :if={idea.lottery}
                       class="ml-1 rounded-full bg-error px-2 py-0.5 text-[11px] font-semibold text-error-content"
-                    ><.t s="Lottery" wsb="YOLO" /></span>
+                    ><.t {copy("Lottery")} /></span>
                   </span>
                   <span :if={idea.list == "dip_buy"} class="block text-[12px] text-muted">{idea.setup}</span>
                 </button>
@@ -768,10 +763,7 @@ defmodule OpusWeb.OptionsLive do
         </table>
       </div>
       <p :if={@scanned_on} class="border-t border-base-300 px-4 py-2.5 text-[12px] text-muted">
-        <.t
-          s="IV / RV over 1 means the market prices more movement than the stock has delivered. Lottery tickets are deltas under 0.15."
-          wsb="Vol tax over 1 means you pay theta gang for the privilege. YOLO is a delta under 0.15: a scratch-off with extra steps."
-        />
+        <.t {copy("IV / RV over 1 means the market prices more movement than the stock has delivered. Lottery tickets are deltas under 0.15.")} />
       </p>
     </section>
     """
@@ -809,7 +801,7 @@ defmodule OpusWeb.OptionsLive do
       @class
     ]}>
       <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-4 pt-3.5 pb-2.5">
-        <span class="text-[15px] font-semibold"><.t s="Chain" wsb="The menu (option chain)" />
+        <span class="text-[15px] font-semibold"><.t {pcopy("heading", "Chain")} />
         · {@chain.underlying} {@chain.kind}s</span>
         <span :if={@chain.captured_at} class="text-[12px] text-muted">
           spot {money(@chain.spot)} · {if @chain.expiration,
@@ -878,10 +870,7 @@ defmodule OpusWeb.OptionsLive do
                   phx-value-strike={plain(row.strike)}
                   class="font-medium hover:text-primary"
                 >
-                  {money(row.strike)}<span :if={row.at_the_money} class="ml-1 font-normal text-muted"><.t
-                    s="at the money"
-                    wsb="ATM"
-                  /></span>
+                  {money(row.strike)}<span :if={row.at_the_money} class="ml-1 font-normal text-muted"><.t {copy("at the money")} /></span>
                 </button>
               </td>
               <td class="px-2 py-1.5 text-right">{num(row.bid)}</td>
@@ -896,10 +885,7 @@ defmodule OpusWeb.OptionsLive do
         </table>
       </div>
       <p class="border-t border-base-300 px-4 py-2.5 text-[12px] text-muted">
-        <.t
-          s="Click a strike and the position follows: the ask if you are buying, the bid if you are selling."
-          wsb="Tap a strike and the play follows: the ask when you go long, the bid when you join theta gang."
-        />
+        <.t {copy("Click a strike and the position follows: the ask if you are buying, the bid if you are selling.")} />
       </p>
     </section>
     """
@@ -924,10 +910,7 @@ defmodule OpusWeb.OptionsLive do
       <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         <div class="flex min-w-0 flex-col gap-0.5">
           <span class="text-[13px] text-muted">
-            <.t
-              s={strategy_name(@analysis["strategy"])}
-              wsb={wsb_strategy_name(@analysis["strategy"])}
-            />
+            <.t {strategy_name(@analysis["strategy"])} />
           </span>
           <span class="text-[22px] font-semibold leading-tight tracking-tight">
             {@params["underlying"]} {money(@analysis["strike"])} {Options.kind(@params["strategy"])}, {expiry_label(
@@ -985,23 +968,15 @@ defmodule OpusWeb.OptionsLive do
           />
           <button :if={@tune} type="submit" disabled={@busy} class="btn btn-sm mb-2">
             <span :if={@busy}>…</span>
-            <.t :if={!@busy} s="Update" wsb="Send it" />
+            <.t :if={!@busy} {copy("Update")} />
           </button>
           <button
             type="button"
             phx-click="side"
             class="btn btn-sm btn-ghost mb-2 min-w-36 whitespace-nowrap"
           >
-            <.t
-              :if={Options.side(@params["strategy"]) == :buy}
-              s="Sell it instead"
-              wsb="🌈🐻 Bear it instead"
-            />
-            <.t
-              :if={Options.side(@params["strategy"]) != :buy}
-              s="Buy it instead"
-              wsb="🚀 Long it instead"
-            />
+            <.t :if={Options.side(@params["strategy"]) == :buy} {copy("Sell it instead")} />
+            <.t :if={Options.side(@params["strategy"]) != :buy} {copy("Buy it instead")} />
           </button>
         </.form>
       </div>
@@ -1014,7 +989,6 @@ defmodule OpusWeb.OptionsLive do
       <.stat
         :for={stat <- stats(@analysis)}
         label={stat.label}
-        wsb_label={stat.wsb_label}
         value={stat.value}
         hint={stat.hint}
         tone={stat.tone}
@@ -1025,7 +999,7 @@ defmodule OpusWeb.OptionsLive do
 
     <details class="rounded-box border border-base-300 bg-base-200">
       <summary class="flex cursor-pointer items-center justify-between px-5 py-3 text-[14px] font-medium">
-        <.t s="Price by price, at expiry" wsb="Price by price, for the DD post" />
+        <.t {copy("Price by price, at expiry")} />
         <span class="text-[12px] font-normal text-muted">{length(@analysis["scenarios"])} rows</span>
       </summary>
       <div class="px-5 pb-4"><.scenario_table analysis={@analysis} /></div>
@@ -1148,39 +1122,30 @@ defmodule OpusWeb.OptionsLive do
       <.outcome_card
         :for={card <- outcome_cards(@analysis)}
         title={card.title}
-        wsb_title={card.wsb_title}
         body={card.body}
         amount={card.amount}
-        wsb_amount={card.wsb_amount}
         tone={card.tone}
       />
     </section>
     """
   end
 
-  attr :title, :string, required: true
+  attr :title, :map, required: true, doc: "copy/1"
   attr :body, :string, required: true
-  attr :amount, :any, required: true
+  attr :amount, :map, required: true, doc: "copy/1"
   attr :tone, :atom, required: true
-
-  attr :wsb_title, :string, required: true
-  attr :wsb_amount, :string, required: true
 
   defp outcome_card(assigns) do
     ~H"""
     <div class="flex flex-col gap-1.5 rounded-box border border-base-300 bg-base-200 px-5 py-4">
-      <span class="text-[14px] font-semibold"><.t s={@title} wsb={@wsb_title} /></span>
+      <span class="text-[14px] font-semibold"><.t {@title} /></span>
       <p class="text-[13px] leading-relaxed text-muted">{@body}</p>
-      <span class={["text-[18px] font-semibold", tone_class(@tone)]}><.t
-        s={@amount}
-        wsb={@wsb_amount}
-      /></span>
+      <span class={["text-[18px] font-semibold", tone_class(@tone)]}><.t {@amount} /></span>
     </div>
     """
   end
 
-  attr :label, :string, required: true
-  attr :wsb_label, :string, default: nil
+  attr :label, :map, required: true, doc: "copy/1"
   attr :value, :string, required: true
   attr :hint, :string, required: true
   attr :tone, :atom, default: :neutral
@@ -1188,7 +1153,7 @@ defmodule OpusWeb.OptionsLive do
   defp stat(assigns) do
     ~H"""
     <div class="flex flex-col gap-0.5">
-      <span class="text-xs text-muted"><.t s={@label} wsb={@wsb_label || @label} /></span>
+      <span class="text-xs text-muted"><.t {@label} /></span>
       <span class={["text-[19px] font-semibold", tone_class(@tone)]}>{@value}</span>
       <span class="text-xs leading-snug text-muted">{@hint}</span>
     </div>
@@ -1233,17 +1198,11 @@ defmodule OpusWeb.OptionsLive do
 
   # --- copy ---
 
-  defp strategy_name("cash_secured_put"), do: "Cash-secured put"
-  defp strategy_name("covered_call"), do: "Covered call"
-  defp strategy_name("long_call"), do: "Long call"
-  defp strategy_name("long_put"), do: "Long put"
-  defp strategy_name(other), do: other
-
-  defp wsb_strategy_name("cash_secured_put"), do: "Theta gang · cash-secured put"
-  defp wsb_strategy_name("covered_call"), do: "Theta gang · covered call"
-  defp wsb_strategy_name("long_call"), do: "Degen long call 🚀"
-  defp wsb_strategy_name("long_put"), do: "Gay bear long put 🌈🐻"
-  defp wsb_strategy_name(other), do: other
+  defp strategy_name("cash_secured_put"), do: copy("Cash-secured put")
+  defp strategy_name("covered_call"), do: copy("Covered call")
+  defp strategy_name("long_call"), do: copy("Long call")
+  defp strategy_name("long_put"), do: copy("Long put")
+  defp strategy_name(other), do: %{s: other, wsb: other}
 
   defp headline_text(%{"strategy" => "cash_secured_put"} = a) do
     "You collect #{money(a["premium_total"])} now and promise to buy #{shares(a["shares"])} shares at #{money(a["strike"])} if asked."
@@ -1264,21 +1223,17 @@ defmodule OpusWeb.OptionsLive do
   defp outcome_cards(%{"strategy" => "cash_secured_put"} = a) do
     [
       %{
-        title: "If the stock stays above #{money(a["strike"])}",
-        wsb_title: "Theta gang wins: stock stays above #{money(a["strike"])}",
+        title: copy("If the stock stays above %{strike}", strike: money(a["strike"])),
         body:
           "The put expires worthless. Nobody makes you buy anything. You keep the premium and your #{money(a["capital_required"])} is free again.",
-        amount: "+#{money(a["premium_total"])} kept",
-        wsb_amount: "+#{money(a["premium_total"])} tendies",
+        amount: copy("+%{premium} kept", premium: money(a["premium_total"])),
         tone: :good
       },
       %{
-        title: "If the stock closes below #{money(a["strike"])}",
-        wsb_title: "Bagholder: stock closes below #{money(a["strike"])}",
+        title: copy("If the stock closes below %{strike}", strike: money(a["strike"])),
         body:
           "You are assigned: you buy #{shares(a["shares"])} shares at #{money(a["strike"])}, paying #{money(a["capital_required"])}. With the premium, your real cost is #{money(a["breakeven"])} a share. You lose money only if the stock is below that.",
-        amount: "Own shares at #{money(a["breakeven"])} effective",
-        wsb_amount: "Bags at #{money(a["breakeven"])}, hold the line 💎🙌",
+        amount: copy("Own shares at %{breakeven} effective", breakeven: money(a["breakeven"])),
         tone: :neutral
       }
     ]
@@ -1287,21 +1242,17 @@ defmodule OpusWeb.OptionsLive do
   defp outcome_cards(%{"strategy" => "covered_call"} = a) do
     [
       %{
-        title: "If the stock stays below #{money(a["strike"])}",
-        wsb_title: "Theta gang wins: stock stays below #{money(a["strike"])}",
+        title: copy("If the stock stays below %{strike}", strike: money(a["strike"])),
         body:
           "The call expires worthless. You keep your shares and the premium, and can sell another call next cycle.",
-        amount: "+#{money(a["premium_total"])} kept",
-        wsb_amount: "+#{money(a["premium_total"])} tendies",
+        amount: copy("+%{premium} kept", premium: money(a["premium_total"])),
         tone: :good
       },
       %{
-        title: "If the stock closes above #{money(a["strike"])}",
-        wsb_title: "Shares yoinked above #{money(a["strike"])}",
+        title: copy("If the stock closes above %{strike}", strike: money(a["strike"])),
         body:
           "You are assigned: your #{shares(a["shares"])} shares are sold at #{money(a["strike"])} no matter how high the stock went. You keep the premium too. That is the most this position can make.",
-        amount: "#{payoff_money(a["max_gain"])} best case",
-        wsb_amount: "#{payoff_money(a["max_gain"])} max tendies, no moon for you",
+        amount: copy("%{gain} best case", gain: payoff_money(a["max_gain"])),
         tone: :good
       }
     ]
@@ -1310,21 +1261,17 @@ defmodule OpusWeb.OptionsLive do
   defp outcome_cards(%{"strategy" => "long_call"} = a) do
     [
       %{
-        title: "If the stock stays below #{money(a["strike"])}",
-        wsb_title: "GUH: stock stays below #{money(a["strike"])}",
+        title: pcopy("buyer", "If the stock stays below %{strike}", strike: money(a["strike"])),
         body:
           "The call expires worthless and the premium is gone. That is the most you can lose.",
-        amount: "-#{money(a["max_loss"])} lost",
-        wsb_amount: "−#{money(a["max_loss"])} · GUH",
+        amount: copy("-%{loss} lost", loss: money(a["max_loss"])),
         tone: :bad
       },
       %{
-        title: "If the stock closes above #{money(a["breakeven"])}",
-        wsb_title: "Tendies: stock closes above #{money(a["breakeven"])}",
+        title: copy("If the stock closes above %{breakeven}", breakeven: money(a["breakeven"])),
         body:
           "You make money. Between #{money(a["strike"])} and #{money(a["breakeven"])} the call has value but less than you paid. Above #{money(a["breakeven"])} every dollar of stock is #{money(a["shares"])} to you.",
-        amount: "Unlimited upside",
-        wsb_amount: "To the moon 🚀",
+        amount: copy("Unlimited upside"),
         tone: :good
       }
     ]
@@ -1333,20 +1280,16 @@ defmodule OpusWeb.OptionsLive do
   defp outcome_cards(%{"strategy" => "long_put"} = a) do
     [
       %{
-        title: "If the stock stays above #{money(a["strike"])}",
-        wsb_title: "GUH: stock stays above #{money(a["strike"])}",
+        title: pcopy("buyer", "If the stock stays above %{strike}", strike: money(a["strike"])),
         body: "The put expires worthless and the premium is gone. That is the most you can lose.",
-        amount: "-#{money(a["max_loss"])} lost",
-        wsb_amount: "−#{money(a["max_loss"])} · GUH",
+        amount: copy("-%{loss} lost", loss: money(a["max_loss"])),
         tone: :bad
       },
       %{
-        title: "If the stock closes below #{money(a["breakeven"])}",
-        wsb_title: "🌈🐻 tendies: stock closes below #{money(a["breakeven"])}",
+        title: copy("If the stock closes below %{breakeven}", breakeven: money(a["breakeven"])),
         body:
           "You make money. The put is worth the distance from #{money(a["strike"])} down to the stock price, less what you paid. Best case the stock goes to zero.",
-        amount: "#{payoff_money(a["max_gain"])} best case",
-        wsb_amount: "#{payoff_money(a["max_gain"])} if it goes to zero, hedgies r fuk",
+        amount: pcopy("buyer", "%{gain} best case", gain: payoff_money(a["max_gain"])),
         tone: :good
       }
     ]
@@ -1357,9 +1300,7 @@ defmodule OpusWeb.OptionsLive do
 
     [
       %{
-        label: if(seller?, do: "Money set aside", else: "Money at risk"),
-        wsb_label:
-          if(seller?, do: "Cash parked, wife's boyfriend approved", else: "Loss porn, max"),
+        label: if(seller?, do: copy("Money set aside"), else: copy("Money at risk")),
         value: money(a["capital_required"]),
         tone: if(seller?, do: :warn, else: :bad),
         hint:
@@ -1369,51 +1310,44 @@ defmodule OpusWeb.OptionsLive do
           )
       },
       %{
-        label: "Premium",
-        wsb_label: "Premium",
+        label: copy("Premium"),
         value:
           if(seller?, do: "+#{money(a["premium_total"])}", else: "-#{money(a["premium_total"])}"),
         tone: if(seller?, do: :good, else: :bad),
         hint: if(seller?, do: "Paid to you today, yours to keep.", else: "Paid by you today.")
       },
       %{
-        label: "Yield",
-        wsb_label: "Theta gang pay",
+        label: copy("Yield"),
         value: "#{pct(a["yield_on_capital"])} · #{pct(a["annualized_yield"])}/yr",
         tone: :good,
         hint: "Premium over money set aside, then scaled to a year for comparing expiries."
       },
       %{
-        label: "Breakeven",
-        wsb_label: "Breakeven, where you stop being poor",
+        label: copy("Breakeven"),
         value: money(a["breakeven"]),
         tone: :warn,
         hint: "Stock price at expiry where you neither make nor lose money."
       },
       %{
-        label: if(seller?, do: "Chance of assignment", else: "Chance it pays"),
-        wsb_label: if(seller?, do: "Bagholder odds", else: "Prints?"),
+        label: if(seller?, do: copy("Chance of assignment"), else: copy("Chance it pays")),
         value: maybe_pct(a["probability_itm"]),
         tone: :warn,
         hint: "Model estimate from the option's own volatility. Not a promise."
       },
       %{
-        label: "Chance of a profit",
-        wsb_label: "Tendies odds",
+        label: copy("Chance of a profit"),
         value: maybe_pct(a["probability_profit"]),
         tone: odds_tone(a["probability_profit"]),
         hint: "Chance the stock ends on the right side of breakeven."
       },
       %{
-        label: "Expected move",
-        wsb_label: "The wiggle",
+        label: copy("Expected move"),
         value: if(a["expected_move"], do: "±#{money(a["expected_move"])}", else: "—"),
         tone: :warn,
         hint: "A typical one-standard-deviation move by expiry, from the volatility."
       },
       %{
-        label: "Worst case",
-        wsb_label: "Worst case · GUH",
+        label: copy("Worst case"),
         value: "-#{money(a["max_loss"])}",
         tone: :bad,
         hint: "If the stock goes to zero (or, for a long call, the premium)."

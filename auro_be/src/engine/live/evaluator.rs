@@ -327,6 +327,19 @@ async fn evaluate_entry(
         pct: risk_pct,
         max_notional_pct,
     } = composite.sizing;
+
+    if let Some(breach) =
+        rules.account_limit_breach(&strategy.instrument, risk_pct, open_positions.values())
+    {
+        tracing::info!(
+            "[GATED] {} {} entry blocked by account limit: {}",
+            strategy.instrument,
+            strategy.granularity,
+            breach
+        );
+        return Ok(Some(entry_rejected(strategy, current_price, breach)));
+    }
+
     let sized = match size_entry(
         state,
         &strategy.instrument,

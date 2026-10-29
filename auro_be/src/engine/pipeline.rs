@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use rand::RngExt;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -13,6 +14,7 @@ use crate::engine::strategy::{self as strategy_mod, Strategy};
 use crate::engine::types::{Candle, Granularity, Trade};
 use crate::error::{AppError, AppResult};
 
+#[derive(Clone)]
 pub struct StrategyConfig {
     pub id: Uuid,
     pub instrument: String,
@@ -28,7 +30,7 @@ pub struct EvaluationResult {
     pub failure_reason: Option<String>,
 }
 
-struct ThresholdRow {
+pub(crate) struct ThresholdRow {
     metric: String,
     operator: String,
     value: f64,
@@ -54,7 +56,7 @@ pub fn instrument_to_class(instrument: &str) -> &'static str {
     }
 }
 
-fn run_strategy(
+pub(crate) fn run_strategy(
     candles: &[Candle],
     config: &StrategyConfig,
     financing: &FinancingModel,
@@ -92,7 +94,8 @@ pub fn run_backtest_stats(
 ) -> AppResult<BacktestStats> {
     if candles.is_empty() {
         let empty: Vec<Trade> = Vec::new();
-        return Ok(calculate_backtest_stats(&empty));
+        let (from, to) = span(candles);
+        return Ok(calculate_backtest_stats(&empty, from, to));
     }
 
     if let Some(idx) = active_start_idx {
@@ -108,20 +111,24 @@ pub fn run_backtest_stats(
     let trades = run_strategy(candles, config, financing)?;
 
     match active_start_idx {
-        None | Some(0) => Ok(calculate_backtest_stats(&trades)),
+        None | Some(0) => {
+            let (from, to) = span(candles);
+            Ok(calculate_backtest_stats(&trades, from, to))
+        }
         Some(idx) => {
             let active_start_time = candles[idx].time;
             let filtered: Vec<Trade> = trades
                 .into_iter()
                 .filter(|t| t.entry_time >= active_start_time)
                 .collect();
-            Ok(calculate_backtest_stats(&filtered))
+            let (from, to) = span(&candles[idx..]);
+            Ok(calculate_backtest_stats(&filtered, from, to))
         }
     }
 }
 
 /// Overnight financing model for a stage's backtests (one DB read per stage).
-async fn load_financing(pool: &PgPool) -> AppResult<FinancingModel> {
+pub(crate) async fn load_financing(pool: &PgPool) -> AppResult<FinancingModel> {
     financing_repo::load_model(pool)
         .await
         .map_err(|e| AppError::Internal(format!("load financing model: {e}")))
@@ -130,7 +137,16 @@ async fn load_financing(pool: &PgPool) -> AppResult<FinancingModel> {
 /// How many standard errors the average trade sits above zero: the
 /// per-trade Sharpe (mean / spread of trade returns) times √trades. Around
 /// 2 or more means a result this good would rarely come from luck alone.
-fn t_stat(stats: &BacktestStats) -> f64 {
+/// The stretch `candles` cover, first bar to last, for the annual Sharpe.
+/// An empty slice is an empty stretch.
+pub(crate) fn span(candles: &[Candle]) -> (DateTime<Utc>, DateTime<Utc>) {
+    match (candles.first(), candles.last()) {
+        (Some(first), Some(last)) => (first.time, last.time),
+        _ => (Utc::now(), Utc::now()),
+    }
+}
+
+pub(crate) fn t_stat(stats: &BacktestStats) -> f64 {
     stats.sharpe_ratio * (stats.num_trades as f64).sqrt()
 }
 
@@ -162,7 +178,7 @@ fn operator_failure_text(operator: &str) -> &'static str {
 /// Judge stage stats against the thresholds, and record every check in
 /// `stats_json["checks"]` (`metric`, `operator`, `required`, `actual`,
 /// `passed`) so a page can show each rule next to its result.
-fn evaluate_thresholds(
+pub(crate) fn evaluate_thresholds(
     stats_json: &mut Value,
     thresholds: &[ThresholdRow],
     stage: &str,
@@ -248,7 +264,7 @@ pub async fn load_strategy_config(pool: &PgPool, config_id: Uuid) -> AppResult<S
     })
 }
 
-async fn load_thresholds(
+pub(crate) async fn load_thresholds(
     pool: &PgPool,
     stage: &str,
     timeframe_class: &str,
@@ -343,7 +359,7 @@ pub async fn load_holdout_start(pool: &PgPool) -> AppResult<chrono::DateTime<chr
 }
 
 /// The bars an exploration stage may see: everything before the holdout.
-async fn load_exploration_candles(
+pub(crate) async fn load_exploration_candles(
     pool: &PgPool,
     config: &StrategyConfig,
 ) -> AppResult<Vec<Candle>> {
@@ -438,11 +454,12 @@ pub async fn run_holdout(pool: &PgPool, config: &StrategyConfig) -> AppResult<Ev
 // Backtest stage
 // ---------------------------------------------------------------------------
 
-fn backtest_stats_to_json(stats: &BacktestStats) -> Value {
+pub(crate) fn backtest_stats_to_json(stats: &BacktestStats) -> Value {
     let expectancy = compute_expectancy(stats);
     serde_json::json!({
-        "sharpe":       stats.sharpe_ratio,
-        "t_stat":       t_stat(stats),
+        "sharpe":        stats.sharpe_ratio,
+        "annual_sharpe": stats.annual_sharpe,
+        "t_stat":        t_stat(stats),
         "max_drawdown": stats.max_drawdown.abs(),
         "num_trades":   stats.num_trades,
         "win_rate":     stats.win_rate,
@@ -530,6 +547,7 @@ fn walk_forward_stats_to_json(is_stats: &BacktestStats, oos_stats: &BacktestStat
     serde_json::json!({
         // Evaluated against thresholds
         "oos_sharpe":       oos_stats.sharpe_ratio,
+        "oos_annual_sharpe": oos_stats.annual_sharpe,
         "oos_t_stat":       t_stat(oos_stats),
         "oos_return":       oos_stats.total_return,
         "oos_num_trades":   oos_stats.num_trades,
@@ -580,8 +598,10 @@ pub async fn run_walk_forward(
         }
     };
 
-    let is_stats = calculate_backtest_stats(&is_trades);
-    let oos_stats = calculate_backtest_stats(&oos_trades);
+    let (is_from, is_to) = span(is_candles);
+    let (oos_from, oos_to) = span(oos_candles);
+    let is_stats = calculate_backtest_stats(&is_trades, is_from, is_to);
+    let oos_stats = calculate_backtest_stats(&oos_trades, oos_from, oos_to);
     let mut stats_json = walk_forward_stats_to_json(&is_stats, &oos_stats);
     let timeframe_class = config.granularity.timeframe_class();
     let instrument_class = instrument_to_class(&config.instrument);
@@ -860,7 +880,7 @@ mod tests {
             .iter()
             .map(|&p| trade_with_pnl(p))
             .collect();
-        let stats = calculate_backtest_stats(&trades);
+        let stats = calculate_backtest_stats(&trades, Utc::now(), Utc::now());
 
         assert!((t_stat(&stats) - stats.sharpe_ratio * 2.0).abs() < 1e-12);
         assert!(backtest_stats_to_json(&stats)["t_stat"].as_f64().is_some());

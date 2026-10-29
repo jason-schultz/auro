@@ -1,15 +1,17 @@
 defmodule OpusWeb.StrategyLive do
   @moduledoc """
-  One strategy on one instrument: its switch and curator state, whether its
+  One strategy on one instrument: its switch, whether its
   recipe is locked and the way to edit it (`OpusWeb.StrategyBuilderLive`),
   the other instruments the recipe runs on, the rules engine's verdict and
   the regime behind it, a chart of every buy and sell the rules made over
   the last bars with the rule strips that say why (the engine's signal
   preview, loaded after the page; the plain candle chart with the open
   position stands in while it loads or when the engine is down), the rules
-  in plain words, the indicator scalars right now, the evidence ladder
-  (backtest, walk-forward, Monte Carlo, holdout, live), its trades and its
-  signal log.
+  in plain words, the indicator scalars right now, the test results (how it
+  did against just holding the instrument over its whole test history, an
+  on-demand "is it fragile?" check at nearby settings, and the evidence
+  ladder: backtest, walk-forward, Monte Carlo, holdout, live), its trades
+  and its signal log.
 
   Everything but the statistics and indicator scalars comes from Opus's own
   tables, so the page stands when the engine is down and says so.
@@ -24,11 +26,13 @@ defmodule OpusWeb.StrategyLive do
   alias Opus.Auro.Client
   alias Opus.Journal.TradeStory
   alias Opus.Trading.Strategies
+  alias OpusWeb.WholeHistory
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     socket =
-      assign(socket,
+      socket
+      |> assign(
         id: id,
         s: nil,
         page_title: "Strategy",
@@ -36,12 +40,34 @@ defmodule OpusWeb.StrategyLive do
         focus: nil,
         preview_error: nil
       )
+      |> WholeHistory.init()
 
     {:ok, if(connected?(socket), do: load(socket), else: socket)}
   end
 
   @impl true
   def handle_event("refresh", _params, socket), do: {:noreply, load(socket)}
+
+  def handle_event("fragility_axes", params, socket),
+    do: {:noreply, WholeHistory.pick_axes(socket, params)}
+
+  def handle_event("check_fragility", _params, %{assigns: %{s: s}} = socket) do
+    {x, y} = WholeHistory.chosen_axes(socket.assigns)
+
+    {:noreply,
+     socket
+     |> assign(fragility: :running)
+     |> start_async(:fragility, fn ->
+       Strategies.fragility(
+         s.recipe.definition,
+         s.instrument,
+         s.granularity,
+         s.sizing_params,
+         x,
+         y
+       )
+     end)}
+  end
 
   def handle_event("pick_trade", %{"trade" => trade}, socket),
     do: {:noreply, assign(socket, focus: String.to_integer(trade))}
@@ -56,17 +82,6 @@ defmodule OpusWeb.StrategyLive do
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Could not flip the switch: #{describe(reason)}")}
-    end
-  end
-
-  def handle_event("curator", _params, socket) do
-    case Strategies.hand_back_to_curator(socket.assigns.id) do
-      {:ok, _} ->
-        {:noreply, socket |> put_flash(:info, "Handed back to the curator.") |> load()}
-
-      {:error, reason} ->
-        {:noreply,
-         put_flash(socket, :error, "Could not change curator mode: #{describe(reason)}")}
     end
   end
 
@@ -96,8 +111,12 @@ defmodule OpusWeb.StrategyLive do
       {:ok, s} ->
         socket
         |> assign(s: s, page_title: s.recipe.name)
+        |> WholeHistory.assign_axes(s.recipe.definition)
         |> start_async(:preview, fn ->
           Strategies.preview(s.recipe.definition, s.instrument, s.granularity, s.sizing_params)
+        end)
+        |> start_async(:report, fn ->
+          Strategies.report(s.recipe.definition, s.instrument, s.granularity, s.sizing_params)
         end)
 
       :error ->
@@ -114,6 +133,9 @@ defmodule OpusWeb.StrategyLive do
 
   def handle_async(:preview, {:exit, _reason}, socket),
     do: {:noreply, assign(socket, preview_error: "The signal preview didn't finish.")}
+
+  def handle_async(name, result, socket) when name in [:report, :fragility],
+    do: {:noreply, WholeHistory.put_result(socket, name, result)}
 
   defp describe(reason), do: Client.describe_error(reason)
 
@@ -137,7 +159,7 @@ defmodule OpusWeb.StrategyLive do
             navigate={~p"/strategies"}
             class="self-start text-[13px] text-muted hover:text-base-content"
           >
-            ← <.t s="Strategies" wsb="Plays" />
+            ← <.t {copy("Strategies")} />
           </.link>
           <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
             <div class="flex flex-col gap-1">
@@ -149,17 +171,14 @@ defmodule OpusWeb.StrategyLive do
               </div>
               <span class="text-[14px] text-muted">
                 {@s.instrument} · {@s.recipe.timeframe} · {@s.sizing} ·
-                <.t
-                  s="deployed"
-                  wsb="sent"
-                /> {stamp(@s.created_at)}
+                <.t {copy("deployed")} /> {stamp(@s.created_at)}
               </span>
               <div class="flex flex-wrap gap-2 pt-1">
                 <.link
                   navigate={~p"/strategies/recipes/#{@s.recipe.id}/edit?copy=1"}
                   class="inline-flex min-h-11 items-center rounded-field border border-base-300 px-3.5 text-[14px] font-medium hover:border-primary"
                 >
-                  <.t s="Copy as a new strategy" wsb="Clone this play" />
+                  <.t {copy("Copy as a new strategy")} />
                 </.link>
                 <.link
                   navigate={~p"/strategies/recipes/#{@s.recipe.id}/edit"}
@@ -170,9 +189,9 @@ defmodule OpusWeb.StrategyLive do
                     class="size-4"
                   />
                   <%= if @s.locked_by == [] do %>
-                    <.t s="Edit the rules" wsb="Tweak the play" />
+                    <.t {copy("Edit the rules")} />
                   <% else %>
-                    <.t s="Unlock to edit" wsb="Paper-hand the lock" />
+                    <.t {copy("Unlock to edit")} />
                   <% end %>
                 </.link>
               </div>
@@ -195,20 +214,9 @@ defmodule OpusWeb.StrategyLive do
                     if(@s.enabled, do: "bg-success", else: "bg-base-300")
                   ]}
                 />
-                <.t :if={@s.enabled} s="Enabled" wsb="Sending it" />
-                <.t :if={!@s.enabled} s="Disabled" wsb="Benched" />
+                <.t :if={@s.enabled} {copy("Enabled")} />
+                <.t :if={!@s.enabled} {copy("Disabled")} />
               </button>
-              <span class="text-muted">
-                {curator(@s.curator_mode)}
-                <button
-                  :if={@s.curator_mode != "auto"}
-                  type="button"
-                  phx-click="curator"
-                  class="ml-1 font-medium text-primary hover:brightness-110"
-                >
-                  <.t s="hand back to curator" wsb="let the curator cook" />
-                </button>
-              </span>
               <button
                 type="button"
                 phx-click="delete"
@@ -217,7 +225,7 @@ defmodule OpusWeb.StrategyLive do
                 title={if @s.open_trades > 0, do: "A strategy with an open trade cannot be deleted"}
                 class="text-error disabled:cursor-not-allowed disabled:text-muted"
               >
-                <.t s="Delete" wsb="Yeet" />
+                <.t {copy("Delete")} />
               </button>
             </div>
           </div>
@@ -225,10 +233,7 @@ defmodule OpusWeb.StrategyLive do
             :if={@s.suspension}
             class="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-box border border-error/40 bg-base-200 px-4 py-3 text-sm"
           >
-            <span class="font-medium text-error"><.t
-              s="Suspended by the circuit breaker"
-              wsb="Benched by the circuit breaker"
-            /></span>
+            <span class="font-medium text-error"><.t {copy("Suspended by the circuit breaker")} /></span>
             <span class="text-muted">{@s.suspension.trigger_detail} · {stamp(
               @s.suspension.triggered_at
             )}</span>
@@ -236,7 +241,7 @@ defmodule OpusWeb.StrategyLive do
               type="button"
               phx-click="reset"
               class="font-medium text-primary hover:brightness-110"
-            ><.t s="Reset" wsb="Un-bench" /></button>
+            ><.t {copy("Reset")} /></button>
           </div>
         </div>
 
@@ -271,10 +276,10 @@ defmodule OpusWeb.StrategyLive do
         </nav>
 
         <section aria-label="Status" class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4">
-          <.card label="Rules engine" wsb_label="The overlords">
+          <.card label={copy("Rules engine")}>
             <.verdict s={@s} />
           </.card>
-          <.card label="Regime" wsb_label="Vibe check">
+          <.card label={copy("Regime")}>
             <%= if @s.rule do %>
               <span class="text-[18px] font-semibold">{String.capitalize(
                 @s.rule.composite || "unknown"
@@ -290,7 +295,7 @@ defmodule OpusWeb.StrategyLive do
               <span class="text-[18px] font-semibold text-muted">—</span>
             <% end %>
           </.card>
-          <.card label="Open position" wsb_label="The bag">
+          <.card label={copy("Open position")}>
             <%= if @s.open_trade do %>
               <span class="text-[18px] font-semibold">
                 {@s.open_trade.direction} {@s.open_trade.units} units
@@ -305,20 +310,20 @@ defmodule OpusWeb.StrategyLive do
                 )}
               </span>
             <% else %>
-              <span class="text-[18px] font-semibold text-muted"><.t s="Flat" wsb="No bags" /></span>
+              <span class="text-[18px] font-semibold text-muted"><.t {copy("Flat")} /></span>
               <span class="text-[13px] text-muted">{@s.open_trades} open · last close {price(
                 @last_close
               )}</span>
             <% end %>
           </.card>
-          <.card label="Last signal" wsb_label="Last move">
+          <.card label={copy("Last signal")}>
             <%= if @s.last_signal do %>
               <span class="text-[18px] font-semibold">{action(@s.last_signal.action)}</span>
               <span class="truncate text-[13px] text-muted" title={@s.last_signal.reason}>
                 {@s.last_signal.reason} · {stamp(@s.last_signal.at)}
               </span>
             <% else %>
-              <span class="text-[18px] font-semibold text-muted"><.t s="None yet" wsb="Crickets" /></span>
+              <span class="text-[18px] font-semibold text-muted"><.t {copy("None yet")} /></span>
             <% end %>
           </.card>
         </section>
@@ -330,10 +335,7 @@ defmodule OpusWeb.StrategyLive do
           <%= if @signals do %>
             <span class="text-[15px] font-semibold">
               {@s.instrument} ·
-              <.t
-                s="every buy and sell the rules made over the last 120 bars"
-                wsb="every time it would have loaded up or cashed out, last 120 bars"
-              />
+              <.t {copy("every buy and sell the rules made over the last 120 bars")} />
             </span>
             <.signal_chart
               chart={@signals}
@@ -362,43 +364,46 @@ defmodule OpusWeb.StrategyLive do
 
         <section class="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-4">
           <div class="flex flex-col gap-3.5 rounded-box border border-base-300 bg-base-200 px-5 py-4">
-            <span class="text-[15px] font-semibold"><.t s="How it trades" wsb="The DD" /></span>
+            <span class="text-[15px] font-semibold"><.t {copy("How it trades")} /></span>
             <dl class="grid grid-cols-1 gap-x-4 gap-y-2.5 text-[14px] sm:grid-cols-[max-content_minmax(0,1fr)]">
               <%= for {label, text} <- @s.recipe.rules do %>
                 <dt class="text-muted">{label}</dt>
                 <dd class="m-0 break-words">{text}</dd>
               <% end %>
-              <dt class="text-muted"><.t s="Size here" wsb="Position size" /></dt>
+              <dt class="text-muted"><.t {copy("Size here")} /></dt>
               <dd class="m-0">{@s.sizing}</dd>
             </dl>
           </div>
           <div class="flex flex-col gap-3.5 rounded-box border border-base-300 bg-base-200 px-5 py-4">
             <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-              <span class="text-[15px] font-semibold"><.t s="Right now" wsb="Vibe readout" /></span>
+              <span class="text-[15px] font-semibold"><.t {copy("Right now")} /></span>
               <span :if={@s.indicators} class="text-[13px] text-muted">
                 {@s.granularity} buffer, {@s.indicators["buffer_size"]} bars
               </span>
             </div>
             <%= if @s.indicators do %>
               <dl class="grid grid-cols-2 gap-x-4 gap-y-3.5">
-                <.stat label="ADX 14" value={num(@s.indicators["indicators"]["adx"], 1)} />
-                <.stat label="ATR 14" value={pct_points(@s.indicators["indicators"]["atr_pct"])} />
+                <.stat label={copy("ADX 14")} value={num(@s.indicators["indicators"]["adx"], 1)} />
                 <.stat
-                  label="Distance to MA 20"
+                  label={copy("ATR 14")}
+                  value={pct_points(@s.indicators["indicators"]["atr_pct"])}
+                />
+                <.stat
+                  label={copy("Distance to MA 20")}
                   value={pct_points(@s.indicators["indicators"]["ma_deviation_pct"])}
                 />
                 <.stat
-                  label="Rate of change"
+                  label={copy("Rate of change")}
                   value={pct_points(@s.indicators["indicators"]["roc_pct"])}
                 />
                 <.stat
-                  label="Bollinger width"
+                  label={copy("Bollinger width")}
                   value={
                     pct_points(get_in(@s.indicators, ["indicators", "bollinger", "bandwidth_pct"]))
                   }
                 />
                 <.stat
-                  label="Position in bands"
+                  label={copy("Position in bands")}
                   value={num(get_in(@s.indicators, ["indicators", "bollinger", "position"]))}
                 />
               </dl>
@@ -419,15 +424,22 @@ defmodule OpusWeb.StrategyLive do
           class="flex scroll-mt-24 flex-col gap-4 rounded-box border border-base-300 bg-base-200 px-5 py-4"
         >
           <span class="text-[15px] font-semibold">
-            <.t s={"Test results on #{@s.instrument}"} wsb={"Receipts on #{@s.instrument}"} />
+            <.t {copy("Test results on %{instrument}", instrument: @s.instrument)} />
           </span>
+          <WholeHistory.panel
+            report={@report}
+            fragility={@fragility}
+            axes={@axes}
+            fx={@fx}
+            fy={@fy}
+            instrument={@s.instrument}
+            granularity={@s.granularity}
+          />
+
           <.evidence results={@s.results} />
           <div :if={@s.runs != []} class="flex flex-col gap-2 border-t border-neutral pt-4">
             <span class="text-[14px] font-medium">
-              <.t
-                s="Also tested on (not running there)"
-                wsb="Also backtested on (benched there)"
-              />
+              <.t {copy("Also tested on (not running there)")} />
             </span>
             <.runs_list runs={@s.runs} />
           </div>
@@ -438,17 +450,14 @@ defmodule OpusWeb.StrategyLive do
           class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4"
         >
           <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-            <span class="text-[15px] font-semibold"><.t s="Trades" wsb="Positions (or ban)" /></span>
+            <span class="text-[15px] font-semibold"><.t {pcopy("strategy page", "Trades")} /></span>
             <.link
               navigate={~p"/journal"}
               class="text-[13px] font-medium text-primary hover:brightness-110"
-            ><.t s="Open the journal" wsb="Open the loss porn" /></.link>
+            ><.t {copy("Open the journal")} /></.link>
           </div>
           <p :if={@s.trades == []} class="text-[14px] text-muted">
-            <.t
-              s="None yet. The first trade this strategy opens will appear here with why it closed."
-              wsb="No positions. Ban pending. The first play shows up here with how it died."
-            />
+            <.t {copy("None yet. The first trade this strategy opens will appear here with why it closed.")} />
           </p>
           <div :if={@s.trades != []} class="overflow-x-auto">
             <table class="w-full min-w-[720px] border-collapse text-sm">
@@ -460,11 +469,11 @@ defmodule OpusWeb.StrategyLive do
                   <th class="border-b border-base-300 py-2 text-right font-medium">Entry</th>
                   <th class="border-b border-base-300 py-2 text-right font-medium">Exit</th>
                   <th class="border-b border-base-300 py-2 text-right font-medium">
-                    <.t s="Result" wsb="Tendies" />
+                    <.t {copy("Result")} />
                   </th>
                   <th class="border-b border-base-300 py-2 text-right font-medium">Held</th>
                   <th class="border-b border-base-300 py-2 pl-6 font-medium">
-                    <.t s="Why it closed" wsb="How it died" />
+                    <.t {copy("Why it closed")} />
                   </th>
                 </tr>
               </thead>
@@ -499,16 +508,13 @@ defmodule OpusWeb.StrategyLive do
           class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4"
         >
           <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-            <span class="text-[15px] font-semibold"><.t s="Recent signals" wsb="Recent moves" /></span>
+            <span class="text-[15px] font-semibold"><.t {copy("Recent signals")} /></span>
             <span class="text-[13px] text-muted">
-              <.t
-                s="every evaluation that did something, newest first"
-                wsb="every time the bot twitched, newest first"
-              />
+              <.t {copy("every evaluation that did something, newest first")} />
             </span>
           </div>
           <p :if={@s.signals == []} class="text-[14px] text-muted">
-            <.t s="None yet." wsb="Crickets." />
+            <.t {copy("None yet.")} />
           </p>
           <ol :if={@s.signals != []} class="m-0 flex list-none flex-col p-0">
             <li
@@ -529,28 +535,26 @@ defmodule OpusWeb.StrategyLive do
     """
   end
 
-  attr :label, :string, required: true
-  attr :wsb_label, :string, default: nil
+  attr :label, :map, required: true, doc: "copy/1"
   slot :inner_block, required: true
 
   defp card(assigns) do
     ~H"""
     <div class="flex min-w-0 flex-col gap-1.5 rounded-box border border-base-300 bg-base-200 px-[18px] py-4">
-      <span class="text-xs text-muted"><.t s={@label} wsb={@wsb_label || @label} /></span>
+      <span class="text-xs text-muted"><.t {@label} /></span>
       {render_slot(@inner_block)}
     </div>
     """
   end
 
-  attr :label, :string, required: true
-  attr :wsb_label, :string, default: nil
+  attr :label, :map, required: true, doc: "copy/1"
   attr :value, :string, required: true
   attr :large, :boolean, default: false
 
   defp stat(assigns) do
     ~H"""
     <div class="flex flex-col gap-0.5">
-      <dt class="text-xs text-muted"><.t s={@label} wsb={@wsb_label || @label} /></dt>
+      <dt class="text-xs text-muted"><.t {@label} /></dt>
       <dd class={["m-0 font-semibold", if(@large, do: "text-[22px]", else: "text-[18px]")]}>
         {@value}
       </dd>
@@ -562,17 +566,14 @@ defmodule OpusWeb.StrategyLive do
 
   defp verdict(%{s: %{enabled: false}} = assigns) do
     ~H"""
-    <span class="text-[18px] font-semibold text-muted"><.t s="Off" wsb="Benched" /></span>
-    <span class="text-[13px] text-muted"><.t
-      s="disabled, the rules engine skips it"
-      wsb="benched, the overlords skip it"
-    /></span>
+    <span class="text-[18px] font-semibold text-muted"><.t {copy("Off")} /></span>
+    <span class="text-[13px] text-muted"><.t {copy("disabled, the rules engine skips it")} /></span>
     """
   end
 
   defp verdict(%{s: %{rule: nil}} = assigns) do
     ~H"""
-    <span class="text-[18px] font-semibold text-muted"><.t s="No decision yet" wsb="Jury's out" /></span>
+    <span class="text-[18px] font-semibold text-muted"><.t {copy("No decision yet")} /></span>
     """
   end
 
@@ -582,11 +583,14 @@ defmodule OpusWeb.StrategyLive do
       "text-[18px] font-semibold",
       if(@s.rule.enabled, do: "text-success", else: "text-warning")
     ]}>
-      <.t :if={@s.rule.enabled} s="Trading" wsb="Sending it" />
-      <.t :if={!@s.rule.enabled} s="Held" wsb="Hands tied" />
+      <.t :if={@s.rule.enabled} {copy("Trading")} />
+      <.t :if={!@s.rule.enabled} {copy("Held")} />
     </span>
     <span class="text-[13px] text-muted">
-      {@s.rule.reason} · <.t s="decided" wsb="ruled" /> {stamp(@s.rule.computed_at)}
+      {@s.rule.reason} · <.t {copy("decided")} /> {stamp(@s.rule.computed_at)}
+    </span>
+    <span :if={@s.circuit_breaker_exempt} class="text-[13px] text-warning">
+      <.t {copy("Circuit breaker off: kept trading through losing streaks by choice.")} />
     </span>
     """
   end
@@ -619,9 +623,4 @@ defmodule OpusWeb.StrategyLive do
   defp pct_points(v), do: "#{num(v)}%"
 
   defp action(action), do: action |> String.replace("_", " ") |> String.capitalize()
-
-  defp curator("auto"), do: "curator: auto"
-  defp curator("pinned_on"), do: "pinned on ·"
-  defp curator("pinned_off"), do: "pinned off ·"
-  defp curator(other), do: other
 end
