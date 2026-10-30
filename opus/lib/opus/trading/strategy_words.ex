@@ -1,12 +1,15 @@
 defmodule Opus.Trading.StrategyWords do
   @moduledoc """
   A strategy recipe in plain words: when it buys, sells short, closes each,
-  where the stop goes and how long it can hold. Each component type's
-  ports are described from its settings, matching what the Rust component
-  computes (`auro_be/src/engine/<component>.rs`). A port this module
-  doesn't know comes back as its raw name (`"r.long"`), so a new component
-  shows up readable-enough instead of breaking the page.
+  where the stop goes and how long it can hold. Each block's ports read as
+  the words the engine's block catalog gives them (`Opus.Trading.Blocks`),
+  filled in from the block's settings; this module adds the sentence glue
+  (and, or, time rules, stops, hold limits). A port it can't put in words
+  comes back as its raw name (`"r.long"`), so an unknown block shows up
+  readable-enough instead of breaking the page.
   """
+
+  alias Opus.Trading.Blocks
 
   @bar %{
     "M1" => {"1-minute bar", "1-minute bars"},
@@ -50,6 +53,8 @@ defmodule Opus.Trading.StrategyWords do
   def refs(%{"and" => parts}), do: Enum.flat_map(parts, &refs/1)
   def refs(%{"or" => parts}), do: Enum.flat_map(parts, &refs/1)
   def refs(%{"not" => part}), do: refs(part)
+  def refs(%{"within" => _, "rule" => part}), do: refs(part)
+  def refs(%{"ago" => _, "rule" => part}), do: refs(part)
   def refs(_), do: []
 
   @doc """
@@ -94,6 +99,20 @@ defmodule Opus.Trading.StrategyWords do
   defp expression(%{"not" => part}, components, granularity),
     do: "not (" <> expression(part, components, granularity) <> ")"
 
+  # Time rules (the engine's `PortRef::Within` / `Ago`): "within 1" is the
+  # rule itself; otherwise the time comes first, so it reads the same over
+  # any rule, one condition or several.
+  defp expression(%{"within" => 1, "rule" => part}, components, granularity),
+    do: expression(part, components, granularity)
+
+  defp expression(%{"within" => n, "rule" => part}, components, granularity),
+    do:
+      "at some point in the last #{bars(granularity, n)}, " <>
+        timed(part, components, granularity)
+
+  defp expression(%{"ago" => n, "rule" => part}, components, granularity),
+    do: "#{bars(granularity, n)} ago, " <> timed(part, components, granularity)
+
   defp expression(ref, components, granularity) when is_binary(ref) do
     with [name, port] <- String.split(ref, ".", parts: 2),
          %{"type" => type} = component <- components[name],
@@ -106,202 +125,68 @@ defmodule Opus.Trading.StrategyWords do
 
   defp expression(other, _components, _granularity), do: inspect(other)
 
-  defp port("RsiReversion", port, %{"rsi_period" => n} = p, _g) do
-    case port do
-      "long" -> "RSI(#{n}) is below #{num(p["oversold"])}"
-      "short" -> "RSI(#{n}) is above #{num(p["overbought"])}"
-      "exit_long" -> "RSI(#{n}) is back to 50 or higher"
-      "exit_short" -> "RSI(#{n}) is back to 50 or lower"
-      _ -> nil
+  # Several conditions under one time go in brackets, so the time covers them all.
+  defp timed(%{} = part, components, granularity)
+       when is_map_key(part, "and") or is_map_key(part, "or"),
+       do: "(" <> expression(part, components, granularity) <> ")"
+
+  defp timed(part, components, granularity), do: expression(part, components, granularity)
+
+  # A block's port in words: its template from the block catalog
+  # (`Opus.Trading.Blocks`) filled in from the block's settings. Nil when
+  # the block or port is unknown, or a setting it names has no value.
+  defp port(type, port, params, g) do
+    with %{words: words} = block <- Blocks.any(type),
+         template when is_binary(template) <- words[port] do
+      fill(template, block, params, g)
     end
   end
 
-  defp port("MaFilter", port, %{"period" => n} = p, g) do
-    average = "its #{ma_type(p["ma_type"])} average over #{bars(g, n)}"
+  # `{key}` is a setting's value (or the words its `reads` cases give),
+  # `{key:bars}` a count of bars, `{key:bars|1}` the same falling back to 1
+  # when empty (`auro_be/src/engine/catalog.rs`). A setting the recipe
+  # leaves out reads as its default.
+  @placeholder ~r/\{(\w+)(?::(\w+))?(?:\|([^}]*))?\}/
 
-    case port do
-      "above" -> "the price is above #{average}"
-      "below" -> "the price is below #{average}"
-      _ -> nil
+  defp fill(template, block, params, g) do
+    values =
+      Map.new(Regex.scan(@placeholder, template), fn [whole, key | rest] ->
+        {whole, setting(block, params, g, key, Enum.at(rest, 0, ""), Enum.at(rest, 1, ""))}
+      end)
+
+    if Enum.all?(values, fn {_whole, text} -> is_binary(text) end),
+      do: Regex.replace(@placeholder, template, &values[&1])
+  end
+
+  defp setting(block, params, g, key, format, fallback) do
+    spec = Enum.find(block.params, %{default: nil, reads: []}, &(&1.key == key))
+    value = Enum.find([params[key], spec.default, fallback(fallback)], &(not is_nil(&1)))
+
+    cond do
+      format == "bars" -> value && bars(g, value)
+      spec.reads != [] -> reads(spec.reads, value)
+      true -> value && num(value)
     end
   end
 
-  defp port("NoiseArea", port, %{"lookback_sessions" => n}, _g) do
-    band = "the noise band (the usual move from the open, over the last #{n} sessions)"
+  defp fallback(""), do: nil
 
-    case port do
-      "long" -> "the price breaks above #{band}"
-      "short" -> "the price breaks below #{band}"
-      "exit_long" -> "the price falls back below the band or the day's average price (VWAP)"
-      "exit_short" -> "the price rises back above the band or the day's average price (VWAP)"
-      "session_close" -> "the US session ends (16:00 New York)"
-      _ -> nil
+  defp fallback(text) do
+    case Integer.parse(text) do
+      {n, ""} -> n
+      _ -> text
     end
   end
 
-  defp port("MeanReversion", port, %{"ma_period" => n, "rsi_period" => r} = p, g) do
-    away = "#{num(p["entry_z_threshold"])} standard deviations"
-    average = "its average over #{bars(g, n)}"
-    stop_z = num(p["stop_z_threshold"])
-
-    case port do
-      "long" ->
-        "the price is more than #{away} below #{average} and RSI(#{r}) is below #{num(p["rsi_oversold"])}"
-
-      "short" ->
-        "the price is more than #{away} above #{average} and RSI(#{r}) is above #{num(p["rsi_overbought"])}"
-
-      "exit_long" ->
-        "the price is back up to #{average}, or falls more than #{stop_z} standard deviations below it"
-
-      "exit_short" ->
-        "the price is back down to #{average}, or rises more than #{stop_z} standard deviations above it"
-
-      _ ->
-        nil
-    end
+  defp reads(cases, value) do
+    Enum.find_value(cases, fn %{"when" => w, "text" => text} ->
+      if reads?(w, value), do: String.replace(text, "{}", num(value))
+    end)
   end
 
-  defp port("TrendFollowing", port, %{"fast_period" => f, "slow_period" => s}, g) do
-    pair = "the average over #{bars(g, f)}"
-    slow = "the one over #{bars(g, s)}"
-
-    case port do
-      "bullish" -> "#{pair} is above #{slow}"
-      "bearish" -> "#{pair} is below #{slow}"
-      "bullish_cross" -> "#{pair} crosses above #{slow}"
-      "bearish_cross" -> "#{pair} crosses below #{slow}"
-      _ -> nil
-    end
-  end
-
-  defp port("Macd", port, _p, _g) do
-    case port do
-      "bullish" -> "MACD is above its signal line"
-      "bearish" -> "MACD is below its signal line"
-      "bullish_cross" -> "MACD crosses above its signal line"
-      "bearish_cross" -> "MACD crosses below its signal line"
-      _ -> nil
-    end
-  end
-
-  defp port("Donchian", port, %{"entry_period" => e, "exit_period" => x}, g) do
-    case port do
-      "breakout_long" -> "the price breaks above its #{bars(g, e)} high"
-      "breakout_short" -> "the price breaks below its #{bars(g, e)} low"
-      "exit_long" -> "the price breaks below its #{bars(g, x)} low"
-      "exit_short" -> "the price breaks above its #{bars(g, x)} high"
-      _ -> nil
-    end
-  end
-
-  defp port("Momentum", port, %{"lookback" => n}, g) do
-    case port do
-      "up" -> "the price is higher than #{bars(g, n)} ago"
-      "down" -> "the price is lower than #{bars(g, n)} ago"
-      _ -> nil
-    end
-  end
-
-  defp port("EventWindow", port, _p, _g) do
-    case port do
-      "in_window" -> "it's inside the event window"
-      "out_of_window" -> "it's outside the event window"
-      _ -> nil
-    end
-  end
-
-  defp port("Bollinger", port, %{"period" => n} = p, g) do
-    average = "its average over #{bars(g, n)}"
-
-    case port do
-      "below_band" ->
-        "the price closes below its lower Bollinger band (#{num(p["std_dev_mult"])} normal wobbles under #{average})"
-
-      "above_band" ->
-        "the price closes above its upper Bollinger band (#{num(p["std_dev_mult"])} normal wobbles over #{average})"
-
-      "above_middle" ->
-        "the price is back up to #{average}"
-
-      "below_middle" ->
-        "the price is back down to #{average}"
-
-      _ ->
-        nil
-    end
-  end
-
-  defp port("Stochastic", port, %{"period" => n} = p, g) do
-    stochastic = "the stochastic (where the price sits in its #{bars(g, n)} range)"
-
-    case port do
-      "oversold" -> "#{stochastic} is below #{num(p["oversold"])}"
-      "overbought" -> "#{stochastic} is above #{num(p["overbought"])}"
-      "cross_up" -> "#{stochastic} crosses above its smoothed line"
-      "cross_down" -> "#{stochastic} crosses below its smoothed line"
-      _ -> nil
-    end
-  end
-
-  defp port("AdxFilter", port, %{"threshold" => t}, _g) do
-    case port do
-      "trending" -> "there's a strong trend (ADX at #{num(t)} or more)"
-      "ranging" -> "there's no strong trend (ADX below #{num(t)})"
-      _ -> nil
-    end
-  end
-
-  defp port("Volatility", port, %{"period" => n, "baseline" => b}, g) do
-    compared = "the last #{bars(g, n)} compared with the last #{bars(g, b)}"
-
-    case port do
-      "quieter" -> "the market is calmer than usual (#{compared})"
-      "busier" -> "the market is wilder than usual (#{compared})"
-      _ -> nil
-    end
-  end
-
-  defp port("Vwap", port, _p, _g) do
-    case port do
-      "above" -> "the price is above the day's average price (VWAP)"
-      "below" -> "the price is below the day's average price (VWAP)"
-      _ -> nil
-    end
-  end
-
-  defp port("OpeningRange", port, %{"minutes" => m}, _g) do
-    range = "the first #{num(m)} minutes after the US open"
-
-    case port do
-      "breakout_long" -> "the price breaks above the high of #{range}"
-      "breakout_short" -> "the price breaks below the low of #{range}"
-      "inside" -> "the price is still inside the range of #{range}"
-      "session_close" -> "the US session ends (16:00 New York)"
-      _ -> nil
-    end
-  end
-
-  defp port("PivotPoints", port, _p, _g) do
-    case port do
-      "above_pivot" ->
-        "the price is above the pivot (from the previous session's high, low and close)"
-
-      "below_pivot" ->
-        "the price is below the pivot (from the previous session's high, low and close)"
-
-      "above_r1" ->
-        "the price is above the first resistance level (R1)"
-
-      "below_s1" ->
-        "the price is below the first support level (S1)"
-
-      _ ->
-        nil
-    end
-  end
-
-  defp port(_type, _port, _params, _g), do: nil
+  defp reads?(%{"is" => v}, value), do: v === value
+  defp reads?(%{"above" => n}, value), do: is_number(value) and value > n
+  defp reads?("otherwise", _value), do: true
 
   defp stop(%{"type" => "AtrMultiple", "params" => %{"k" => k} = p}, _components, g) do
     "#{num(k)} × the average range (ATR over #{bars(g, p["period"] || 14)}) away from the entry"
@@ -310,16 +195,13 @@ defmodule Opus.Trading.StrategyWords do
   defp stop(%{"type" => "FixedPct", "params" => %{"pct" => pct}}, _components, _g),
     do: "#{percent(abs(pct))} away from the entry"
 
-  defp stop(%{"type" => "FromComponent", "params" => %{"component" => name}}, components, _g) do
-    case components[name] do
-      %{"type" => "NoiseArea"} ->
-        "the other side of the noise band"
-
-      %{"type" => "MeanReversion", "params" => %{"stop_z_threshold" => z}} ->
-        "#{num(z)} standard deviations past the average"
-
-      _ ->
-        "set by #{name}"
+  defp stop(%{"type" => "FromComponent", "params" => %{"component" => name}}, components, g) do
+    with %{"type" => type} = component <- components[name],
+         %{stop: template} = block when is_binary(template) <- Blocks.any(type),
+         text when is_binary(text) <- fill(template, block, component["params"] || %{}, g) do
+      text
+    else
+      _ -> "set by #{name}"
     end
   end
 
@@ -338,9 +220,6 @@ defmodule Opus.Trading.StrategyWords do
     {one, many} = Map.get(@bar, granularity, {"bar", "bars"})
     if n == 1, do: "1 #{one}", else: "#{n} #{many}"
   end
-
-  defp ma_type("ema"), do: "exponential"
-  defp ma_type(_), do: "simple"
 
   defp percent(share), do: "#{num(share * 100)}%"
 

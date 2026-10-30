@@ -176,7 +176,7 @@ defmodule OpusWeb.StrategyBuilderLive do
         nil
 
       {:error, {:no_history, first, holdout}} ->
-        since = if first, do: "only since #{Calendar.strftime(first, "%b %-d, %Y")}", else: "none"
+        since = if first, do: "only since #{OpusWeb.Format.date(first)}", else: "none"
 
         "#{instrument} has #{StrategyWords.timeframe(granularity)} #{since}. The tests only use " <>
           "history from before #{Calendar.strftime(holdout, "%b %-d, %Y")} (everything after is " <>
@@ -488,11 +488,13 @@ defmodule OpusWeb.StrategyBuilderLive do
     rules =
       Map.new(RecipeForm.rules(), fn slot ->
         sent = get_in(params, ["rules", slot]) || %{}
+        refs = Enum.reject(sent["refs"] || [], &(&1 == ""))
 
         {slot,
          %{
            "mode" => sent["mode"] || form["rules"][slot]["mode"],
-           "refs" => Enum.reject(sent["refs"] || [], &(&1 == ""))
+           "refs" => refs,
+           "timing" => timing(refs, sent["timing"] || %{}, form["rules"][slot]["timing"] || %{})
          }}
       end)
 
@@ -505,6 +507,21 @@ defmodule OpusWeb.StrategyBuilderLive do
     form
     |> Map.merge(Map.take(params, ~w(name granularity notes hold)))
     |> Map.merge(%{"components" => components, "rules" => rules, "stop" => stop})
+  end
+
+  # Each single rule's timing as sent ("right now" sends no kind); a count
+  # not sent yet (the box appears once a timing is picked) keeps the old
+  # one or starts at the default.
+  defp timing(refs, sent, old) do
+    for ref <- refs,
+        %{"kind" => kind} = t <- [sent[ref]],
+        kind in ["within", "ago"],
+        into: %{} do
+      bars =
+        t["bars"] || get_in(old, [ref, "bars"]) || to_string(RecipeForm.default_bars(kind))
+
+      {ref, %{"kind" => kind, "bars" => bars}}
+    end
   end
 
   @impl true
@@ -763,6 +780,14 @@ defmodule OpusWeb.StrategyBuilderLive do
                             {label}
                           </option>
                         </select>
+                      <% :bool -> %>
+                        <select
+                          name={"form[components][#{c["key"]}][#{p.key}]"}
+                          class="select w-full"
+                        >
+                          <option value="false" selected={c["params"][p.key] != "true"}>No</option>
+                          <option value="true" selected={c["params"][p.key] == "true"}>Yes</option>
+                        </select>
                       <% kind -> %>
                         <input
                           type="number"
@@ -981,7 +1006,10 @@ defmodule OpusWeb.StrategyBuilderLive do
                   <li>They stay off until you switch them back on.</li>
                 <% else %>
                   <li>
-                    It's tested on {@instrument}: backtest, walk-forward, Monte Carlo, then the holdout (a one-time look at data kept aside).
+                    <.t {copy(
+                      "It's tested on %{instrument}: backtest, walk-forward, Monte Carlo, nearby settings, then the holdout (a one-time look at data kept aside).",
+                      instrument: @instrument
+                    )} />
                   </li>
                   <li>If it passes, it's added to {@instrument}, switched off.</li>
                   <li>Nothing trades until you switch it on.</li>
@@ -1056,6 +1084,14 @@ defmodule OpusWeb.StrategyBuilderLive do
           <h2 class="text-[15px] font-semibold"><.t {copy("Test results")} /></h2>
           <.runs_list runs={@runs} />
         </section>
+
+        <.link
+          :if={@mode == :edit}
+          navigate={~p"/strategies/recipes/#{@recipe.id}/basket"}
+          class="self-start text-[14px] font-medium text-primary hover:brightness-110"
+        >
+          Test it on several markets at once →
+        </.link>
       </div>
     </Layouts.app>
     """
@@ -1072,6 +1108,46 @@ defmodule OpusWeb.StrategyBuilderLive do
       {render_slot(@inner_block)}
       <span :if={@help} class="text-[12px] leading-snug">{@help}</span>
     </label>
+    """
+  end
+
+  attr :slot, :string, required: true
+  attr :ref, :string, required: true
+
+  attr :timing, :map,
+    default: nil,
+    doc: ~s(%{"kind" => "within" | "ago", "bars" => text}, or nil for now)
+
+  # When a single rule has to hold: on this bar, on any of the last few, or
+  # a set number of bars back.
+  defp rule_timing(assigns) do
+    assigns = assign(assigns, :kind, assigns.timing && assigns.timing["kind"])
+
+    ~H"""
+    <div class="flex flex-wrap items-center gap-1.5 text-[13px] text-muted">
+      <select
+        name={"form[rules][#{@slot}][timing][#{@ref}][kind]"}
+        aria-label="When this has to be true"
+        class="select select-xs w-auto"
+      >
+        <option value="" selected={is_nil(@kind)}>right now</option>
+        <option value="within" selected={@kind == "within"}>at some point in the last…</option>
+        <option value="ago" selected={@kind == "ago"}>this many bars ago…</option>
+      </select>
+      <label :if={@kind} class="inline-flex items-center gap-1.5">
+        <input
+          type="number"
+          min="1"
+          max={RecipeForm.max_bars()}
+          step="1"
+          name={"form[rules][#{@slot}][timing][#{@ref}][bars]"}
+          value={@timing["bars"]}
+          aria-label="How many bars"
+          class="input input-xs w-16"
+        />
+        {if @kind == "within", do: "bars (this one included)", else: "bars ago"}
+      </label>
+    </div>
     """
   end
 
@@ -1121,12 +1197,15 @@ defmodule OpusWeb.StrategyBuilderLive do
           class="flex items-start justify-between gap-2 rounded-field bg-base-100 py-1.5 pl-3 pr-1 text-[14px]"
         >
           <input type="hidden" name={"form[rules][#{@slot}][refs][]"} value={ref} />
-          <span class="py-1">
-            <span :if={i > 0} class="text-muted">
-              {if @rule["mode"] == "or", do: "or ", else: "and "}
+          <div class="flex flex-col gap-1 py-1">
+            <span>
+              <span :if={i > 0} class="text-muted">
+                {if @rule["mode"] == "or", do: "or ", else: "and "}
+              </span>
+              {@words[ref] || ref}
             </span>
-            {@words[ref] || ref}
-          </span>
+            <.rule_timing slot={@slot} ref={ref} timing={(@rule["timing"] || %{})[ref]} />
+          </div>
           <button
             type="button"
             phx-click="remove_ref"

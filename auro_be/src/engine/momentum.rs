@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block, Level, Series, Setting};
 use crate::engine::indicators;
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -14,6 +15,32 @@ use crate::engine::types::{Candle, Direction, EntryReason};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MomentumParams {
     pub lookback: usize,
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "Momentum",
+        key: "mo",
+        name: "Momentum",
+        watches: "Whether the price is higher or lower than it was a number of bars ago.",
+        settings: vec![Setting::int(
+            "lookback",
+            "Bars back",
+            20,
+            "More bars look at a longer-term direction.",
+        )],
+        ports: vec![
+            port("up", "the price is higher than {lookback:bars} ago"),
+            port("down", "the price is lower than {lookback:bars} ago"),
+        ],
+        series: vec![Series::panel(
+            "roc",
+            "Change from then (%)",
+            vec![Level::At(0.0)],
+        )],
+        stop: None,
+    }
 }
 
 impl Signaler for MomentumParams {

@@ -1,7 +1,7 @@
 defmodule Opus.Pipeline.MonteCarloWorker do
   @moduledoc """
-  Executes the Monte Carlo stage. Pass → HoldoutWorker (the sealed-window
-  look; promotion happens there); fail → terminal.
+  Executes the Monte Carlo stage. Pass → ParameterStabilityWorker; fail →
+  terminal.
   """
 
   # One attempt: a stage isn't re-run on its own (opus/AGENTS.md). Unique
@@ -15,10 +15,13 @@ defmodule Opus.Pipeline.MonteCarloWorker do
   require Logger
 
   alias Opus.Auro.Client
-  alias Opus.Pipeline.HoldoutWorker
+  alias Opus.Pipeline.ParameterStabilityWorker
+
+  # Seconds between looks while the tester is down.
+  @tester_wait 60
 
   @impl Oban.Worker
-  @spec perform(Oban.Job.t()) :: :ok | {:error, term()}
+  @spec perform(Oban.Job.t()) :: :ok | {:snooze, pos_integer()} | {:error, term()}
   def perform(%Oban.Job{args: %{"config_id" => config_id}}) do
     Logger.info("[Pipeline] Running monte_carlo for config #{config_id}")
 
@@ -31,12 +34,18 @@ defmodule Opus.Pipeline.MonteCarloWorker do
             "p95_drawdown=#{get_in(result, ["stats", "p95_drawdown"])}"
         )
 
-        {:ok, _job} = Oban.insert(HoldoutWorker.new(%{config_id: config_id}))
+        {:ok, _job} = Oban.insert(ParameterStabilityWorker.new(%{config_id: config_id}))
         :ok
 
       {:ok, %{"status" => "failed", "failure_reason" => reason}} ->
         Logger.info("[Pipeline] Monte Carlo failed for config #{config_id}: #{reason}")
         :ok
+
+      # The tester isn't running: wait for it rather than fail the
+      # strategy (a snooze doesn't use up the one attempt).
+      {:error, :tester_down} ->
+        Logger.warning("[Pipeline] Tester down; #{config_id} waits #{@tester_wait}s")
+        {:snooze, @tester_wait}
 
       {:error, reason} ->
         Logger.error(

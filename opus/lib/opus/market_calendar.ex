@@ -53,4 +53,15 @@ defmodule Opus.MarketCalendar do
 
     Date.day_of_week(date) <= 5 and date not in holidays
   end
+
+  @doc """
+  The last trading day before `date`: the session whose daily bar should be
+  the latest stored on `date`. Raises like `trading_day?/1` for a year the
+  calendar doesn't list.
+  """
+  @spec previous_trading_day(Date.t()) :: Date.t()
+  def previous_trading_day(%Date{} = date) do
+    previous = Date.add(date, -1)
+    if trading_day?(previous), do: previous, else: previous_trading_day(previous)
+  end
 end

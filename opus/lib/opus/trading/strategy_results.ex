@@ -1,8 +1,8 @@
 defmodule Opus.Trading.StrategyResults do
   @moduledoc """
   What's known about how each assigned strategy performs: the validation
-  pipeline's backtest, walk-forward, Monte Carlo and holdout stages, and
-  its live (forward-test) trades on OANDA.
+  pipeline's backtest, walk-forward, Monte Carlo, parameter-stability and
+  holdout stages, and its live (forward-test) trades on OANDA.
 
   A pipeline run is matched to an assignment by instrument and the exact
   strategy JSON, the same match Rust uses for its stats. Every stage comes
@@ -16,7 +16,7 @@ defmodule Opus.Trading.StrategyResults do
   alias Opus.Repo
   alias Opus.Trading.LiveStrategy
 
-  @stages ~w(backtest walk_forward monte_carlo holdout)
+  @stages ~w(backtest walk_forward monte_carlo parameter_stability holdout)
   # Database strings to atoms by explicit mapping, never String.to_atom.
   @stage_keys Map.new(@stages, &{&1, String.to_atom(&1)})
   @statuses %{
@@ -35,12 +35,16 @@ defmodule Opus.Trading.StrategyResults do
     "must be less than" => "lt"
   }
 
-  # When the holdout stage joined the pipeline.
+  # When the holdout and parameter-stability stages joined the pipeline.
+  # Runs from before a stage joined have no row for it; runs from before
+  # parameter stability went straight from Monte Carlo to the holdout.
   @holdout_added ~U[2026-10-17 16:31:00Z]
+  @stability_added ~U[2026-10-30 01:30:00Z]
   @previous %{
     "walk_forward" => "backtest",
     "monte_carlo" => "walk_forward",
-    "holdout" => "monte_carlo"
+    "parameter_stability" => "monte_carlo",
+    "holdout" => "parameter_stability"
   }
 
   @type stage :: %{status: atom(), stats: map() | nil, reason: String.t() | nil, at: term()}
@@ -48,6 +52,7 @@ defmodule Opus.Trading.StrategyResults do
           backtest: stage(),
           walk_forward: stage(),
           monte_carlo: stage(),
+          parameter_stability: stage(),
           holdout: stage(),
           live: map()
         }
@@ -72,8 +77,9 @@ defmodule Opus.Trading.StrategyResults do
 
   @doc """
   Test runs of a recipe that isn't assigned anywhere yet, one per
-  instrument it was tested on (the newest): `%{instrument, ran_at, stages}` with
-  `stages` shaped as in `for_ids/1`. Matched by the recipe's rules: a run's
+  instrument it was tested on (the newest): `%{instrument, ran_at, archived,
+  stages}` with `stages` shaped as in `for_ids/1`; `archived` is a run from
+  before the block builder, which pages hide unless asked. Matched by the recipe's rules: a run's
   strategy JSON minus instrument, timeframe and sizing, on the recipe's
   timeframe (the same rules on another timeframe are a different test).
   """
@@ -90,22 +96,58 @@ defmodule Opus.Trading.StrategyResults do
             ),
         order_by: [asc: sc.instrument, desc: sc.inserted_at],
         distinct: sc.instrument,
-        select: {sc.instrument, sc.id, sc.inserted_at}
+        select: {sc.instrument, sc.id, sc.inserted_at, not is_nil(sc.archived_at)}
       )
       |> Repo.all()
 
     evaluations = configs |> Enum.map(&elem(&1, 1)) |> evaluations()
 
-    Enum.map(configs, fn {instrument, id, ran_at} ->
+    Enum.map(configs, fn {instrument, id, ran_at, archived} ->
       %{
         instrument: instrument,
         ran_at: ran_at,
+        archived: archived,
         stages: stages({ran_at, Map.get(evaluations, id, %{})})
       }
     end)
   end
 
-  # The four pipeline stages of one run, `{ran_at, evaluations by stage}`,
+  @doc """
+  Basket test runs of a recipe (several markets as one account,
+  `Opus.Trading.Baskets`), newest first: `%{config_id, ran_at, basket,
+  stages}` with `basket` the stored settings (`"markets"`, `"mode"`,
+  `"rank"`) and `stages` shaped as in `for_ids/1`. Matched like
+  `for_recipe/2`, the basket settings set aside too.
+  """
+  @spec for_baskets(map(), String.t()) :: [map()]
+  def for_baskets(definition, granularity) do
+    configs =
+      from(sc in StrategyConfig,
+        where:
+          sc.granularity == ^granularity and fragment("jsonb_exists(?, 'basket')", sc.parameters) and
+            fragment(
+              "(? - 'instrument' - 'granularity' - 'sizing' - 'basket') = ?",
+              sc.parameters,
+              type(^definition, :map)
+            ),
+        order_by: [desc: sc.inserted_at],
+        select: {sc.id, sc.inserted_at, sc.parameters}
+      )
+      |> Repo.all()
+
+    evaluations = configs |> Enum.map(&elem(&1, 0)) |> evaluations()
+
+    Enum.map(configs, fn {id, ran_at, parameters} ->
+      %{
+        config_id: id,
+        ran_at: ran_at,
+        basket: parameters["basket"],
+        stages: stages({ran_at, Map.get(evaluations, id, %{})})
+      }
+    end)
+  end
+
+  # The five pipeline stages of one run, `{ran_at, evaluations by stage}`,
   # or nil when the assignment has never been through the pipeline. A
   # stage with no row yet is waiting when the one before it passed (or it's
   # the backtest); runs from before the holdout stage existed have none.
@@ -119,7 +161,9 @@ defmodule Opus.Trading.StrategyResults do
     do: Map.new(@stages, &{@stage_keys[&1], stage(&1, ran_at, by_stage)})
 
   defp stage(stage, ran_at, by_stage) do
-    case {by_stage[stage], by_stage[@previous[stage]]} do
+    previous = previous(stage, ran_at)
+
+    case {by_stage[stage], by_stage[previous]} do
       # A pass from before Oct 28 was judged on looser rules and recorded
       # no checks; it reads as that, not as meeting today's standard.
       {%{status: "passed", stats: stats} = e, _previous}
@@ -143,10 +187,19 @@ defmodule Opus.Trading.StrategyResults do
         }
 
       {nil, %{status: "failed"}} ->
-        not_run("Skipped because the #{words(@previous[stage])} failed.")
+        not_run("Skipped because the #{words(previous)} failed.")
+
+      {nil, %{status: "passed"}} when stage == "parameter_stability" ->
+        if before?(ran_at, @stability_added),
+          do:
+            not_run(
+              "Not run. The nearby-settings test joined the pipeline on Oct 30, after this ran. " <>
+                "Re-test it to include it."
+            ),
+          else: waiting()
 
       {nil, %{status: "passed"}} when stage == "holdout" ->
-        if DateTime.compare(ran_at, @holdout_added) == :lt,
+        if before?(ran_at, @holdout_added),
           do:
             not_run(
               "Not run. It's a one-time look at data kept aside; tests run since Oct 17 " <>
@@ -164,6 +217,16 @@ defmodule Opus.Trading.StrategyResults do
         not_run("Not run.")
     end
   end
+
+  # The stage a run reached this one from: before parameter stability
+  # joined, the holdout followed Monte Carlo.
+  defp previous("holdout", ran_at) do
+    if before?(ran_at, @stability_added), do: "monte_carlo", else: @previous["holdout"]
+  end
+
+  defp previous(stage, _ran_at), do: @previous[stage]
+
+  defp before?(ran_at, added), do: DateTime.compare(ran_at, added) == :lt
 
   defp waiting, do: %{status: :pending, stats: nil, at: nil, reason: nil, checks: []}
   defp not_run(reason), do: %{status: :not_run, stats: nil, at: nil, reason: reason, checks: []}
@@ -214,6 +277,7 @@ defmodule Opus.Trading.StrategyResults do
   defp words("backtest"), do: "backtest"
   defp words("walk_forward"), do: "walk-forward test"
   defp words("monte_carlo"), do: "Monte Carlo test"
+  defp words("parameter_stability"), do: "nearby-settings test"
 
   # Newest pipeline run per assignment: assignment id => config id.
   defp latest_configs(ids) do

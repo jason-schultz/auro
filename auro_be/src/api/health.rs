@@ -10,6 +10,7 @@ pub async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": if db_ok { "healthy" } else { "degraded" },
         "service": "auro",
+        "mode": state.config.mode.as_str(),
         "database": if db_ok { "connected" } else { "disconnected" },
     }))
 }

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{ma_type, port, Block, Series, Setting, AVERAGE_WHY};
 use crate::engine::indicators::{self, MaType};
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -11,6 +12,32 @@ pub struct MaFilterParams {
     pub period: usize,
     #[serde(default)]
     pub ma_type: MaType,
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "MaFilter",
+        key: "t",
+        name: "Moving average",
+        watches: "The average price over a number of bars. Price above it usually means an uptrend; below it, a downtrend.",
+        settings: vec![
+            Setting::int(
+                "period",
+                "Bars",
+                100,
+                "More bars make a slower, smoother line that only shows the big trend.",
+            )
+            .at_least(2.0, AVERAGE_WHY),
+            ma_type(),
+        ],
+        ports: vec![
+            port("above", "the price is above its {ma_type} average over {period:bars}"),
+            port("below", "the price is below its {ma_type} average over {period:bars}"),
+        ],
+        series: vec![Series::price("ma", "Average")],
+        stop: None,
+    }
 }
 
 impl Signaler for MaFilterParams {

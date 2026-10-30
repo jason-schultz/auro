@@ -15,7 +15,6 @@ defmodule OpusWeb.Components.TradeStory do
   import OpusWeb.Components.PaperParts, only: [fact: 1]
 
   alias Opus.Journal.TradeStory, as: Story
-  alias Opus.Clock
   alias Phoenix.LiveView.JS
 
   attr :strategies, :list, required: true
@@ -82,7 +81,7 @@ defmodule OpusWeb.Components.TradeStory do
           >
             <td class="py-2.5 whitespace-nowrap">
               <.link patch={trade_path(@strategy, t.id)} class="text-primary hover:underline">
-                {ny_stamp(t.entry_time)}
+                {stamp(t.entry_time)}
               </.link>
             </td>
             <td class="py-2.5 pl-4">
@@ -164,9 +163,6 @@ defmodule OpusWeb.Components.TradeStory do
 
   defp closed_count(1), do: "This strategy has closed 1 live trade."
   defp closed_count(n), do: "This strategy has closed #{n} live trades."
-
-  defp ny_stamp(nil), do: "—"
-  defp ny_stamp(at), do: at |> Clock.local() |> stamp()
 
   defp headline_tone(:win), do: "text-success"
   defp headline_tone(:loss), do: "text-error"

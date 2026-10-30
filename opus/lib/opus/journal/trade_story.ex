@@ -491,7 +491,7 @@ defmodule Opus.Journal.TradeStory do
   defp when_text(nil), do: "—"
 
   defp when_text(at),
-    do: at |> Clock.local() |> Calendar.strftime("%a %b %-d, %-I:%M %p ET")
+    do: at |> Clock.local(Clock.display_zone()) |> Calendar.strftime("%a %b %-d, %-I:%M %p %Z")
 
   defp num1(value), do: :erlang.float_to_binary(value / 1, decimals: 1)
 

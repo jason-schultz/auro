@@ -34,7 +34,8 @@ defmodule OpusWeb.CandleChartTest do
     assert [%{text: text, y: 0}] = layout.edge_notes
     assert text =~ "Stop 150.00 is 45.6% above, off this chart"
     assert layout.overlay == nil
-    assert layout.first_time == "Oct 22 14:30" and layout.last_time == "Oct 22 14:40"
+    # 14:30 UTC, in the viewer's zone (Edmonton, UTC−6 in October).
+    assert layout.first_time == "Oct 22 08:30" and layout.last_time == "Oct 22 08:40"
   end
 
   test "shows only the trailing bars but averages over the hidden ones" do

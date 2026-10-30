@@ -13,8 +13,11 @@ defmodule Opus.Options.Paper do
   condors their maximum loss. A snapshot's market date is its New York date
   at capture. A market date already recorded for a book and underlying is
   never run again. A leg still open at expiry settles on the first run after
-  expiry day, against that day's close from the underlying's daily bars; it
-  waits while the bar isn't stored.
+  expiry day, against that day's close from the underlying's daily bar, or,
+  until Massive publishes it, the last Questrade intraday bar ending at
+  16:00 New York; it waits while neither is stored. A held leg whose strike
+  has left the chain snapshot's band is priced from the session's
+  held-contract quotes.
 
   During the session (`take_profits/1`, every 15 minutes) each take-profit
   works like a resting order at the broker: once that day's check has run,
@@ -34,6 +37,7 @@ defmodule Opus.Options.Paper do
 
   @recent_events 12
   @open ~T[09:30:00]
+  @close ~T[16:00:00]
 
   defp config, do: Application.fetch_env!(:opus, __MODULE__)
 
@@ -51,25 +55,33 @@ defmodule Opus.Options.Paper do
   @doc """
   Run today's rules for every book on each of its underlyings. Each book and
   underlying runs on its own: one that raises is logged and returned as
-  `{:error, exception}`, and the rest still run.
+  `{:error, exception}`, and the rest still run. The ideas books share one
+  cap of open trades across underlyings: each underlying is told the ones
+  still to run, so their better-scoring ideas keep their places
+  (`Opus.Options.Paper.LongOptions.plan_ideas/8`).
   """
   @spec run() :: [
           {String.t(), String.t(), {:ok, [tuple()]} | {:skipped, atom()} | {:error, term()}}
         ]
   def run do
-    for book <- books(), symbol <- underlyings(book) do
-      {book, symbol, isolated("#{book} #{symbol}", fn -> run(book, symbol) end)}
+    for book <- books(), {symbol, later} <- with_later(underlyings(book)) do
+      {book, symbol, isolated("#{book} #{symbol}", fn -> run(book, symbol, later) end)}
     end
   end
+
+  # Each symbol with the ones after it.
+  defp with_later([]), do: []
+  defp with_later([symbol | later]), do: [{symbol, later} | with_later(later)]
 
   @doc """
   Run one book on one underlying's latest snapshot, once per market date.
   A snapshot captured before the 09:30 New York open (the pre-open capture,
   holding the previous session's closing quotes) is not traded on: the day
-  is skipped for that book and underlying.
+  is skipped for that book and underlying. `later` names the underlyings
+  this run reaches next (only the ideas books use it).
   """
-  @spec run(String.t(), String.t()) :: {:ok, [tuple()]} | {:skipped, atom()}
-  def run(book, symbol) do
+  @spec run(String.t(), String.t(), [String.t()]) :: {:ok, [tuple()]} | {:skipped, atom()}
+  def run(book, symbol, later \\ []) do
     case Options.snapshot(symbol) do
       [] ->
         {:skipped, :no_snapshot}
@@ -90,7 +102,7 @@ defmodule Opus.Options.Paper do
             {:skipped, :already_ran}
 
           true ->
-            Repo.transaction(fn -> step(book, id, as_of, rows) end)
+            Repo.transaction(fn -> step(book, id, as_of, rows, later) end)
         end
     end
   end
@@ -179,7 +191,12 @@ defmodule Opus.Options.Paper do
     for trade <- trades,
         fill = trade_take_profit(book, trade, quotes),
         not match?({:hold, _trade}, fill) do
-      spot = quotes |> Map.values() |> Enum.max_by(& &1.captured_at) |> Map.fetch!(:spot)
+      spot =
+        quotes
+        |> Map.values()
+        |> Enum.max_by(& &1.captured_at, NaiveDateTime)
+        |> Map.fetch!(:spot)
+
       apply_trade(fill, book, id, as_of, %{spot: spot}, commission)
       fill
     end
@@ -190,14 +207,17 @@ defmodule Opus.Options.Paper do
 
   defp trade_take_profit(book, trade, quotes), do: LongOptions.take_profit(book, trade, quotes)
 
-  # Each contract's latest quote captured at or after `since`.
-  defp latest_quotes([], _since), do: %{}
+  # Each contract's latest quote captured at or after `since`, from any
+  # source or only `source`.
+  defp latest_quotes(contract_ids, since, source \\ nil)
+  defp latest_quotes([], _since, _source), do: %{}
 
-  defp latest_quotes(contract_ids, since) do
+  defp latest_quotes(contract_ids, since, source) do
     from(q in "option_quotes",
       where:
         q.contract_id in type(^contract_ids, {:array, :integer}) and
-          q.captured_at >= type(^since, :utc_datetime_usec),
+          q.captured_at >= type(^since, :utc_datetime_usec) and
+          (is_nil(type(^source, :string)) or q.source == type(^source, :string)),
       distinct: q.contract_id,
       order_by: [asc: q.contract_id, desc: q.captured_at],
       select:
@@ -225,7 +245,7 @@ defmodule Opus.Options.Paper do
         )
       )
 
-  defp step("wheel", id, as_of, rows) do
+  defp step("wheel", id, as_of, rows, _later) do
     commission = config()[:commission]
     open = open_positions("wheel", id)
     legs = Enum.filter(open, &(&1.kind in ~w(put call)))
@@ -238,7 +258,7 @@ defmodule Opus.Options.Paper do
     actions
   end
 
-  defp step(book, id, as_of, rows) do
+  defp step(book, id, as_of, rows, later) do
     commission = config()[:commission]
     trades = open_trades(book, id)
     snapshot = snapshot(id, as_of, rows, Enum.flat_map(trades, & &1.legs))
@@ -250,7 +270,7 @@ defmodule Opus.Options.Paper do
           LongOptions.plan_ideas(
             book,
             trades,
-            todays_ideas(id, as_of),
+            todays_ideas(id, later, as_of),
             snapshot,
             available,
             commission,
@@ -273,11 +293,25 @@ defmodule Opus.Options.Paper do
   defp snapshot(id, as_of, [%{spot: spot} | _] = rows, legs) do
     %{
       as_of: as_of,
+      instrument_id: id,
       spot: spot,
-      quotes: Map.new(rows, &{&1.contract_id, &1}),
+      quotes: rows |> Map.new(&{&1.contract_id, &1}) |> with_held_quotes(legs, as_of),
       chain: Enum.map(rows, &Map.put(&1, :dte, Date.diff(&1.expiration, as_of))),
       expiry_spots: expiry_spots(id, legs, as_of)
     }
+  end
+
+  # A held leg the chain doesn't cover (its strike drifted outside the
+  # snapshot's band) takes its latest quote of the day from the session's
+  # held-contract quotes (`Opus.Options.IntradayWorker`), or it could never
+  # be managed or closed.
+  defp with_held_quotes(quotes, legs, as_of) do
+    missing =
+      for %{contract_id: id} <- legs, id && not Map.has_key?(quotes, id), uniq: true, do: id
+
+    missing
+    |> latest_quotes(Clock.midnight(as_of), Options.held_source())
+    |> Map.merge(quotes)
   end
 
   defp open_positions(book, id),
@@ -314,19 +348,31 @@ defmodule Opus.Options.Paper do
     |> MapSet.new()
   end
 
-  # The scan from the snapshot's market date.
-  defp todays_ideas(id, as_of),
+  # The dip-buy calls scanned on the snapshot's market date for this
+  # underlying and the ones the run reaches later, best score first: the
+  # later ones hold their places in the shared cap.
+  defp todays_ideas(id, later, as_of),
     do:
       Repo.all(
-        from(i in Idea, where: i.underlying_instrument_id == ^id and i.scanned_on == ^as_of)
+        from(i in Idea,
+          join: u in "instruments",
+          on: u.id == i.underlying_instrument_id,
+          where:
+            i.scanned_on == ^as_of and i.list == "dip_buy" and
+              (i.underlying_instrument_id == ^id or u.symbol in ^later),
+          order_by: [desc: i.score, asc: i.id]
+        )
       )
 
   # The closing price of each expiry day already past, from the underlying's
-  # daily bars (stamped at New York midnight); one not stored yet is left out.
+  # daily bar (stamped at New York midnight), or, while Massive hasn't
+  # published that yet, the Questrade minute bar starting at 16:00 New York,
+  # which carries the closing print (it matched the daily close on Oct 23, 26
+  # and 27); one with neither is left out.
   defp expiry_spots(id, legs, as_of) do
     for expiration <- legs |> Enum.map(& &1.expiration) |> Enum.uniq(),
         Date.before?(expiration, as_of),
-        close = daily_close(id, expiration),
+        close = daily_close(id, expiration) || closing_print(id, expiration),
         is_number(close),
         into: %{},
         do: {expiration, close}
@@ -342,6 +388,22 @@ defmodule Opus.Options.Paper do
     )
     |> Repo.one()
   end
+
+  # An early-close day (13:00) has no 16:00 bar, so it waits for the daily bar.
+  defp closing_print(id, date) do
+    at = market_time(date, @close)
+
+    from(c in "candles",
+      where:
+        c.instrument_id == ^id and c.granularity == "M1" and c.complete and
+          c.timestamp == ^at,
+      select: c.close
+    )
+    |> Repo.one()
+  end
+
+  defp market_time(date, time),
+    do: date |> DateTime.new!(time, Clock.market_zone()) |> DateTime.shift_zone!("Etc/UTC")
 
   defp available(book), do: cash(book) - reserved(book)
 
@@ -683,7 +745,11 @@ defmodule Opus.Options.Paper do
       legs: legs,
       lots: lots,
       trades: trades(strategy, positions, events, marks, spots),
-      priced_at: live |> Map.values() |> Enum.map(& &1.captured_at) |> Enum.max(fn -> nil end),
+      priced_at:
+        live
+        |> Map.values()
+        |> Enum.map(& &1.captured_at)
+        |> Enum.max(NaiveDateTime, fn -> nil end),
       hold_return: hold_return(events),
       started_on: events |> List.last() |> then(&(&1 && &1.on)),
       events: events |> Enum.reject(&(&1.kind == "mark")) |> Enum.take(@recent_events)

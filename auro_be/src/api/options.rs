@@ -1,8 +1,8 @@
 //! Options what-if for the Opus page: one single-leg position (or several
 //! legs as one structure) in, the expiry outcomes and the numbers a
-//! newcomer should look at out. Spot and
-//! the risk-free rate are filled from storage when the caller leaves them
-//! blank; everything else is `engine::options`.
+//! newcomer should look at out. Spot (the newest option quote's, else the
+//! last daily close) and the risk-free rate are filled from storage when the
+//! caller leaves them blank; everything else is `engine::options`.
 
 use axum::extract::State;
 use axum::Json;
@@ -10,6 +10,7 @@ use chrono::{NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::repositories::candles as candles_repo;
+use crate::db::repositories::options as options_repo;
 use crate::engine::options::scenarios::{
     analyze, analyze_structure, Analysis, Input, Leg, Side, Structure,
 };
@@ -142,18 +143,13 @@ pub async fn scenarios(
     let underlying = req.underlying.trim().to_uppercase();
     let spot = match req.spot {
         Some(s) if s > 0.0 => s,
-        _ => candles_repo::latest_close(&state.db, &underlying, Granularity::D)
-            .await
-            .map_err(AppError::Database)?
-            .ok_or_else(|| {
-                AppError::BadRequest(format!(
-                    "no stored price for {underlying}; enter the spot price"
-                ))
-            })?,
+        _ => stored_spot(&state, &underlying).await?,
     };
     let rate = match req.rate {
         Some(r) => r,
-        None => latest_policy_rate(&state, "USD").await?.unwrap_or(0.0),
+        None => latest_policy_rate(&state, "USD").await?.ok_or_else(|| {
+            AppError::BadRequest("no USD policy rate stored; enter the risk-free rate".into())
+        })?,
     };
     let t = years_to_expiry(Utc::now(), req.expiration);
 
@@ -199,6 +195,25 @@ pub async fn scenarios(
         cost_basis: req.cost_basis,
     };
     Ok(Json(ScenariosResponse::Single(Box::new(analyze(&input)))))
+}
+
+/// The spot the newest stored option quote on `underlying` was taken
+/// against (snapshots run through the session), else the last daily close.
+async fn stored_spot(state: &AppState, underlying: &str) -> AppResult<f64> {
+    if let Some(spot) = options_repo::latest_quote_spot(&state.db, underlying)
+        .await
+        .map_err(AppError::Database)?
+    {
+        return Ok(spot);
+    }
+    candles_repo::latest_close(&state.db, underlying, Granularity::D)
+        .await
+        .map_err(AppError::Database)?
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "no stored price for {underlying}; enter the spot price"
+            ))
+        })
 }
 
 async fn latest_policy_rate(state: &AppState, currency: &str) -> AppResult<Option<f64>> {

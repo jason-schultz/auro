@@ -118,6 +118,37 @@ defmodule OpusWeb.StrategyBuilderLiveTest do
     refute html =~ ~s(name="form[rules][entry_long][refs][]" value="r.long")
   end
 
+  test "a condition can be timed: in the last few bars, or some bars ago", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/strategies/new")
+    view |> element("button", "+ RSI") |> render_click()
+    view |> form("#builder") |> render_change(%{"add" => %{"entry_long" => "r.long"}})
+
+    html =
+      view
+      |> form("#builder",
+        form: %{"rules" => %{"entry_long" => %{"timing" => %{"r.long" => %{"kind" => "within"}}}}}
+      )
+      |> render_change()
+
+    # Picking a timing shows the bar count, starting at 5.
+    assert html =~ ~s(name="form[rules][entry_long][timing][r.long][bars]")
+    assert html =~ "bars (this one included)"
+
+    html =
+      view
+      |> form("#builder",
+        form: %{
+          "rules" => %{
+            "entry_long" => %{"timing" => %{"r.long" => %{"kind" => "ago", "bars" => "3"}}}
+          }
+        }
+      )
+      |> render_change()
+
+    assert html =~ "bars ago"
+    assert html =~ ~s(value="3")
+  end
+
   test "the builder runs the rules over the whole history and offers the fragility check", %{
     conn: conn
   } do
@@ -151,7 +182,8 @@ defmodule OpusWeb.StrategyBuilderLiveTest do
 
     html = view |> element("button", ~r/Check \d+ nearby settings/) |> render_click()
     assert html =~ "Checking"
-    assert render_async(view) =~ "Auro is not running."
+    # The grid runs in the tester (config/test.exs: a closed port).
+    assert render_async(view) =~ "cargo run --release --bin auro-tester"
   end
 
   test "a trading strategy opens locked, and unlocking can make a copy", %{conn: conn} do

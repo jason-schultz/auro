@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block, Series, Setting};
 use crate::engine::indicators;
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -34,6 +35,27 @@ impl VolatilityParams {
             indicators::atr(candles, self.period)?,
             indicators::atr(candles, self.baseline)?,
         ))
+    }
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "Volatility",
+        key: "vol",
+        name: "Calm or wild",
+        watches: "How big the bars have been lately compared with how big they usually are. Some strategies only work in calm markets, others only when things are moving.",
+        settings: vec![
+            Setting::int("period", "Recent (bars)", 14, "How many recent bars count as now."),
+            Setting::int("baseline", "Usual (bars)", 100, "How many bars set what's usual.")
+                .at_least(2.0, "the usual range needs more than 1 bar"),
+        ],
+        ports: vec![
+            port("quieter", "the market is calmer than usual (the last {period:bars} compared with the last {baseline:bars})"),
+            port("busier", "the market is wilder than usual (the last {period:bars} compared with the last {baseline:bars})"),
+        ],
+        series: vec![Series::panel("recent", "Bar size now vs usual (% of price)", vec![]).with("usual")],
+        stop: None,
     }
 }
 

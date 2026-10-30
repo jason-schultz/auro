@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block};
 use crate::engine::indicators;
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -40,6 +41,24 @@ impl EventWindowParams {
             next_start >= *e + Duration::minutes(self.start_offset_minutes)
                 && next_end <= *e + Duration::minutes(self.end_offset_minutes)
         })
+    }
+}
+
+/// This block in the catalog (`engine::catalog`). Its settings are the
+/// event times Opus fills in from its calendars, so it lists none.
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "EventWindow",
+        key: "ev",
+        name: "Event window",
+        watches: "Whether the next bar falls inside a window around a scheduled announcement, such as a central-bank decision.",
+        settings: vec![],
+        ports: vec![
+            port("in_window", "it's inside the event window"),
+            port("out_of_window", "it's outside the event window"),
+        ],
+        series: vec![],
+        stop: None,
     }
 }
 

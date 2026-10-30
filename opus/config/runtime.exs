@@ -31,9 +31,13 @@ if config_env() != :test do
   config :opus, Opus.Dashboard.Discord, webhook_url: System.get_env("DISCORD_WEBHOOK_URL")
 end
 
-# Tests point at a closed port (config/test.exs) so they never reach a running engine.
+# Tests point at closed ports (config/test.exs) so they never reach a running engine.
+# Two engine processes: live (trading) and the tester (backtests, pipeline,
+# reports). Test calls never fall back to live.
 if config_env() != :test do
-  config :opus, auro_base_url: System.get_env("AURO_BASE_URL") || "http://localhost:3000"
+  config :opus,
+    auro_base_url: System.get_env("AURO_BASE_URL") || "http://localhost:3000",
+    auro_tester_url: System.get_env("AURO_TESTER_URL") || "http://localhost:3001"
 end
 
 if config_env() == :prod do

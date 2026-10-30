@@ -26,6 +26,7 @@ pub fn request_raw_json(method: Method, uri: &str, raw_body: &str) -> Request<Bo
         .unwrap()
 }
 
+#[allow(dead_code)]
 pub async fn response_json(response: Response<Body>) -> Value {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()

@@ -102,6 +102,6 @@ defmodule OpusWeb.ResearchLiveTest do
     view |> form("#status-#{entry.id}", status: "failed") |> render_change()
 
     assert %{status: "failed", decided_on: today} = Research.get!(entry.id)
-    assert today == Date.utc_today()
+    assert today == Opus.Clock.today()
   end
 end

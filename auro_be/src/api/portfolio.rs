@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 
 use super::strategy_report::{blocking, config_of, WORKERS};
 use crate::engine::live::sizing::MAX_POSITION_PCT_OF_NAV;
+use crate::engine::parallel;
 use crate::engine::pipeline::{self, run_strategy, StrategyConfig};
 use crate::engine::portfolio::{correlation, simulate, Breaker, Limits, Outcome, Play};
 use crate::engine::rules::AccountLimits;
@@ -70,8 +71,8 @@ pub struct PortfolioRequest {
 }
 
 /// A play with its backtest and the bars it covers.
-struct Tested {
-    play: Play,
+struct Tested<'a> {
+    play: Play<'a>,
     granularity: Granularity,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
@@ -128,7 +129,7 @@ pub async fn portfolio(
     let base = req.base;
 
     let body = blocking(move || {
-        let (tested, failed) = backtest_all(jobs, &financing);
+        let (tested, failed) = backtest_all(&jobs, &financing);
         Ok(match base {
             Some(base) => pairs(&tested, failed, &base, limits.as_ref())?,
             None => together(&tested, failed, limits.as_ref())?,
@@ -140,70 +141,51 @@ pub async fn portfolio(
 }
 
 /// Every play's backtest, over a few threads so the live feed keeps
-/// headroom. Plays that can't run come back as `{key, error}`.
-fn backtest_all(
-    jobs: Vec<(String, bool, StrategyConfig, Arc<Vec<Candle>>)>,
+/// headroom. Each play keeps its bars, so the replay values its open
+/// trades at every close. Plays that can't run come back as `{key, error}`.
+fn backtest_all<'a>(
+    jobs: &'a [(String, bool, StrategyConfig, Arc<Vec<Candle>>)],
     financing: &crate::engine::financing::FinancingModel,
-) -> (Vec<Tested>, Vec<Value>) {
-    let run = |(key, exempt, config, bars): &(String, bool, StrategyConfig, Arc<Vec<Candle>>)| {
+) -> (Vec<Tested<'a>>, Vec<Value>) {
+    let run = |(_, _, config, bars): &(String, bool, StrategyConfig, Arc<Vec<Candle>>)| {
         let strategy: Strategy = serde_json::from_value(config.parameters.clone())
             .map_err(|e| format!("invalid strategy: {e}"))?;
-        let SizingConfig::RiskPct {
-            pct,
-            max_notional_pct,
-        } = strategy.sizing;
         if bars.is_empty() {
             return Err("no history to test on".to_string());
         }
         let trades = run_strategy(bars, config, financing).map_err(|e| e.to_string())?;
-        let (from, to) = pipeline::span(bars);
-        Ok(Tested {
-            play: Play {
-                key: key.clone(),
-                instrument: config.instrument.clone(),
-                risk_pct: pct,
-                max_position_pct: max_notional_pct.unwrap_or(MAX_POSITION_PCT_OF_NAV),
-                breaker_exempt: *exempt,
-                trades,
-            },
-            granularity: config.granularity,
-            from,
-            to,
-        })
+        Ok((strategy.sizing, trades))
     };
 
-    let per_thread = jobs.len().div_ceil(WORKERS).max(1);
-    let results: Vec<(String, Result<Tested, String>)> = std::thread::scope(|scope| {
-        jobs.chunks(per_thread)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|job| (job.0.clone(), run(job)))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .zip(jobs.chunks(per_thread))
-            .flat_map(|(handle, chunk)| {
-                // A worker that panicked loses its chunk; each of its plays
-                // is reported as failed rather than silently missing.
-                handle.join().unwrap_or_else(|_| {
-                    chunk
-                        .iter()
-                        .map(|job| (job.0.clone(), Err("its backtest crashed".to_string())))
-                        .collect()
-                })
-            })
-            .collect()
+    let results = parallel::map(jobs, WORKERS, run, |_| {
+        Err("its backtest crashed".to_string())
     });
 
     let mut tested = Vec::new();
     let mut failed = Vec::new();
-    for (key, result) in results {
+    for ((key, exempt, config, bars), result) in jobs.iter().zip(results) {
         match result {
-            Ok(t) => tested.push(t),
+            Ok((sizing, trades)) => {
+                let SizingConfig::RiskPct {
+                    pct,
+                    max_notional_pct,
+                } = sizing;
+                let (from, to) = pipeline::span(bars);
+                tested.push(Tested {
+                    play: Play {
+                        key: key.clone(),
+                        instrument: config.instrument.clone(),
+                        risk_pct: pct,
+                        max_position_pct: max_notional_pct.unwrap_or(MAX_POSITION_PCT_OF_NAV),
+                        breaker_exempt: *exempt,
+                        trades,
+                        bars: bars.as_slice(),
+                    },
+                    granularity: config.granularity,
+                    from,
+                    to,
+                });
+            }
             Err(error) => failed.push(json!({ "key": key, "error": error })),
         }
     }
@@ -211,7 +193,11 @@ fn backtest_all(
 }
 
 /// All plays together over the history they share.
-fn together(tested: &[Tested], failed: Vec<Value>, limits: Option<&Limits>) -> AppResult<Value> {
+fn together(
+    tested: &[Tested<'_>],
+    failed: Vec<Value>,
+    limits: Option<&Limits>,
+) -> AppResult<Value> {
     let (from, to) = shared(tested.iter()).ok_or_else(|| {
         AppError::BadRequest("these strategies share no stretch of history".into())
     })?;
@@ -254,7 +240,7 @@ fn together(tested: &[Tested], failed: Vec<Value>, limits: Option<&Limits>) -> A
 
 /// `base` next to each other play, each pair over the history it shares.
 fn pairs(
-    tested: &[Tested],
+    tested: &[Tested<'_>],
     failed: Vec<Value>,
     base: &str,
     limits: Option<&Limits>,
@@ -297,7 +283,9 @@ fn lean(mut outcome: Outcome) -> Outcome {
 
 /// The latest start and earliest end; None when they don't overlap by a
 /// month.
-fn shared<'a>(tested: impl Iterator<Item = &'a Tested>) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+fn shared<'a, 'b: 'a>(
+    tested: impl Iterator<Item = &'a Tested<'b>>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let (from, to) = tested.fold(
         (None, None),
         |(from, to): (Option<DateTime<Utc>>, Option<DateTime<Utc>>), t| {

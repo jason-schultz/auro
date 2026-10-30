@@ -60,4 +60,23 @@ defmodule OpusWeb.PayoffChartTest do
     assert Enum.map(layout.markers, & &1.text) == ["Now 100.00"]
     assert layout.band == nil
   end
+
+  test "a structure marks every break-even, not only the lowest" do
+    analysis = %{
+      "strategy" => "structure",
+      "spot" => 100.0,
+      "breakeven" => 94.0,
+      "breakevens" => [94.0, 106.0],
+      "expected_move" => nil,
+      "curves" => [curve("expiry", 0.0, fn p -> 600.0 - abs(p - 100.0) * 100 end)]
+    }
+
+    layout = PayoffChart.layout(analysis)
+
+    assert Enum.map(layout.markers, & &1.text) == [
+             "Breakeven 94.00",
+             "Breakeven 106.00",
+             "Now 100.00"
+           ]
+  end
 end

@@ -115,6 +115,56 @@ defmodule Opus.Options.Paper.LongOptionsTest do
                LongOptions.plan_ideas("ideas", [], ideas, snap, 100_000.0, 0.1, 5, MapSet.new())
     end
 
+    test "a better idea on an underlying still to run keeps its place in the cap",
+         %{cheap: cheap, quotes: quotes} do
+      snap = snapshot(650.0, [], quotes) |> Map.put(:instrument_id, 1)
+      mine = Map.put(idea(cheap.contract_id), :underlying_instrument_id, 1)
+
+      later =
+        Map.merge(idea(-1), %{underlying_instrument_id: 2, bid: 3.0, ask: 3.05})
+
+      # Four open elsewhere: the one slot left goes to the better idea later on.
+      assert [] =
+               LongOptions.plan_ideas(
+                 "ideas",
+                 [],
+                 [later, mine],
+                 snap,
+                 1.0e5,
+                 0.1,
+                 4,
+                 MapSet.new()
+               )
+
+      # A later idea that couldn't be filled holds nothing.
+      unfillable = %{later | bid: 0.0}
+
+      assert [{:open, "long_call", _}] =
+               LongOptions.plan_ideas(
+                 "ideas",
+                 [],
+                 [unfillable, mine],
+                 snap,
+                 1.0e5,
+                 0.1,
+                 4,
+                 MapSet.new()
+               )
+
+      # With room for both, this underlying's idea is bought.
+      assert [{:open, "long_call", _}] =
+               LongOptions.plan_ideas(
+                 "ideas",
+                 [],
+                 [later, mine],
+                 snap,
+                 1.0e5,
+                 0.1,
+                 3,
+                 MapSet.new()
+               )
+    end
+
     test "needs the cash", %{cheap: cheap, quotes: quotes} do
       snap = snapshot(650.0, [], quotes)
 

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block, Level, Series, Setting, SIGNAL_LINE_WHY};
 use crate::engine::indicators;
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -38,6 +39,56 @@ pub struct StochasticParams {
     pub oversold: f64,
     #[serde(default = "default_overbought")]
     pub overbought: f64,
+}
+
+const STOCHASTIC_LEVEL_WHY: &str = "the stochastic only reads between 0 and 100";
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "Stochastic",
+        key: "st",
+        name: "Stochastic",
+        watches: "Where the price closed within its recent high-to-low range, from 0 (at the low) to 100 (at the high), plus a smoothed copy of that line. Near the bottom of its range for a while often means it's stretched down.",
+        settings: vec![
+            Setting::int("period", "Bars", 14, "The range is the high and low of this many bars."),
+            Setting::int(
+                "signal_period",
+                "Smoothing",
+                3,
+                "Bars to average into the second line. More is smoother but slower.",
+            )
+            .at_least(2.0, SIGNAL_LINE_WHY),
+            Setting::float(
+                "oversold",
+                "Oversold below",
+                20,
+                "Lower means fewer, more extreme dips count.",
+            )
+            .between(0.0, 100.0, STOCHASTIC_LEVEL_WHY),
+            Setting::float(
+                "overbought",
+                "Overbought above",
+                80,
+                "Higher means fewer, more extreme spikes count.",
+            )
+            .between(0.0, 100.0, STOCHASTIC_LEVEL_WHY),
+        ],
+        ports: vec![
+            port("oversold", "the stochastic (where the price sits in its {period:bars} range) is below {oversold}"),
+            port("overbought", "the stochastic (where the price sits in its {period:bars} range) is above {overbought}"),
+            port("cross_up", "the stochastic (where the price sits in its {period:bars} range) crosses above its smoothed line"),
+            port("cross_down", "the stochastic (where the price sits in its {period:bars} range) crosses below its smoothed line"),
+        ],
+        series: vec![Series::panel(
+            "k",
+            "Stochastic",
+            vec![Level::Setting("oversold"), Level::Setting("overbought")],
+        )
+        .range(0.0, 100.0)
+        .with("d")],
+        stop: None,
+    }
 }
 
 impl Signaler for StochasticParams {

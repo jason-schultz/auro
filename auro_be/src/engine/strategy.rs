@@ -14,14 +14,17 @@
 //! See [[decision-canonical-strategy-shape]] for the architectural rationale.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::engine::adx_filter::AdxFilterParams;
 use crate::engine::bollinger::BollingerParams;
+use crate::engine::carry::CarryParams;
 use crate::engine::donchian::DonchianParams;
 use crate::engine::event_window::EventWindowParams;
+use crate::engine::financing::PolicyRates;
 use crate::engine::ma_filter::MaFilterParams;
 use crate::engine::macd::MacdParams;
 use crate::engine::mean_reversion::MeanReversionParams;
@@ -101,8 +104,9 @@ pub struct Strategy {
 /// A named component. Tagged enum: `{"type": "TrendFollowing", "params": { ... }}`.
 /// The enum exists for serde dispatch only — all behavior lives in the
 /// `Signaler` trait impl on each variant's inner params type. Adding a new
-/// component type: write the params struct, impl Signaler for it, add a
-/// variant here, add a delegation arm in the Signaler impl below.
+/// component type: write the params struct, impl Signaler for it, give it
+/// its `catalog()` entry (see `engine::catalog`), add a variant here, add a
+/// delegation arm in the Signaler impl below.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", content = "params")]
 pub enum Component {
@@ -138,7 +142,22 @@ pub enum Component {
     OpeningRange(OpeningRangeParams),
     #[serde(rename = "PivotPoints")]
     PivotPoints(PivotPointsParams),
+    #[serde(rename = "Carry")]
+    Carry(CarryParams),
     // Future variants: LiquiditySweep, etc.
+}
+
+pub use crate::engine::catalog::SettingRange;
+
+/// The meaningful range of `setting` on a block or stop of type `kind`
+/// (`"RsiReversion"`, `"AtrMultiple"`), from the block catalog
+/// (`catalog::Setting::range`). None: any value the block accepts.
+pub fn setting_range(kind: &str, setting: &str) -> Option<SettingRange> {
+    crate::engine::catalog::block(kind)?
+        .settings
+        .iter()
+        .find(|s| s.key == setting)?
+        .range
 }
 
 /// Long and short port selectors for entry or exit decisions.
@@ -155,9 +174,27 @@ pub struct EntryExitSelector {
     pub short: Option<PortRef>,
 }
 
+/// Most bars a `within` / `ago` rule may count (Opus's builder caps at
+/// the same number).
+/// Each one computes the blocks again on an earlier bar, and the live
+/// buffer only holds a few hundred bars anyway.
+pub const RULE_LOOKBACK_MAX: usize = 500;
+
 /// Reference to a signal port. Can be:
 /// - A direct port name like `"tf.bullish_cross"` (resolves to the component's output)
 /// - A composition: `and`, `or`, or `not` of other refs
+/// - A time rule over earlier bars:
+///   - `{"within": N, "rule": r}`: `r` held on at least one of the last N
+///     bars, this one included (N = 1 is `r` itself).
+///   - `{"ago": N, "rule": r}`: `r` as it read N bars back.
+///
+///   An earlier bar is read by computing the blocks on the candles that
+///   ended there (the same window shortened by N bars), so backtest and live
+///   agree. A bar that can't be read (not enough candles, a block or port
+///   missing) counts like a missing port today: no signal. For `within`
+///   that means every one of the N bars must be readable, not just one. The
+///   strategy's warmup grows by the rules' lookback (`PortRef::lookback`),
+///   so past warmup the earlier bars are there. 1 ≤ N ≤ `RULE_LOOKBACK_MAX`.
 ///
 /// Custom Deserialize because we want strings to parse as `Direct` without
 /// requiring `{"direct": "tf.bullish_cross"}` everywhere.
@@ -168,6 +205,39 @@ pub enum PortRef {
     And { and: Vec<PortRef> },
     Or { or: Vec<PortRef> },
     Not { not: Box<PortRef> },
+    Within { within: usize, rule: Box<PortRef> },
+    Ago { ago: usize, rule: Box<PortRef> },
+}
+
+impl PortRef {
+    /// Bars before the current one this rule reads: `within` N reads N − 1
+    /// earlier bars, `ago` N reads N; nested rules add up.
+    pub fn lookback(&self) -> usize {
+        match self {
+            PortRef::Direct(_) => 0,
+            PortRef::And { and: refs } | PortRef::Or { or: refs } => {
+                refs.iter().map(PortRef::lookback).max().unwrap_or(0)
+            }
+            PortRef::Not { not } => not.lookback(),
+            PortRef::Within { within, rule } => within.saturating_sub(1) + rule.lookback(),
+            PortRef::Ago { ago, rule } => ago + rule.lookback(),
+        }
+    }
+}
+
+/// The bar count of a `within` / `ago` rule, checked against
+/// 1..=`RULE_LOOKBACK_MAX`.
+fn rule_bars(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Result<usize, String> {
+    let n = map
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("'{key}' must be a whole number of bars"))?;
+    if n < 1 || n > RULE_LOOKBACK_MAX as u64 {
+        return Err(format!(
+            "'{key}' must be between 1 and {RULE_LOOKBACK_MAX} bars, got {n}"
+        ));
+    }
+    Ok(n as usize)
 }
 
 impl<'de> Deserialize<'de> for PortRef {
@@ -195,14 +265,31 @@ impl<'de> Deserialize<'de> for PortRef {
                     Ok(PortRef::Not {
                         not: Box::new(inner),
                     })
+                } else if map.contains_key("within") || map.contains_key("ago") {
+                    let key = if map.contains_key("within") {
+                        "within"
+                    } else {
+                        "ago"
+                    };
+                    let bars = rule_bars(&map, key).map_err(D::Error::custom)?;
+                    let rule = map
+                        .get("rule")
+                        .ok_or_else(|| D::Error::custom(format!("'{key}' needs a 'rule'")))?;
+                    let rule: Box<PortRef> =
+                        Box::new(serde_json::from_value(rule.clone()).map_err(D::Error::custom)?);
+                    Ok(if key == "within" {
+                        PortRef::Within { within: bars, rule }
+                    } else {
+                        PortRef::Ago { ago: bars, rule }
+                    })
                 } else {
                     Err(D::Error::custom(
-                        "PortRef object must contain 'and', 'or', or 'not'",
+                        "PortRef object must contain 'and', 'or', 'not', 'within', or 'ago'",
                     ))
                 }
             }
             _ => Err(D::Error::custom(
-                "PortRef must be a string or an object with 'and'/'or'/'not'",
+                "PortRef must be a string or an object with 'and'/'or'/'not'/'within'/'ago'",
             )),
         }
     }
@@ -273,19 +360,60 @@ pub enum ExitSignal {
 }
 
 impl Strategy {
-    /// Minimum candle count required to compute all component ports and
-    /// the stop (an ATR stop needs `period + 1` bars).
+    /// Minimum candle count required to compute all component ports, on
+    /// this bar and on every earlier bar a `within` / `ago` rule reads
+    /// (`rule_lookback`), and the stop (an ATR stop needs `period + 1` bars).
     pub fn warmup(&self) -> usize {
         let stop = match &self.stop {
             StopConfig::AtrMultiple { period, .. } => period + 1,
             StopConfig::FixedPct { .. } | StopConfig::FromComponent { .. } => 0,
         };
-        self.components
+        let components = self
+            .components
             .values()
             .map(|c| c.warmup())
             .max()
-            .unwrap_or(0)
-            .max(stop)
+            .unwrap_or(0);
+        (components + self.rule_lookback()).max(stop)
+    }
+
+    /// The most bars before the current one any entry or exit rule reads.
+    pub fn rule_lookback(&self) -> usize {
+        [
+            &self.entry.long,
+            &self.entry.short,
+            &self.exit.long,
+            &self.exit.short,
+        ]
+        .into_iter()
+        .flatten()
+        .map(PortRef::lookback)
+        .max()
+        .unwrap_or(0)
+    }
+
+    /// Whether any block needs central-bank policy rates (`Carry`).
+    pub fn needs_policy_rates(&self) -> bool {
+        self.components
+            .values()
+            .any(|c| matches!(c, Component::Carry(_)))
+    }
+
+    /// Hand every `Carry` block the policy rates of this strategy's pair.
+    /// Every reader of a strategy that evaluates it calls this once after
+    /// parsing (backtest, live, preview), so all compute alike. Err: the
+    /// instrument isn't a currency pair or a currency has no rates; the
+    /// unattached block then can't compute.
+    pub fn attach_policy_rates(&mut self, rates: &Arc<PolicyRates>) -> Result<(), String> {
+        let instrument = self.instrument.clone();
+        for (name, component) in &mut self.components {
+            if let Component::Carry(carry) = component {
+                carry
+                    .attach(&instrument, rates)
+                    .map_err(|e| format!("block {name}: {e}"))?;
+            }
+        }
+        Ok(())
     }
 
     /// Compute all component port values against the candle buffer ending at
@@ -309,10 +437,14 @@ impl Strategy {
             .collect()
     }
 
-    /// Evaluate the entry selector against computed port values.
-    pub fn evaluate_entry(&self, ports: &PortValues) -> EntrySignal {
-        let long = resolve_side(&self.entry.long, ports);
-        let short = resolve_side(&self.entry.short, ports);
+    /// Evaluate the entry selector for the bar at the end of `candles`.
+    /// `ports` is `compute_ports(candles)`; earlier bars a time rule reads
+    /// are computed from `candles` as needed. Every reader that decides
+    /// (backtest, live) goes through here, so they decide alike.
+    pub fn evaluate_entry(&self, candles: &[Candle], ports: &PortValues) -> EntrySignal {
+        let mut bars = RuleBars::new(self, candles, ports);
+        let long = resolve_side(&self.entry.long, &mut bars);
+        let short = resolve_side(&self.entry.short, &mut bars);
         match (long, short) {
             (true, true) => EntrySignal::None, // ambiguous → no signal
             (true, false) => EntrySignal::Long,
@@ -321,15 +453,21 @@ impl Strategy {
         }
     }
 
-    /// Evaluate the exit selector for a given direction. An omitted side
+    /// Evaluate the exit selector for a given direction, for the bar at the
+    /// end of `candles` (`ports` as in `evaluate_entry`). An omitted side
     /// never signals exit — the position relies on its stop/time-stop.
-    pub fn evaluate_exit(&self, ports: &PortValues, is_long: bool) -> ExitSignal {
+    pub fn evaluate_exit(
+        &self,
+        candles: &[Candle],
+        ports: &PortValues,
+        is_long: bool,
+    ) -> ExitSignal {
         let selector = if is_long {
             &self.exit.long
         } else {
             &self.exit.short
         };
-        if resolve_side(selector, ports) {
+        if resolve_side(selector, &mut RuleBars::new(self, candles, ports)) {
             ExitSignal::Exit
         } else {
             ExitSignal::Hold
@@ -359,6 +497,7 @@ impl Component {
             Component::Vwap(p) => p.warmup(),
             Component::OpeningRange(p) => p.warmup(),
             Component::PivotPoints(p) => p.warmup(),
+            Component::Carry(p) => p.warmup(),
         }
     }
 
@@ -380,6 +519,7 @@ impl Component {
             Component::Vwap(p) => p.compute(candles),
             Component::OpeningRange(p) => p.compute(candles),
             Component::PivotPoints(p) => p.compute(candles),
+            Component::Carry(p) => p.compute(candles),
         }
     }
 
@@ -401,6 +541,7 @@ impl Component {
             Component::Vwap(p) => p.entry_reason(candles, direction),
             Component::OpeningRange(p) => p.entry_reason(candles, direction),
             Component::PivotPoints(p) => p.entry_reason(candles, direction),
+            Component::Carry(p) => p.entry_reason(candles, direction),
         }
     }
 
@@ -422,6 +563,7 @@ impl Component {
             Component::Vwap(p) => p.series(candles),
             Component::OpeningRange(p) => p.series(candles),
             Component::PivotPoints(p) => p.series(candles),
+            Component::Carry(p) => p.series(candles),
         }
     }
 
@@ -443,6 +585,7 @@ impl Component {
             Component::Vwap(p) => p.stop_price(candles, direction),
             Component::OpeningRange(p) => p.stop_price(candles, direction),
             Component::PivotPoints(p) => p.stop_price(candles, direction),
+            Component::Carry(p) => p.stop_price(candles, direction),
         }
     }
 }
@@ -458,6 +601,7 @@ fn primary_component_name(port_ref: &PortRef) -> Option<&str> {
         PortRef::And { and } => and.iter().find_map(primary_component_name),
         PortRef::Or { or } => or.iter().find_map(primary_component_name),
         PortRef::Not { not } => primary_component_name(not),
+        PortRef::Within { rule, .. } | PortRef::Ago { rule, .. } => primary_component_name(rule),
     }
 }
 
@@ -497,7 +641,7 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
             }
         };
 
-        let entry_signal = strategy.evaluate_entry(&ports);
+        let entry_signal = strategy.evaluate_entry(window, &ports);
         let direction = match entry_signal {
             EntrySignal::Long => Direction::Long,
             EntrySignal::Short => Direction::Short,
@@ -602,7 +746,8 @@ pub fn run_backtest(candles: &[Candle], strategy: &Strategy) -> Vec<Trade> {
                     continue;
                 }
             };
-            let exit_signal = strategy.evaluate_exit(&exit_ports, direction == Direction::Long);
+            let exit_signal =
+                strategy.evaluate_exit(exit_window, &exit_ports, direction == Direction::Long);
             if matches!(exit_signal, ExitSignal::Exit) {
                 let exit_price = candles[j].exit_fill_price(direction);
                 let pnl = match direction {
@@ -689,37 +834,85 @@ pub fn compute_stop_price(
     }
 }
 
-/// Resolve a PortRef to a bool value given the computed port values.
-/// Returns Some(value) if all referenced ports were computed; None if any
-/// referenced port is missing (treat as "no signal").
+/// The port values of the bar at the end of `candles` and, computed the
+/// first time a time rule asks and kept for the rest of this evaluation, of
+/// the bars before it.
+struct RuleBars<'a> {
+    strategy: &'a Strategy,
+    candles: &'a [Candle],
+    current: &'a PortValues,
+    /// Bars back → that bar's ports; None: they can't be computed.
+    earlier: HashMap<usize, Option<PortValues>>,
+}
+
+impl<'a> RuleBars<'a> {
+    fn new(strategy: &'a Strategy, candles: &'a [Candle], current: &'a PortValues) -> Self {
+        Self {
+            strategy,
+            candles,
+            current,
+            earlier: HashMap::new(),
+        }
+    }
+
+    /// The ports of the bar `back` bars before the current one, computed on
+    /// the candles that ended there.
+    fn ports(&mut self, back: usize) -> Option<&PortValues> {
+        if back == 0 {
+            return Some(self.current);
+        }
+        let (strategy, candles) = (self.strategy, self.candles);
+        self.earlier
+            .entry(back)
+            .or_insert_with(|| {
+                let end = candles.len().checked_sub(back).filter(|&end| end > 0)?;
+                strategy.compute_ports(&candles[..end])
+            })
+            .as_ref()
+    }
+}
+
 /// Resolve an optional selector side: omitted side → never fires.
-fn resolve_side(side: &Option<PortRef>, ports: &PortValues) -> bool {
+fn resolve_side(side: &Option<PortRef>, bars: &mut RuleBars) -> bool {
     side.as_ref()
-        .and_then(|port_ref| resolve_port_ref(port_ref, ports))
+        .and_then(|port_ref| resolve_port_ref(port_ref, 0, bars))
         .unwrap_or(false)
 }
 
-fn resolve_port_ref(port_ref: &PortRef, ports: &PortValues) -> Option<bool> {
+/// Resolve a PortRef to a bool on the bar `back` bars before the current
+/// one. Some(value) if every referenced port (on every bar it reads) was
+/// computed; None if one is missing (treat as "no signal").
+fn resolve_port_ref(port_ref: &PortRef, back: usize, bars: &mut RuleBars) -> Option<bool> {
     match port_ref {
         PortRef::Direct(name) => {
             let (component, port) = name.split_once('.')?;
-            ports.get(component)?.get(port).copied()
+            bars.ports(back)?.get(component)?.get(port).copied()
         }
         PortRef::And { and } => {
             let mut result = true;
             for r in and {
-                result = result && resolve_port_ref(r, ports)?;
+                result = result && resolve_port_ref(r, back, bars)?;
             }
             Some(result)
         }
         PortRef::Or { or } => {
             let mut result = false;
             for r in or {
-                result = result || resolve_port_ref(r, ports)?;
+                result = result || resolve_port_ref(r, back, bars)?;
             }
             Some(result)
         }
-        PortRef::Not { not } => Some(!resolve_port_ref(not, ports)?),
+        PortRef::Not { not } => Some(!resolve_port_ref(not, back, bars)?),
+        PortRef::Within { within, rule } => {
+            // Every bar is read, even after a hit: one that can't be is no
+            // signal (see `PortRef`).
+            let mut any = false;
+            for earlier in 0..*within {
+                any |= resolve_port_ref(rule, back + earlier, bars)?;
+            }
+            Some(any)
+        }
+        PortRef::Ago { ago, rule } => resolve_port_ref(rule, back + ago, bars),
     }
 }
 
@@ -757,6 +950,12 @@ mod tests {
     }
     use serde_json::json;
 
+    /// A rule on the current bar only (no candles to look back over).
+    fn resolve(r: &PortRef, ports: &PortValues) -> Option<bool> {
+        let strategy = tf_strategy(5, 20, -0.02);
+        resolve_port_ref(r, 0, &mut RuleBars::new(&strategy, &[], ports))
+    }
+
     #[test]
     fn port_ref_deserializes_string_as_direct() {
         let r: PortRef = serde_json::from_value(json!("tf.bullish_cross")).unwrap();
@@ -791,7 +990,7 @@ mod tests {
         ports.insert("tf".to_string(), tf_ports);
 
         assert_eq!(
-            resolve_port_ref(&PortRef::Direct("tf.bullish_cross".to_string()), &ports),
+            resolve(&PortRef::Direct("tf.bullish_cross".to_string()), &ports),
             Some(true)
         );
     }
@@ -800,7 +999,7 @@ mod tests {
     fn resolve_missing_port_returns_none() {
         let ports: PortValues = HashMap::new();
         assert_eq!(
-            resolve_port_ref(&PortRef::Direct("tf.bullish_cross".to_string()), &ports),
+            resolve(&PortRef::Direct("tf.bullish_cross".to_string()), &ports),
             None
         );
     }
@@ -819,7 +1018,7 @@ mod tests {
                 PortRef::Direct("tf.b".to_string()),
             ],
         };
-        assert_eq!(resolve_port_ref(&r, &ports), Some(false));
+        assert_eq!(resolve(&r, &ports), Some(false));
     }
 
     #[test]
@@ -836,7 +1035,7 @@ mod tests {
                 PortRef::Direct("tf.b".to_string()),
             ],
         };
-        assert_eq!(resolve_port_ref(&r, &ports), Some(true));
+        assert_eq!(resolve(&r, &ports), Some(true));
     }
 
     #[test]
@@ -849,7 +1048,208 @@ mod tests {
         let r = PortRef::Not {
             not: Box::new(PortRef::Direct("tf.a".to_string())),
         };
-        assert_eq!(resolve_port_ref(&r, &ports), Some(false));
+        assert_eq!(resolve(&r, &ports), Some(false));
+    }
+
+    // ---- time rules (`within` / `ago`) ----
+
+    /// An "up bar" block: with a 2-bar average, `m.above` is a close above
+    /// the one before, `m.below` one under it. Warmup 2.
+    fn up_bar_strategy(long: serde_json::Value, exit: serde_json::Value) -> Strategy {
+        serde_json::from_value(json!({
+            "strategy_id": null,
+            "strategy_name": "time_rules",
+            "version": "v1_composite",
+            "instrument": "TEST",
+            "granularity": "H1",
+            "components": {"m": {"type": "MaFilter", "params": {"period": 2}}},
+            "entry": {"long": long},
+            "exit": {"long": exit},
+            "stop": {"type": "FixedPct", "params": {"pct": -0.5}},
+            "sizing": {"type": "RiskPct", "params": {"pct": 0.01}}
+        }))
+        .expect("should parse")
+    }
+
+    /// The long entry decision on the bar at the end of `candles`.
+    fn long_entry(strategy: &Strategy, candles: &[Candle]) -> bool {
+        strategy
+            .compute_ports(candles)
+            .is_some_and(|ports| strategy.evaluate_entry(candles, &ports) == EntrySignal::Long)
+    }
+
+    #[test]
+    fn time_rules_round_trip_json() {
+        let rule = json!({"and": [
+            {"within": 5, "rule": {"ago": 1, "rule": "m.above"}},
+            {"not": {"within": 1, "rule": "m.below"}}
+        ]});
+        let parsed: PortRef = serde_json::from_value(rule.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), rule);
+    }
+
+    #[test]
+    fn time_rule_bar_count_is_checked() {
+        for bad in [
+            json!({"within": 0, "rule": "m.above"}),
+            json!({"ago": 501, "rule": "m.above"}),
+            json!({"ago": -1, "rule": "m.above"}),
+            json!({"within": 2.5, "rule": "m.above"}),
+            json!({"within": "3", "rule": "m.above"}),
+            json!({"within": 3}),
+        ] {
+            assert!(
+                serde_json::from_value::<PortRef>(bad.clone()).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(serde_json::from_value::<PortRef>(json!({"ago": 500, "rule": "m.above"})).is_ok());
+    }
+
+    #[test]
+    fn warmup_grows_by_the_rules_lookback() {
+        assert_eq!(
+            up_bar_strategy(json!("m.above"), json!("m.below")).warmup(),
+            2
+        );
+        // within 5 reads 4 earlier bars.
+        let s = up_bar_strategy(json!({"within": 5, "rule": "m.above"}), json!("m.below"));
+        assert_eq!(s.warmup(), 6);
+        // Nested: 4 + 3; the exit's 10 is the longest.
+        let nested = json!({"within": 5, "rule": {"ago": 3, "rule": "m.above"}});
+        assert_eq!(
+            up_bar_strategy(nested.clone(), json!("m.below")).warmup(),
+            9
+        );
+        let s = up_bar_strategy(nested, json!({"ago": 10, "rule": "m.below"}));
+        assert_eq!(s.warmup(), 12);
+    }
+
+    #[test]
+    fn ago_reads_the_rule_n_bars_back() {
+        // Up bars: 101 (bar 1) and 100 (bar 4); bars 2 and 3 are down.
+        let bars = crate::engine::test_candles::daily(&[100.0, 101.0, 100.0, 99.0, 100.0]);
+        let ago = |n| up_bar_strategy(json!({"ago": n, "rule": "m.above"}), json!("m.below"));
+        assert!(!long_entry(&ago(1), &bars));
+        assert!(!long_entry(&ago(2), &bars));
+        assert!(long_entry(&ago(3), &bars));
+        // 4 bars back is bar 0, whose average can't be computed: no signal.
+        assert!(!long_entry(&ago(4), &bars));
+        // `ago` composes: "not a down bar 1 bar ago" is false (bar 3 was down).
+        let s = up_bar_strategy(
+            json!({"ago": 1, "rule": {"not": "m.below"}}),
+            json!("m.below"),
+        );
+        assert!(!long_entry(&s, &bars));
+    }
+
+    #[test]
+    fn within_holds_if_the_rule_held_on_any_of_the_bars() {
+        let bars = crate::engine::test_candles::daily(&[100.0, 101.0, 100.0, 99.0, 100.0]);
+        let within =
+            |n, rule: &str| up_bar_strategy(json!({"within": n, "rule": rule}), json!("m.below"));
+        // Bar 4 is not a down bar, bar 3 was.
+        assert!(!long_entry(&within(1, "m.below"), &bars));
+        assert!(long_entry(&within(2, "m.below"), &bars));
+        // The bars before bar 4 (3, 2) were down; bar 4 itself is up.
+        assert!(long_entry(&within(1, "m.above"), &bars));
+        assert!(!long_entry(&within(2, "m.above"), &bars[..4]));
+        // within 1 is the rule itself, on every bar.
+        for end in 2..=bars.len() {
+            assert_eq!(
+                long_entry(&within(1, "m.above"), &bars[..end]),
+                long_entry(
+                    &up_bar_strategy(json!("m.above"), json!("m.below")),
+                    &bars[..end]
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn within_needs_every_bar_it_reads() {
+        // Bar 1 is an up bar, but bar 0 (no average yet) can't be read, so
+        // "up bar within the last 2" has no signal rather than a yes.
+        let bars = crate::engine::test_candles::daily(&[100.0, 101.0]);
+        let s = up_bar_strategy(json!({"within": 2, "rule": "m.above"}), json!("m.below"));
+        let ports = s.compute_ports(&bars).unwrap();
+        let mut rule_bars = RuleBars::new(&s, &bars, &ports);
+        assert_eq!(
+            resolve_port_ref(s.entry.long.as_ref().unwrap(), 0, &mut rule_bars),
+            None
+        );
+    }
+
+    #[test]
+    fn exits_read_time_rules_too() {
+        // Exit when there was a down bar in the last 2: bar 3.
+        let bars = crate::engine::test_candles::daily(&[100.0, 101.0, 100.0, 99.0, 100.0]);
+        let s = up_bar_strategy(json!("m.above"), json!({"within": 2, "rule": "m.below"}));
+        let ports = s.compute_ports(&bars).unwrap();
+        assert_eq!(s.evaluate_exit(&bars, &ports, true), ExitSignal::Exit);
+        let ports = s.compute_ports(&bars[..2]).unwrap();
+        assert_eq!(s.evaluate_exit(&bars[..2], &ports, true), ExitSignal::Hold);
+    }
+
+    #[test]
+    fn primary_component_is_found_inside_time_rules() {
+        let r: PortRef =
+            serde_json::from_value(json!({"within": 3, "rule": {"ago": 1, "rule": "m.above"}}))
+                .unwrap();
+        assert_eq!(primary_component_name(&r), Some("m"));
+    }
+
+    /// Live decides on its candle buffer (capped at the granularity's
+    /// capacity, filled bar by bar); the backtest on `bounded_window`. With
+    /// time rules both must read the same earlier bars, so every decision
+    /// matches, including once the buffer is full and sliding.
+    #[test]
+    fn time_rule_decisions_match_between_backtest_and_live_buffer() {
+        let closes: Vec<f64> = (0..600)
+            .map(|i| 100.0 + (i as f64 * 0.37).sin() * 3.0 + (i as f64 * 0.05).cos())
+            .collect();
+        let candles = crate::engine::test_candles::daily(&closes);
+        let s = up_bar_strategy(
+            json!({"and": [{"within": 4, "rule": "m.below"}, "m.above", {"ago": 2, "rule": "m.below"}]}),
+            json!({"within": 3, "rule": {"ago": 1, "rule": "m.above"}}),
+        );
+        let cap = s.granularity.buffer_capacity();
+        assert!(candles.len() > cap + 50, "the buffer must slide");
+        let mut buffer = crate::engine::types::CandleBuffer::new(cap);
+        let mut entries = 0;
+        for (i, candle) in candles.iter().enumerate() {
+            buffer.push(candle.clone());
+            if i < s.warmup() {
+                continue;
+            }
+            let window = bounded_window(&candles, i, cap);
+            let times = |bars: &[Candle]| bars.iter().map(|c| c.time).collect::<Vec<_>>();
+            assert_eq!(times(&buffer.candles), times(window), "bar {i}");
+            let live_ports = s.compute_ports(&buffer.candles).unwrap();
+            let backtest_ports = s.compute_ports(window).unwrap();
+            let live = s.evaluate_entry(&buffer.candles, &live_ports);
+            assert_eq!(live, s.evaluate_entry(window, &backtest_ports), "bar {i}");
+            assert_eq!(
+                s.evaluate_exit(&buffer.candles, &live_ports, true),
+                s.evaluate_exit(window, &backtest_ports, true),
+                "bar {i}"
+            );
+            entries += usize::from(live == EntrySignal::Long);
+        }
+        assert!(
+            entries > 0,
+            "the rule must fire somewhere to prove anything"
+        );
+        // Every backtest entry is a bar the live loop also signalled on.
+        let trades = run_backtest(&candles, &s);
+        assert!(!trades.is_empty());
+        for trade in trades {
+            let i = candles
+                .iter()
+                .position(|c| c.time == trade.entry_time)
+                .unwrap();
+            assert!(long_entry(&s, bounded_window(&candles, i, cap)));
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use reqwest::Client;
+use reqwest::{Client, Method};
 use sqlx::PgPool;
 
 use super::models::{
@@ -26,6 +26,12 @@ const OPTION_QUOTE_BATCH: usize = 100;
 /// market-data limits are per second; a reset further off (the hourly
 /// limit) isn't waited for, and the retry fails as the first did.
 const MAX_RATE_LIMIT_WAIT: StdDuration = StdDuration::from_secs(5);
+
+/// Tries at writing a rotated refresh token to the DB before giving up loudly.
+const TOKEN_PERSIST_ATTEMPTS: u32 = 3;
+
+/// How much of a 401 body is logged; Questrade's are a short code + message.
+const LOGGED_401_CHARS: usize = 300;
 
 #[derive(Debug, Clone)]
 pub struct QuestradeClient {
@@ -96,8 +102,9 @@ impl QuestradeClient {
     }
 
     /// Exchange the current refresh token for a fresh access token.
-    /// Persists the new refresh token to DB immediately — the old one is
-    /// invalidated by Questrade as soon as this call succeeds.
+    /// Questrade invalidates the old refresh token as soon as this call
+    /// succeeds, so the new tokens go into memory first (the process keeps
+    /// working whatever happens next), then to the DB for the next start.
     pub async fn authenticate(&mut self) -> AppResult<()> {
         let params = [
             ("grant_type", "refresh_token"),
@@ -126,36 +133,59 @@ impl QuestradeClient {
         })?;
 
         let expires_at = Utc::now() + Duration::seconds(token.expires_in as i64);
-
-        // Persist the new tokens before updating self — if DB write fails we
-        // haven't thrown away the in-memory state yet.
-        sqlx::query(
-            r#"
-            INSERT INTO questrade_tokens (singleton, refresh_token, access_token, api_server, expires_at, updated_at)
-            VALUES (TRUE, $1, $2, $3, $4, NOW())
-            ON CONFLICT (singleton) DO UPDATE
-                SET refresh_token = EXCLUDED.refresh_token,
-                    access_token  = EXCLUDED.access_token,
-                    api_server    = EXCLUDED.api_server,
-                    expires_at    = EXCLUDED.expires_at,
-                    updated_at    = NOW()
-            "#,
-        )
-        .bind(&token.refresh_token)
-        .bind(&token.access_token)
-        .bind(&token.api_server)
-        .bind(expires_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("DB error persisting questrade tokens: {}", e)))?;
-
         self.refresh_token = token.refresh_token;
         self.access_token = Some(token.access_token);
         self.api_server = Some(token.api_server);
         self.expires_at = Some(expires_at);
-
         tracing::info!("Questrade authenticated; token expires at {}", expires_at);
+
+        self.persist_tokens().await;
         Ok(())
+    }
+
+    /// Write the in-memory tokens to the DB, retrying a few times. A failure
+    /// is logged, not returned: the old refresh token is already dead, and
+    /// the in-memory one keeps this process working until it next rotates.
+    async fn persist_tokens(&self) {
+        let mut last_error = None;
+        for attempt in 1..=TOKEN_PERSIST_ATTEMPTS {
+            let result = sqlx::query(
+                r#"
+                INSERT INTO questrade_tokens (singleton, refresh_token, access_token, api_server, expires_at, updated_at)
+                VALUES (TRUE, $1, $2, $3, $4, NOW())
+                ON CONFLICT (singleton) DO UPDATE
+                    SET refresh_token = EXCLUDED.refresh_token,
+                        access_token  = EXCLUDED.access_token,
+                        api_server    = EXCLUDED.api_server,
+                        expires_at    = EXCLUDED.expires_at,
+                        updated_at    = NOW()
+                "#,
+            )
+            .bind(&self.refresh_token)
+            .bind(&self.access_token)
+            .bind(&self.api_server)
+            .bind(self.expires_at)
+            .execute(&self.pool)
+            .await;
+            match result {
+                Ok(_) => return,
+                Err(e) => {
+                    tracing::warn!(
+                        "Questrade token persist attempt {attempt}/{TOKEN_PERSIST_ATTEMPTS} failed: {e}"
+                    );
+                    last_error = Some(e);
+                    if attempt < TOKEN_PERSIST_ATTEMPTS {
+                        tokio::time::sleep(StdDuration::from_secs(attempt as u64)).await;
+                    }
+                }
+            }
+        }
+        tracing::error!(
+            "QUESTRADE REFRESH TOKEN NOT PERSISTED: {}. The rotated token lives only in \
+             memory; the old DB token is dead, so the next restart needs a fresh token \
+             in the env unless a later refresh persists.",
+            last_error.map(|e| e.to_string()).unwrap_or_default()
+        );
     }
 
     /// Refresh if the access token is missing or within 60 seconds of expiry.
@@ -186,30 +216,38 @@ impl QuestradeClient {
         Ok(format!("{}v1/{}", server, path))
     }
 
-    /// Send `builder` once more after a 401 (re-authenticating first) or a
-    /// 429 (waiting out the rate limit first); any other failure, or a
-    /// second one, is the error.
-    async fn request(&mut self, builder: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
+    /// `method` the API `path`, with `build` adding the query or body. Sent
+    /// once more after a 401 (re-authenticating first) or a 429 (waiting out
+    /// the rate limit first); any other failure, or a second one, is the
+    /// error. The URL is built per send, so a retry after re-auth goes to
+    /// the api_server the new token was issued for.
+    async fn request(
+        &mut self,
+        method: Method,
+        path: &str,
+        build: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    ) -> AppResult<reqwest::Response> {
         self.ensure_authenticated().await?;
 
-        // Clone before send so we can retry once.
-        // try_clone returns None only for streaming bodies; ours are GET or small JSON.
-        let retry = builder.try_clone();
-
-        let resp = self.send(builder).await?;
-        let resp = match (resp.status(), retry) {
-            (reqwest::StatusCode::UNAUTHORIZED, Some(rb)) => {
-                tracing::warn!("Questrade 401 — forcing re-auth and retrying");
+        let resp = self.send(&method, path, &build).await?;
+        let resp = match resp.status() {
+            reqwest::StatusCode::UNAUTHORIZED => {
+                let body = resp.text().await.unwrap_or_default();
+                let shown: String = body.chars().take(LOGGED_401_CHARS).collect();
+                tracing::warn!(
+                    "Questrade 401 on {path} (token expires at {:?}) — forcing re-auth and retrying; body: {shown}",
+                    self.expires_at
+                );
                 self.authenticate().await?;
-                self.send(rb).await?
+                self.send(&method, path, &build).await?
             }
-            (reqwest::StatusCode::TOO_MANY_REQUESTS, Some(rb)) => {
+            reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 let wait = rate_limit_wait(resp.headers(), Utc::now());
                 tracing::warn!(
                     "Questrade 429 — waiting {wait:?} for the rate limit, then retrying"
                 );
                 tokio::time::sleep(wait).await;
-                self.send(rb).await?
+                self.send(&method, path, &build).await?
             }
             _ => resp,
         };
@@ -226,8 +264,14 @@ impl QuestradeClient {
         Ok(resp)
     }
 
-    async fn send(&self, builder: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
-        builder
+    async fn send(
+        &self,
+        method: &Method,
+        path: &str,
+        build: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    ) -> AppResult<reqwest::Response> {
+        let url = self.api_url(path)?;
+        build(self.http.request(method.clone(), url))
             .header("Authorization", self.bearer()?)
             .send()
             .await
@@ -238,8 +282,8 @@ impl QuestradeClient {
         &mut self,
         account_id: &str,
     ) -> AppResult<AccountBalancesResponse> {
-        let url = self.api_url(&format!("accounts/{}/balances", account_id))?;
-        let resp = self.request(self.http.get(&url)).await?;
+        let path = format!("accounts/{}/balances", account_id);
+        let resp = self.request(Method::GET, &path, |rb| rb).await?;
 
         resp.json()
             .await
@@ -247,8 +291,7 @@ impl QuestradeClient {
     }
 
     pub async fn get_accounts(&mut self) -> AppResult<Vec<QuestradeAccount>> {
-        let url = self.api_url("accounts")?;
-        let resp = self.request(self.http.get(&url)).await?;
+        let resp = self.request(Method::GET, "accounts", |rb| rb).await?;
 
         let parsed: AccountsResponse = resp.json().await.map_err(|e| {
             AppError::Internal(format!("Failed to parse Questrade accounts: {}", e))
@@ -265,9 +308,10 @@ impl QuestradeClient {
             return Ok(id);
         }
 
-        let url = self.api_url("symbols/search")?;
         let resp = self
-            .request(self.http.get(&url).query(&[("prefix", upper.as_str())]))
+            .request(Method::GET, "symbols/search", |rb| {
+                rb.query(&[("prefix", upper.as_str())])
+            })
             .await?;
 
         let parsed: SymbolSearchResponse = resp
@@ -283,14 +327,17 @@ impl QuestradeClient {
             );
         }
 
-        // Exact match + tradable is the happy path; fall back to exact, then first result.
+        // Exact match only, preferring a tradable listing. Never the first
+        // prefix hit: callers record the id, and a near-miss (`RY` for
+        // `RY.TO`) would silently price or identify the wrong security.
         let result = parsed
             .symbols
             .iter()
             .find(|s| s.symbol == upper && s.is_tradable)
             .or_else(|| parsed.symbols.iter().find(|s| s.symbol == upper))
-            .or_else(|| parsed.symbols.first())
-            .ok_or_else(|| AppError::Internal(format!("Symbol not found: {}", upper)))?;
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Questrade has no exact match for {}", upper))
+            })?;
 
         tracing::info!(
             "Resolved {} → symbolId={} exchange={} currency={} tradable={}",
@@ -369,13 +416,15 @@ impl QuestradeClient {
             let start_time = format!("{}T00:00:00.000000-05:00", chunk_start);
             let end_time = format!("{}T23:59:59.999999-05:00", chunk_end);
 
-            let url = self.api_url(&format!("markets/candles/{}", symbol_id))?;
+            let path = format!("markets/candles/{}", symbol_id);
             let result = self
-                .request(self.http.get(&url).query(&[
-                    ("startTime", start_time.as_str()),
-                    ("endTime", end_time.as_str()),
-                    ("interval", interval),
-                ]))
+                .request(Method::GET, &path, |rb| {
+                    rb.query(&[
+                        ("startTime", start_time.as_str()),
+                        ("endTime", end_time.as_str()),
+                        ("interval", interval),
+                    ])
+                })
                 .await;
 
             let resp = match result {
@@ -432,9 +481,11 @@ impl QuestradeClient {
             return Ok(vec![]);
         }
 
-        let url = self.api_url("markets/quotes")?;
+        let ids = join_ids(symbol_ids);
         let resp = self
-            .request(self.http.get(&url).query(&[("ids", join_ids(symbol_ids))]))
+            .request(Method::GET, "markets/quotes", |rb| {
+                rb.query(&[("ids", &ids)])
+            })
             .await?;
 
         let parsed: QuotesResponse = resp
@@ -453,9 +504,9 @@ impl QuestradeClient {
             return Ok(vec![]);
         }
 
-        let url = self.api_url("symbols")?;
+        let ids = join_ids(symbol_ids);
         let resp = self
-            .request(self.http.get(&url).query(&[("ids", join_ids(symbol_ids))]))
+            .request(Method::GET, "symbols", |rb| rb.query(&[("ids", &ids)]))
             .await?;
 
         let parsed: SymbolsResponse = resp
@@ -470,8 +521,8 @@ impl QuestradeClient {
     /// strikes and their call/put symbol IDs.
     /// Questrade: GET /v1/symbols/{id}/options
     pub async fn get_option_chain(&mut self, symbol_id: i64) -> AppResult<Vec<ChainExpiry>> {
-        let url = self.api_url(&format!("symbols/{}/options", symbol_id))?;
-        let resp = self.request(self.http.get(&url)).await?;
+        let path = format!("symbols/{}/options", symbol_id);
+        let resp = self.request(Method::GET, &path, |rb| rb).await?;
 
         let parsed: OptionChainResponse = resp.json().await.map_err(|e| {
             AppError::Internal(format!("Failed to parse Questrade option chain: {}", e))
@@ -486,9 +537,10 @@ impl QuestradeClient {
     pub async fn get_option_quotes(&mut self, option_ids: &[i64]) -> AppResult<Vec<OptionQuote>> {
         let mut quotes = Vec::with_capacity(option_ids.len());
         for batch in option_ids.chunks(OPTION_QUOTE_BATCH) {
-            let url = self.api_url("markets/quotes/options")?;
             let body = serde_json::json!({ "optionIds": batch });
-            let resp = self.request(self.http.post(&url).json(&body)).await?;
+            let resp = self
+                .request(Method::POST, "markets/quotes/options", |rb| rb.json(&body))
+                .await?;
 
             let parsed: OptionQuotesResponse = resp.json().await.map_err(|e| {
                 AppError::Internal(format!("Failed to parse Questrade option quotes: {}", e))

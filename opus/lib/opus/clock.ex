@@ -6,8 +6,8 @@ defmodule Opus.Clock do
   The zone is an argument that defaults to the market's: New York, where the
   US market keeps its calendar (a session's date, the forex week, the
   options schedule). Any other zone (`"America/Edmonton"`) works the same
-  way. The conversion itself, daylight saving included, is the time zone
-  database's (`tzdata`).
+  way; `display_zone/0` is the viewer's, for the pages. The conversion
+  itself, daylight saving included, is the time zone database's (`tzdata`).
   """
 
   @market_zone "America/New_York"
@@ -15,6 +15,13 @@ defmodule Opus.Clock do
   @doc "The market's time zone, for Oban cron entries and the like."
   @spec market_zone() :: String.t()
   def market_zone, do: @market_zone
+
+  @doc """
+  The viewer's time zone (`config :opus, :display_zone`), for showing when
+  something happened. Falls back to the market's.
+  """
+  @spec display_zone() :: String.t()
+  def display_zone, do: Application.get_env(:opus, :display_zone, @market_zone)
 
   @doc "Today's date in `zone`."
   @spec today(String.t()) :: Date.t()

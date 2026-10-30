@@ -137,7 +137,7 @@ defmodule Opus.Trading.Drift do
     expected = per_day * days
 
     about =
-      "#{count} #{trades(count)} since #{Calendar.strftime(since, "%b %-d")}; its backtest averages about #{round1(expected)} over that time"
+      "#{count} #{trades(count)} since #{OpusWeb.Format.day(since)}; its backtest averages about #{round1(expected)} over that time"
 
     cond do
       expected < @min_expected ->

@@ -23,6 +23,8 @@ defmodule Opus.Pipeline.PromoteWorker do
       {:ok, _promoted} -> :ok
       # No such config: retrying can't help.
       {:error, :not_found} -> {:cancel, :not_found}
+      # A basket is tested, not traded live: nothing to retry.
+      {:error, :basket} -> {:cancel, :basket}
       {:error, reason} -> {:error, reason}
     end
   end

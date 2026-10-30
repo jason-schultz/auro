@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Auro tester (auro_be's auro-tester binary) as a per-user launchd agent.
+
+  Backtests, pipeline stages, reports, the sensitivity grid and Together run
+  here, never in the live engine (com.auro.engine), so testing can't slow
+  live trading. Same crate and release build as the engine.
+
+  Runs from auro_be/ so dotenvy picks up auro_be/.env (DATABASE_URL); it
+  listens on AURO_TESTER_PORT (default 3001), never PORT, and logs to
+  auro_be/logs/auro-tester.*. stdout duplicates those logs, so it is
+  discarded; stderr keeps panics.
+
+  The tester holds no broker connection (no Questrade token is spent), so it
+  may restart after a crash once a minute. A clean stop stays stopped.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.auro.tester</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jschultz/source/repos/projects/carbon_and_fire/auro/auro_be/target/release/auro-tester</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/jschultz/source/repos/projects/carbon_and_fire/auro/auro_be</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/jschultz/Library/Logs/auro/tester.stderr.log</string>
+</dict>
+</plist>

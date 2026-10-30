@@ -1,14 +1,29 @@
 defmodule Opus.Auro.Client do
   @moduledoc """
-  HTTP client for the Auro Rust engine.
+  HTTP client for the Auro Rust engine, which runs as two processes:
+
+    - the live engine (`auro_base_url`, port 3000): trading, live state,
+      broker calls;
+    - the tester (`auro_tester_url`, port 3001): backtests, pipeline stages,
+      reports, the sensitivity grid and the Together replay. Testing never
+      runs on the live engine, so it can't slow live trading.
+
+  A call to the tester while it isn't running comes back as
+  `{:error, :tester_down}`; `describe_error/1` turns that into what to do.
   """
   require Logger
 
   import Opus.Trading.Granularity, only: [is_valid: 1]
 
   @default_base_url "http://localhost:3000"
+  @default_tester_url "http://localhost:3001"
 
   def base_url, do: Application.get_env(:opus, :auro_base_url, @default_base_url)
+
+  @doc "The tester process. Never falls back to the live engine."
+  def tester_url, do: Application.get_env(:opus, :auro_tester_url, @default_tester_url)
+
+  @tester_start "cd auro_be && cargo run --release --bin auro-tester"
 
   @doc """
   One sentence a page can show for a failed call: the engine's own message
@@ -19,6 +34,11 @@ defmodule Opus.Auro.Client do
     do: message
 
   def describe_error({:http_error, status, _body}), do: "Auro answered with status #{status}."
+
+  def describe_error(:tester_down),
+    do:
+      "The tester isn't running, so nothing can be backtested. Start it with `#{@tester_start}`."
+
   def describe_error(%{reason: :econnrefused}), do: "Auro is not running."
   def describe_error(_), do: "Could not reach Auro."
 
@@ -122,13 +142,13 @@ defmodule Opus.Auro.Client do
   def run_pipeline_backtest(config_id) when is_binary(config_id) do
     Logger.info("[AuroClient] Running pipeline backtest for config #{config_id}")
 
-    client()
+    tester_client()
     |> Req.post(
       url: "/api/pipeline/backtest",
       json: %{strategy_config_id: config_id},
       receive_timeout: 120_000
     )
-    |> handle_response()
+    |> tester_response()
   end
 
   @doc """
@@ -139,13 +159,13 @@ defmodule Opus.Auro.Client do
   def run_pipeline_walk_forward(config_id) when is_binary(config_id) do
     Logger.info("[AuroClient] Running pipeline walk_forward for config #{config_id}")
 
-    client()
+    tester_client()
     |> Req.post(
       url: "/api/pipeline/walk_forward",
       json: %{strategy_config_id: config_id},
       receive_timeout: 120_000
     )
-    |> handle_response()
+    |> tester_response()
   end
 
   @doc """
@@ -157,13 +177,32 @@ defmodule Opus.Auro.Client do
   def run_pipeline_monte_carlo(config_id) when is_binary(config_id) do
     Logger.info("[AuroClient] Running pipeline monte_carlo for config #{config_id}")
 
-    client()
+    tester_client()
     |> Req.post(
       url: "/api/pipeline/monte_carlo",
       json: %{strategy_config_id: config_id},
       receive_timeout: 120_000
     )
-    |> handle_response()
+    |> tester_response()
+  end
+
+  @doc """
+  Run the parameter-stability stage (POST /api/pipeline/parameter_stability).
+  Rust re-runs the backtest with each numeric setting moved one step either
+  way, so it runs a dozen or more backtests one after another; a 5-minute
+  strategy over years of bars can take minutes.
+  """
+  @spec run_pipeline_parameter_stability(String.t()) :: {:ok, map()} | {:error, term()}
+  def run_pipeline_parameter_stability(config_id) when is_binary(config_id) do
+    Logger.info("[AuroClient] Running pipeline parameter_stability for config #{config_id}")
+
+    tester_client()
+    |> Req.post(
+      url: "/api/pipeline/parameter_stability",
+      json: %{strategy_config_id: config_id},
+      receive_timeout: 900_000
+    )
+    |> tester_response()
   end
 
   @doc "Run the sealed-holdout stage (POST /api/pipeline/holdout)."
@@ -171,13 +210,13 @@ defmodule Opus.Auro.Client do
   def run_pipeline_holdout(config_id) when is_binary(config_id) do
     Logger.info("[AuroClient] Running pipeline holdout for config #{config_id}")
 
-    client()
+    tester_client()
     |> Req.post(
       url: "/api/pipeline/holdout",
       json: %{strategy_config_id: config_id},
       receive_timeout: 120_000
     )
-    |> handle_response()
+    |> tester_response()
   end
 
   @doc """
@@ -289,14 +328,14 @@ defmodule Opus.Auro.Client do
   """
   @spec signal_preview(map(), pos_integer()) :: {:ok, map()} | {:error, any()}
   def signal_preview(parameters, count) when is_map(parameters) do
-    client()
+    tester_client()
     |> Req.post(
       url: "/api/strategy/signal-preview",
       json: %{parameters: parameters, count: count},
       receive_timeout: 30_000,
       retry: false
     )
-    |> handle_response(:quiet)
+    |> tester_response(:quiet)
   end
 
   @doc """
@@ -307,14 +346,14 @@ defmodule Opus.Auro.Client do
   """
   @spec strategy_report(map()) :: {:ok, map()} | {:error, any()}
   def strategy_report(parameters) when is_map(parameters) do
-    client()
+    tester_client()
     |> Req.post(
       url: "/api/strategy/report",
       json: %{parameters: parameters},
       receive_timeout: 60_000,
       retry: false
     )
-    |> handle_response(:quiet)
+    |> tester_response(:quiet)
   end
 
   @doc """
@@ -324,14 +363,14 @@ defmodule Opus.Auro.Client do
   """
   @spec backtest_trades(map()) :: {:ok, map()} | {:error, any()}
   def backtest_trades(parameters) when is_map(parameters) do
-    client()
+    tester_client()
     |> Req.post(
       url: "/api/strategy/trades",
       json: %{parameters: parameters},
       receive_timeout: 60_000,
       retry: false
     )
-    |> handle_response(:quiet)
+    |> tester_response(:quiet)
   end
 
   @doc """
@@ -343,14 +382,14 @@ defmodule Opus.Auro.Client do
   """
   @spec portfolio([map()], map() | nil, String.t() | nil) :: {:ok, map()} | {:error, any()}
   def portfolio(plays, limits, base \\ nil) when is_list(plays) do
-    client()
+    tester_client()
     |> Req.post(
       url: "/api/strategy/portfolio",
       json: %{plays: plays, limits: limits, base: base},
       receive_timeout: 300_000,
       retry: false
     )
-    |> handle_response(:quiet)
+    |> tester_response(:quiet)
   end
 
   @doc """
@@ -362,14 +401,14 @@ defmodule Opus.Auro.Client do
   """
   @spec strategy_sensitivity(map(), map(), map() | nil) :: {:ok, map()} | {:error, any()}
   def strategy_sensitivity(parameters, x, y) when is_map(parameters) and is_map(x) do
-    client()
+    tester_client()
     |> Req.post(
       url: "/api/strategy/sensitivity",
       json: %{parameters: parameters, x: x, y: y},
       receive_timeout: 180_000,
       retry: false
     )
-    |> handle_response(:quiet)
+    |> tester_response(:quiet)
   end
 
   @doc """
@@ -530,9 +569,26 @@ defmodule Opus.Auro.Client do
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}, :quiet), do: {:ok, body}
   defp handle_response(result, :quiet), do: handle_response(result)
 
-  defp client do
+  # The tester refusing the connection means it isn't running: say that,
+  # not a transport error. Other failures (a timeout on a slow run) pass
+  # through unchanged.
+  defp tester_response(result, mode \\ :normal)
+
+  defp tester_response({:error, %Req.TransportError{reason: :econnrefused}}, _mode) do
+    Logger.warning("[AuroClient] The tester at #{tester_url()} isn't running")
+    {:error, :tester_down}
+  end
+
+  defp tester_response(result, :quiet), do: handle_response(result, :quiet)
+  defp tester_response(result, :normal), do: handle_response(result)
+
+  defp client, do: client(base_url())
+
+  defp tester_client, do: client(tester_url())
+
+  defp client(url) do
     Req.new(
-      base_url: base_url(),
+      base_url: url,
       headers: [{"Content-Type", "application/json"}]
     )
   end

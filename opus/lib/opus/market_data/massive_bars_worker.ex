@@ -4,9 +4,9 @@ defmodule Opus.MarketData.MassiveBarsWorker do
 
   Two job shapes share this worker:
 
-    * no args (the nightly cron) — fan out one job per (symbol, granularity)
+    * no args (the 07:00 New York cron) — fan out one job per (symbol, granularity)
       over the listings flagged `feed_massive_daily`, each re-fetching the
-      last `days` days so a missed night heals on the next;
+      last `days` days so a missed run heals on the next;
     * `%{"symbol" => _, "granularity" => _, "days" => _}` — one symbol, one
       call to Rust's `POST /api/massive/candles/persist`.
 
@@ -20,15 +20,20 @@ defmodule Opus.MarketData.MassiveBarsWorker do
   instruments table (`Opus.Instruments.feed_symbols/1`).
   """
 
-  use Oban.Worker,
-    queue: :market_data,
-    max_attempts: 3,
-    unique: [period: 20 * 3600, keys: [:symbol, :granularity]]
+  # Its own queue: the fan-out paces five calls a minute, so a full run
+  # takes most of half an hour and must not hold up the chain snapshots,
+  # the ideas scan or the intraday paper fills on `market_data`.
+  use Oban.Worker, queue: :massive, max_attempts: 3
 
   require Logger
 
   alias Opus.Auro.Client
   alias Opus.Instruments
+
+  # Minutes between retries, not Oban's seconds-scale default, so an engine
+  # restart or a code reload can't burn every attempt in under a minute.
+  @impl Oban.Worker
+  def backoff(%Oban.Job{attempt: attempt}), do: attempt * 5 * 60
 
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok | {:error, term()}
@@ -58,7 +63,7 @@ defmodule Opus.MarketData.MassiveBarsWorker do
   @doc """
   Enqueue one job per flagged listing and configured granularity, fetching
   `days` back.
-  The nightly cron uses the configured `days`; a one-off backfill passes the
+  The daily cron uses the configured `days`; a one-off backfill passes the
   plan window, e.g. `enqueue_all(740)`.
   """
   @spec enqueue_all(pos_integer()) :: {:ok, non_neg_integer()}

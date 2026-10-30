@@ -11,6 +11,8 @@
 //! page can show which rule was true on which bar, and every component's
 //! chart values (`"r.rsi": 23.4`, `"t.ma": 5601.2`) to draw the indicators.
 
+use std::sync::Arc;
+
 use axum::extract::State;
 use axum::Json;
 use chrono::{DateTime, Utc};
@@ -18,6 +20,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::db::repositories::candles as candles_repo;
+use crate::db::repositories::financing as financing_repo;
 use crate::engine::strategy::{bounded_window, run_backtest, Strategy};
 use crate::engine::types::{Candle, Direction, ExitReason};
 use crate::error::{AppError, AppResult};
@@ -35,8 +38,16 @@ pub async fn preview_signals(
     State(state): State<AppState>,
     Json(req): Json<SignalPreviewRequest>,
 ) -> AppResult<Json<Value>> {
-    let strategy: Strategy = serde_json::from_value(req.parameters)
+    let mut strategy: Strategy = serde_json::from_value(req.parameters)
         .map_err(|e| AppError::BadRequest(format!("invalid composite config: {e}")))?;
+    if strategy.needs_policy_rates() {
+        let rates = financing_repo::load_policy_rates(&state.db)
+            .await
+            .map_err(AppError::Database)?;
+        strategy
+            .attach_policy_rates(&Arc::new(rates))
+            .map_err(AppError::BadRequest)?;
+    }
 
     let count = req.count.unwrap_or(300).clamp(10, 1000);
     let warmup = strategy.warmup() as i64;

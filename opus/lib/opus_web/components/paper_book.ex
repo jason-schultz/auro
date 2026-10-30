@@ -220,8 +220,8 @@ defmodule OpusWeb.Components.PaperBook do
     ~H"""
     <p :if={@at} class="text-[12px] text-muted">
       <.t {copy(
-        "Priced at %{time} New York. Open trades update every 15 minutes while the market is open, and a take-profit fills as soon as a quote reaches it.",
-        time: clock(Opus.Clock.local(@at))
+        "Priced at %{time}. Open trades update every 15 minutes while the market is open, and a take-profit fills as soon as a quote reaches it.",
+        time: "#{clock(@at)} #{zone_name(@at)}"
       )} />
     </p>
     """

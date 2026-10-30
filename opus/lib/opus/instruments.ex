@@ -15,7 +15,7 @@ defmodule Opus.Instruments do
   alias Opus.Instruments.Instrument
   alias Opus.Repo
 
-  @type feed :: :questrade_bars | :massive_daily | :options_chain
+  @type feed :: :questrade_bars | :questrade_daily | :massive_daily | :options_chain
 
   @canadian_suffixes %{"TO" => "TSX", "VN" => "TSXV", "CN" => "CNSX"}
   @canadian_exchanges Map.values(@canadian_suffixes)
@@ -90,9 +90,30 @@ defmodule Opus.Instruments do
   to be.
   """
   @spec feed_symbols(feed()) :: [String.t()]
-  def feed_symbols(:questrade_bars), do: flagged(:feed_questrade_bars, :questrade_symbol)
+  def feed_symbols(:questrade_bars),
+    do: Enum.uniq(flagged(:feed_questrade_bars, :questrade_symbol) ++ held(held_query()))
+
+  # Daily bars from Questrade for what's held and not already fed daily by
+  # Massive (US listings): Canadian holdings have no other daily source.
+  def feed_symbols(:questrade_daily),
+    do: held_query() |> where([i], not i.feed_massive_daily) |> held()
+
   def feed_symbols(:massive_daily), do: flagged(:feed_massive_daily, :massive_ticker)
   def feed_symbols(:options_chain), do: flagged(:feed_options_chain, :questrade_symbol)
+
+  # Listings with shares held on Wealthsimple: tracked like any flagged
+  # listing whether or not a strategy can trade them, so the list follows
+  # the holdings (a sold position drops out, a new one joins).
+  defp held_query do
+    from(i in Instrument,
+      join: p in "wealthsimple_positions",
+      on: p.instrument_id == i.id,
+      where: i.active and p.shares > 0 and not is_nil(i.questrade_symbol)
+    )
+  end
+
+  defp held(query),
+    do: query |> distinct(true) |> select([i], i.questrade_symbol) |> Repo.all() |> Enum.sort()
 
   defp flagged(flag, symbol_column) do
     Instrument

@@ -2,18 +2,57 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 
-use crate::engine::types::Trade;
+use crate::engine::live::sizing::MAX_POSITION_PCT_OF_NAV;
+use crate::engine::pipeline::span;
+use crate::engine::portfolio::{simulate, Play};
+use crate::engine::strategy::SizingConfig;
+use crate::engine::types::{Candle, Trade};
 
 /// Trading days a year, for annualizing a daily Sharpe.
 const TRADING_DAYS: f64 = 252.0;
 
+/// How a strategy sizes its trades (`SizingConfig::RiskPct`), for the
+/// account figures: each trade risks `risk_pct` of the account against its
+/// stop, its position capped at `max_position_pct` of the account.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AccountSizing {
+    pub risk_pct: f64,
+    pub max_position_pct: f64,
+}
+
+impl AccountSizing {
+    pub fn of(sizing: &SizingConfig) -> Self {
+        let SizingConfig::RiskPct {
+            pct,
+            max_notional_pct,
+        } = sizing;
+        Self {
+            risk_pct: *pct,
+            max_position_pct: max_notional_pct.unwrap_or(MAX_POSITION_PCT_OF_NAV),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BacktestStats {
+    /// Every trade's return added up, each on a whole-account position (1
+    /// unit of notional per unit of account). Not what the account makes:
+    /// the pipeline's gates were set on this figure, so it stays as is.
     pub total_return: f64,
     pub win_rate: f64,
     pub avg_win: f64,
     pub avg_loss: f64,
+    /// The worst fall (≤ 0) of `total_return`'s running sum from its high,
+    /// valued at every bar's close: open trades count at that close.
     pub max_drawdown: f64,
+    /// What the account would have made: the trades one after another,
+    /// each sized as live sizes it (`AccountSizing`), compounded.
+    pub account_return: f64,
+    /// The account's worst fall from its high on the same basis (≤ 0),
+    /// valued at every bar's close the same way.
+    pub account_max_drawdown: f64,
+    /// The risk per trade the account figures assume.
+    pub account_risk_pct: f64,
     /// Per trade: the average trade over how much trades vary. Only
     /// meaningful with the trade count (`pipeline::t_stat`).
     pub sharpe_ratio: f64,
@@ -21,23 +60,62 @@ pub struct BacktestStats {
     /// across strategies and with what charting tools report.
     pub annual_sharpe: f64,
     pub num_trades: usize,
+    /// Set when judged on calendar-month account returns
+    /// (`judge_by_months`, a ranked basket): how many months, and then
+    /// `sharpe_ratio`/`annual_sharpe` are the months', not the trades'.
+    pub num_months: Option<usize>,
 }
 
-/// Calculates the backtest statistics for a given set of trades.
+/// The drawdowns and the account's growth, valued at every bar
+/// (`portfolio::simulate`): what a backtest's trades alone can't tell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Marked {
+    /// `BacktestStats::max_drawdown` (≤ 0).
+    pub max_drawdown: f64,
+    pub account_return: f64,
+    /// `BacktestStats::account_max_drawdown` (≤ 0).
+    pub account_max_drawdown: f64,
+}
+
+/// Calculates the backtest statistics for one market's trades.
 ///
-/// # Arguments
-///
-/// * `trades` - A slice of `Trade` structs representing the trades to analyze.
-/// * `from`, `to` - The stretch they were traded over (the candles' first and
-///   last bar), for the annual Sharpe.
-///
-/// # Returns
-///
-/// A `BacktestStats` struct containing the calculated statistics.
+/// `bars` are the bars the trades were made on (their first and last bar
+/// set the stretch for the annual Sharpe). The drawdowns are valued at
+/// every bar's close, open trades included (`portfolio::mark_return`):
+/// a trade held for months that was 10% down midway shows that 10%, even
+/// if it closed flat.
 pub fn calculate_backtest_stats(
+    trades: &[Trade],
+    bars: &[Candle],
+    sizing: AccountSizing,
+) -> BacktestStats {
+    let (from, to) = span(bars);
+    let play = Play {
+        key: String::new(),
+        instrument: String::new(),
+        risk_pct: sizing.risk_pct,
+        max_position_pct: sizing.max_position_pct,
+        breaker_exempt: true,
+        trades: trades.to_vec(),
+        bars,
+    };
+    let outcome = simulate(&[&play], None, from, to);
+    let marked = Marked {
+        max_drawdown: -outcome.summed_max_drawdown,
+        account_return: outcome.total_return,
+        account_max_drawdown: -outcome.max_drawdown,
+    };
+    stats_with(trades, from, to, sizing, marked)
+}
+
+/// The backtest statistics of `trades` traded between `from` and `to`,
+/// with drawdowns and growth already valued at every bar (`marked`).
+pub fn stats_with(
     trades: &[Trade],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    sizing: AccountSizing,
+    marked: Marked,
 ) -> BacktestStats {
     if trades.is_empty() {
         return BacktestStats {
@@ -46,9 +124,13 @@ pub fn calculate_backtest_stats(
             avg_win: 0.0,
             avg_loss: 0.0,
             max_drawdown: 0.0,
+            account_return: 0.0,
+            account_max_drawdown: 0.0,
+            account_risk_pct: sizing.risk_pct,
             sharpe_ratio: 0.0,
             annual_sharpe: 0.0,
             num_trades: 0,
+            num_months: None,
         };
     }
 
@@ -78,36 +160,55 @@ pub fn calculate_backtest_stats(
     };
 
     let pnls: Vec<f64> = trades.iter().map(|t| t.pnl_percent).collect();
-    let mean = pnls.iter().sum::<f64>() / pnls.len() as f64;
-    let variance = pnls.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / pnls.len() as f64;
-    let std_dev = variance.sqrt();
-    let sharpe_ratio = if std_dev == 0.0 { 0.0 } else { mean / std_dev };
-
-    let mut cumulative = 0.0;
-    let mut peak = 0.0;
-    let mut max_drawdown = 0.0;
-
-    for trade in trades {
-        cumulative += trade.pnl_percent;
-        if cumulative > peak {
-            peak = cumulative;
-        }
-        let drawdown = (cumulative - peak) / (1.0 + peak);
-        if drawdown < max_drawdown {
-            max_drawdown = drawdown;
-        }
-    }
-    let num_trades = trades.len();
 
     BacktestStats {
         total_return,
         win_rate,
         avg_win,
         avg_loss,
-        max_drawdown,
-        sharpe_ratio,
+        max_drawdown: marked.max_drawdown,
+        account_return: marked.account_return,
+        account_max_drawdown: marked.account_max_drawdown,
+        account_risk_pct: sizing.risk_pct,
+        sharpe_ratio: sharpe_of(&pnls),
         annual_sharpe: annual_sharpe(trades, from, to),
-        num_trades,
+        num_trades: trades.len(),
+        num_months: None,
+    }
+}
+
+/// Months in a year, for annualizing a monthly Sharpe.
+const MONTHS: f64 = 12.0;
+
+impl BacktestStats {
+    /// Judge on the account's calendar-month returns instead of its trades
+    /// (a ranked basket): the Sharpe is per month, the annual Sharpe a
+    /// year of months, and the luck test counts months (`num_months`).
+    pub fn judge_by_months(&mut self, monthly: &[f64]) {
+        self.sharpe_ratio = sharpe_of(monthly);
+        self.annual_sharpe = self.sharpe_ratio * MONTHS.sqrt();
+        self.num_months = Some(monthly.len());
+    }
+
+    /// How many returns the per-period Sharpe is over: months when judged
+    /// by months, else trades.
+    pub fn periods(&self) -> usize {
+        self.num_months.unwrap_or(self.num_trades)
+    }
+}
+
+/// Mean over the (population) standard deviation; 0 when flat or empty.
+fn sharpe_of(returns: &[f64]) -> f64 {
+    if returns.is_empty() {
+        return 0.0;
+    }
+    let n = returns.len() as f64;
+    let mean = returns.iter().sum::<f64>() / n;
+    let std_dev = (returns.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
+    if std_dev == 0.0 {
+        0.0
+    } else {
+        mean / std_dev
     }
 }
 
@@ -163,9 +264,20 @@ pub fn annual_sharpe_of(days: &BTreeMap<NaiveDate, f64>) -> f64 {
 mod tests {
     use chrono::Utc;
 
-    use crate::engine::types::{Direction, EntryReason, ExitReason, Trade};
+    use crate::engine::types::{Direction, EntryReason, ExitReason, Trade, OHLC};
 
     use super::*;
+
+    const SIZING: AccountSizing = AccountSizing {
+        risk_pct: 0.01,
+        max_position_pct: 0.15,
+    };
+
+    fn utc(day: &str) -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339(&format!("{day}T00:00:00Z"))
+            .unwrap()
+            .with_timezone(&Utc)
+    }
 
     fn dummy_trade(pnl: f64) -> Trade {
         Trade {
@@ -173,8 +285,8 @@ mod tests {
             pnl_percent: pnl,
             entry_price: 1.0,
             exit_price: 1.0,
-            entry_time: Utc::now(),
-            exit_time: Utc::now(),
+            entry_time: utc("2026-01-05"),
+            exit_time: utc("2026-01-05"),
             entry_reason: EntryReason::CrossAbove {
                 fast_ma: 0.0,
                 slow_ma: 0.0,
@@ -184,10 +296,52 @@ mod tests {
         }
     }
 
+    /// A bar at `time` closing at `close`.
+    fn bar(time: chrono::DateTime<Utc>, close: f64) -> Candle {
+        Candle {
+            time,
+            mid: OHLC {
+                open: close,
+                high: close,
+                low: close,
+                close,
+            },
+            volume: 1,
+            bid: None,
+            ask: None,
+        }
+    }
+
+    /// Flat bars at every trade's entry and exit: the trades are valued
+    /// only when they open and close.
+    fn bars_for(trades: &[Trade]) -> Vec<Candle> {
+        let mut times: Vec<_> = trades
+            .iter()
+            .flat_map(|t| [t.entry_time, t.exit_time])
+            .collect();
+        times.sort();
+        times.dedup();
+        times.into_iter().map(|t| bar(t, 1.0)).collect()
+    }
+
+    /// `pnls` as trades one a day from Jan 5 2026, each held a day.
+    fn daily_trades(pnls: &[f64]) -> Vec<Trade> {
+        pnls.iter()
+            .enumerate()
+            .map(|(i, &pnl)| {
+                let entry = utc("2026-01-05") + Duration::days(2 * i as i64);
+                Trade {
+                    entry_time: entry,
+                    exit_time: entry + Duration::days(1),
+                    ..dummy_trade(pnl)
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn test_calculate_backtest_stats_empty() {
-        let trades = vec![];
-        let stats = calculate_backtest_stats(&trades, Utc::now(), Utc::now());
+        let stats = calculate_backtest_stats(&[], &[], SIZING);
         assert_eq!(stats.total_return, 0.0);
         assert_eq!(stats.win_rate, 0.0);
         assert_eq!(stats.avg_win, 0.0);
@@ -195,19 +349,51 @@ mod tests {
         assert_eq!(stats.max_drawdown, 0.0);
         assert_eq!(stats.sharpe_ratio, 0.0);
         assert_eq!(stats.num_trades, 0);
+        assert_eq!(stats.num_months, None);
     }
 
     #[test]
     fn test_calculate_backtest_stats() {
-        let trades = vec![dummy_trade(10.0), dummy_trade(-5.0), dummy_trade(20.0)];
-        let stats = calculate_backtest_stats(&trades, Utc::now(), Utc::now());
+        let trades = daily_trades(&[10.0, -5.0, 20.0]);
+        let stats = calculate_backtest_stats(&trades, &bars_for(&trades), SIZING);
         assert_eq!(stats.total_return, 25.0);
         assert_eq!(stats.win_rate, 2.0 / 3.0);
         assert_eq!(stats.avg_win, 15.0);
         assert_eq!(stats.avg_loss, -5.0);
-        assert!(stats.max_drawdown < 0.0);
+        // 10 → 5: half of the 1 + 10 high.
+        assert!((stats.max_drawdown + 5.0 / 11.0).abs() < 1e-12);
         assert!(stats.sharpe_ratio > 0.0);
         assert_eq!(stats.num_trades, 3);
+    }
+
+    #[test]
+    fn a_held_trade_that_dips_10_percent_and_recovers_shows_a_10_percent_drop() {
+        // Long at 100 for eight bars: down to 90, back to 100, closed flat.
+        let closes = [100.0, 97.0, 94.0, 91.0, 90.0, 92.0, 95.0, 98.0, 100.0];
+        let bars: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| bar(utc("2026-01-05") + Duration::days(i as i64), c))
+            .collect();
+        let trade = Trade {
+            entry_price: 100.0,
+            exit_price: 100.0,
+            pnl_percent: 0.0,
+            entry_time: bars[0].time,
+            exit_time: bars[8].time,
+            // A 10% stop at 10% risk: the whole account in it.
+            stop_price: 90.0,
+            ..dummy_trade(0.0)
+        };
+        let sizing = AccountSizing {
+            risk_pct: 0.10,
+            max_position_pct: 1.0,
+        };
+        let stats = calculate_backtest_stats(&[trade], &bars, sizing);
+        assert_eq!(stats.total_return, 0.0);
+        assert!((stats.max_drawdown + 0.10).abs() < 1e-12);
+        assert!((stats.account_max_drawdown + 0.10).abs() < 1e-12);
+        assert!(stats.account_return.abs() < 1e-12);
     }
 
     fn closed_on(day: &str, pnl: f64) -> Trade {
@@ -219,12 +405,6 @@ mod tests {
             entry_time: at,
             ..dummy_trade(pnl)
         }
-    }
-
-    fn utc(day: &str) -> chrono::DateTime<Utc> {
-        chrono::DateTime::parse_from_rfc3339(&format!("{day}T00:00:00Z"))
-            .unwrap()
-            .with_timezone(&Utc)
     }
 
     #[test]
@@ -269,8 +449,89 @@ mod tests {
                 ..dummy_trade(pnl)
             });
         }
-        let stats = calculate_backtest_stats(&trades, utc("2025-01-06"), day);
+        let mut bars = bars_for(&trades);
+        bars.insert(0, bar(utc("2025-01-06"), 1.0));
+        let stats = calculate_backtest_stats(&trades, &bars, SIZING);
         assert!(stats.sharpe_ratio < 0.15);
         assert!(stats.annual_sharpe > 0.3 && stats.annual_sharpe < 0.6);
+    }
+
+    /// A trade entered at 100 with its stop at `stop`, returning `pnl`.
+    fn stopped_at(stop: f64, pnl: f64) -> Trade {
+        Trade {
+            entry_price: 100.0,
+            stop_price: stop,
+            ..dummy_trade(pnl)
+        }
+    }
+
+    fn one_after_another(trades: impl IntoIterator<Item = Trade>) -> Vec<Trade> {
+        trades
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let entry = utc("2026-01-05") + Duration::days(2 * i as i64);
+                Trade {
+                    entry_time: entry,
+                    exit_time: entry + Duration::days(1),
+                    ..t
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_account_compounds_each_trade_at_its_sized_share() {
+        // 1% risk, 2% stop: half the account in the trade. +10% then −10%:
+        // 1.05 × 0.95 = 0.9975, against +0% added up.
+        let sizing = AccountSizing {
+            risk_pct: 0.01,
+            max_position_pct: 1.0,
+        };
+        let trades = one_after_another([stopped_at(98.0, 0.10), stopped_at(98.0, -0.10)]);
+        let stats = calculate_backtest_stats(&trades, &bars_for(&trades), sizing);
+        assert_eq!(stats.total_return, 0.0);
+        assert!((stats.account_return - (1.05 * 0.95 - 1.0)).abs() < 1e-12);
+        assert!((stats.account_max_drawdown - (-0.05)).abs() < 1e-12);
+        assert_eq!(stats.account_risk_pct, 0.01);
+    }
+
+    #[test]
+    fn the_account_position_is_capped() {
+        // A 0.1% stop would put 10× the account in; the 15% cap holds it.
+        let trades = one_after_another([stopped_at(99.9, 0.10)]);
+        let stats = calculate_backtest_stats(&trades, &bars_for(&trades), SIZING);
+        assert!((stats.account_return - 0.015).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_run_of_losses_that_sums_past_minus_100_percent_is_not_below_nothing() {
+        // Twelve −12% trades add up to −144%; at a whole account each the
+        // account is left with 0.88^12 of itself, not a negative balance.
+        let trades = one_after_another((0..12).map(|_| stopped_at(88.0, -0.12)));
+        let sizing = AccountSizing {
+            risk_pct: 0.12,
+            max_position_pct: 1.0,
+        };
+        let stats = calculate_backtest_stats(&trades, &bars_for(&trades), sizing);
+        assert!((stats.total_return - (-1.44)).abs() < 1e-9);
+        assert!((stats.account_return - (0.88_f64.powi(12) - 1.0)).abs() < 1e-12);
+        assert!(stats.account_max_drawdown > -1.0);
+    }
+
+    #[test]
+    fn judged_by_months_the_sharpe_and_luck_test_count_months() {
+        let trades = daily_trades(&[0.01, -0.005, 0.02]);
+        let mut stats = calculate_backtest_stats(&trades, &bars_for(&trades), SIZING);
+        assert_eq!(stats.periods(), 3);
+        let months = [0.02, -0.01, 0.03, 0.0];
+        stats.judge_by_months(&months);
+        assert_eq!(stats.num_months, Some(4));
+        assert_eq!(stats.periods(), 4);
+        assert_eq!(stats.num_trades, 3);
+        let mean = 0.04 / 4.0;
+        let sd = (months.iter().map(|m| (m - mean).powi(2)).sum::<f64>() / 4.0).sqrt();
+        assert!((stats.sharpe_ratio - mean / sd).abs() < 1e-12);
+        assert!((stats.annual_sharpe - mean / sd * 12f64.sqrt()).abs() < 1e-12);
     }
 }

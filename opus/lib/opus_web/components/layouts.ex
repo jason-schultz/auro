@@ -37,7 +37,10 @@ defmodule OpusWeb.Layouts do
            page, so the bar's own content starts below that strip; the hit areas
            are tall enough that a link stays clickable even half-covered. --%>
       <div class="mx-auto flex w-full max-w-7xl items-center justify-between gap-6 px-4 pt-[max(2.5rem,env(safe-area-inset-top))] pb-3 sm:px-6">
-        <.link navigate={~p"/"} class="py-2 text-base font-semibold tracking-tight">Auro</.link>
+        <div class="flex items-center gap-6">
+          <.link navigate={~p"/"} class="py-2 text-base font-semibold tracking-tight">Auro</.link>
+          <.header_clock />
+        </div>
         <nav class="flex min-w-0 items-center gap-5 overflow-x-auto whitespace-nowrap text-sm">
           <.link navigate={~p"/"} class="py-2 text-muted hover:text-base-content"><.t {copy("Dashboard")} /></.link>
           <.link navigate={~p"/strategies"} class="py-2 text-muted hover:text-base-content"><.t {copy("Strategies")} /></.link>
@@ -58,6 +61,52 @@ defmodule OpusWeb.Layouts do
     </main>
 
     <.flash_group flash={@flash} />
+    """
+  end
+
+  @doc """
+  The time where the viewer is (`Opus.Clock.display_zone/0`) and in New
+  York, the market's: "Edmonton 14:05 · New York 16:05". The server renders
+  it; the `.Clock` hook moves it on at each minute in the browser.
+  """
+  def header_clock(assigns) do
+    now = DateTime.utc_now()
+
+    assigns =
+      assign(assigns,
+        places:
+          for zone <- Enum.uniq([Opus.Clock.display_zone(), Opus.Clock.market_zone()]) do
+            %{zone: zone, city: OpusWeb.Format.city(zone), time: OpusWeb.Format.clock(now, zone)}
+          end
+      )
+
+    ~H"""
+    <span
+      id="header-clock"
+      phx-hook=".Clock"
+      phx-update="ignore"
+      class="hidden whitespace-nowrap text-[13px] tabular-nums text-muted md:inline"
+    >
+      <span :for={{place, i} <- Enum.with_index(@places)}>
+        <span :if={i > 0} aria-hidden="true">·</span>
+        {place.city} <time data-zone={place.zone}>{place.time}</time>
+      </span>
+    </span>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".Clock">
+      export default {
+        mounted() { this.tick() },
+        destroyed() { clearTimeout(this.timer) },
+        tick() {
+          const now = new Date()
+          for (const el of this.el.querySelectorAll("[data-zone]")) {
+            el.textContent = now.toLocaleTimeString("en-GB", {
+              timeZone: el.dataset.zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+            })
+          }
+          this.timer = setTimeout(() => this.tick(), 60000 - (now.getTime() % 60000))
+        }
+      }
+    </script>
     """
   end
 

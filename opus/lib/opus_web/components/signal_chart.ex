@@ -13,7 +13,6 @@ defmodule OpusWeb.SignalChart do
   import OpusWeb.Format
   import OpusWeb.Copy, only: [t: 1, copy: 1]
 
-  alias Opus.Clock
   alias Opus.Trading.StrategyWords
 
   attr :chart, :map, required: true, doc: "SignalChart.shape/3"
@@ -206,5 +205,5 @@ defmodule OpusWeb.SignalChart do
   # Daily bars by date; intraday bars by New York date and time.
   defp day(at, "D"), do: day(at)
   defp day(nil, _intraday), do: "—"
-  defp day(at, _intraday), do: at |> Clock.local() |> Calendar.strftime("%b %-d %H:%M")
+  defp day(at, _intraday), do: stamp(at)
 end

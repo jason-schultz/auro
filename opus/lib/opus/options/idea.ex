@@ -40,6 +40,8 @@ defmodule Opus.Options.Idea do
     field :score, :float, default: 0.0
     field :status, :string, default: "new"
     field :symbol, :string, virtual: true
+    # When the chain snapshot the scan read was taken (`Opus.Options.latest_ideas/0`).
+    field :chain_at, :naive_datetime_usec, virtual: true
 
     timestamps(type: :utc_datetime_usec)
   end

@@ -522,6 +522,6 @@ defmodule OpusWeb.CandleChart do
     if points == [], do: nil, else: Enum.join(points, " ")
   end
 
-  defp stamp(%DateTime{} = at), do: Calendar.strftime(at, "%b %-d %H:%M")
+  defp stamp(%DateTime{} = at), do: OpusWeb.Format.stamp(at)
   defp stamp(_), do: ""
 end

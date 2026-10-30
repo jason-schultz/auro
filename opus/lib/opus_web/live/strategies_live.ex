@@ -7,7 +7,8 @@ defmodule OpusWeb.StrategiesLive do
   preview, loaded after the page), and the instruments it runs on. Each
   instrument row has its switch, a status line (trading, held and why,
   suspended, or off), its size and its test results, and links to that
-  instrument's page for the full chart and trades.
+  instrument's page for the full chart and trades. Test runs from before
+  the block builder (the archive) are hidden unless asked for.
 
   Everything comes from Opus's own tables, so the page stands without the
   engine; the live numbers on a trading row need it and are left out when
@@ -29,6 +30,7 @@ defmodule OpusWeb.StrategiesLive do
         page_title: "Strategies",
         recipes: [],
         filter: :all,
+        show_archive: false,
         ticking: false,
         sparks: %{},
         stats: %{},
@@ -42,6 +44,9 @@ defmodule OpusWeb.StrategiesLive do
 
   @impl true
   def handle_event("refresh", _params, socket), do: {:noreply, load(socket)}
+
+  def handle_event("archive", _params, socket),
+    do: {:noreply, update(socket, :show_archive, &(!&1))}
 
   def handle_event("filter", %{"to" => to}, socket)
       when to in ~w(all trading off draft),
@@ -138,7 +143,16 @@ defmodule OpusWeb.StrategiesLive do
     assigns =
       assign(assigns,
         rows: Enum.flat_map(assigns.recipes, & &1.assignments),
-        shown: shown(assigns.recipes, assigns.filter)
+        archived: Enum.sum_by(assigns.recipes, fn r -> Enum.count(r.runs, & &1.archived) end),
+        shown:
+          assigns.recipes
+          |> shown(assigns.filter)
+          |> Enum.map(
+            &Map.merge(&1, %{
+              runs: visible_runs(&1.runs, assigns.show_archive),
+              tested?: &1.runs != []
+            })
+          )
       )
 
     ~H"""
@@ -226,6 +240,8 @@ defmodule OpusWeb.StrategiesLive do
           />
         </div>
 
+        <.archive_toggle count={@archived} shown={@show_archive} />
+
         <p :if={@as_of && @shown == []} class="text-[13px] text-muted">
           <.t {copy("Nothing here.")} />
         </p>
@@ -247,7 +263,7 @@ defmodule OpusWeb.StrategiesLive do
                   </.link>
                 </h2>
                 <span class="text-[13px] text-muted">
-                  {recipe.timeframe} · built {Calendar.strftime(recipe.created_at, "%b %-d")}
+                  {recipe.timeframe} · built {day(recipe.created_at)}
                 </span>
               </div>
               <div class="flex flex-wrap items-center gap-2">
@@ -278,7 +294,7 @@ defmodule OpusWeb.StrategiesLive do
             </figure>
 
             <p
-              :if={recipe.assignments == [] and recipe.runs == []}
+              :if={recipe.assignments == [] and not recipe.tested?}
               class="m-0 text-[14px] text-muted"
             >
               <.t {copy("Not running on any instrument yet, and not tested. Open it to test it on one.")} />
@@ -294,6 +310,7 @@ defmodule OpusWeb.StrategiesLive do
                     {run.instrument}
                   </.link>
                   <.test_badge results={run.stages} />
+                  <.archive_mark :if={run.archived} />
                 </li>
               </ul>
             </div>
@@ -374,7 +391,7 @@ defmodule OpusWeb.StrategiesLive do
 
       Enum.any?(stage_sets, fn stages ->
         Enum.any?(
-          [:backtest, :walk_forward, :monte_carlo, :holdout],
+          [:backtest, :walk_forward, :monte_carlo, :parameter_stability, :holdout],
           &(stages[&1].status in [:pending, :running])
         )
       end)

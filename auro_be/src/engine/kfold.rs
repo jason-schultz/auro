@@ -316,9 +316,13 @@ mod tests {
                 avg_win: 0.01,
                 avg_loss: -0.01,
                 max_drawdown: -0.05,
+                account_return: 0.0,
+                account_max_drawdown: 0.0,
+                account_risk_pct: 0.01,
                 sharpe_ratio: sharpe,
                 annual_sharpe: 0.0,
                 num_trades: 10,
+                num_months: None,
             },
         };
 

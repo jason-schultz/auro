@@ -1,7 +1,12 @@
 defmodule Opus.Pipeline.StrategyConfig do
   @moduledoc """
   Ecto schema for a hand-specified strategy config entering the validation
-  pipeline (backtest → walk-forward → Monte Carlo → holdout).
+  pipeline (backtest → walk-forward → Monte Carlo → parameter stability →
+  holdout).
+
+  `archived_at` marks a config tried before the block builder: it still
+  counts as a try for the deflated Sharpe, but lists hide it unless asked.
+  It isn't loaded with the row; a list that needs it selects it.
 
   The table still carries the retired breeder's columns (`parent_config_id`,
   `depth`, `generation_prompt`, `evo_generation`, `lineage_id`, `score`) for
@@ -24,6 +29,7 @@ defmodule Opus.Pipeline.StrategyConfig do
     field(:granularity, :string)
     field(:strategy_type, :string)
     field(:parameters, :map)
+    field(:archived_at, :utc_datetime_usec, load_in_query: false)
     belongs_to(:instrument_ref, Instrument, foreign_key: :instrument_id, type: :id)
 
     timestamps(type: :utc_datetime_usec)

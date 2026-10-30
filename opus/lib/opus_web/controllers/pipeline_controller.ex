@@ -6,7 +6,13 @@ defmodule OpusWeb.PipelineController do
   alias Opus.Pipeline.StrategyConfig
   alias Opus.Repo
 
-  @stage_order %{"holdout" => 4, "monte_carlo" => 3, "walk_forward" => 2, "backtest" => 1}
+  @stage_order %{
+    "holdout" => 5,
+    "parameter_stability" => 4,
+    "monte_carlo" => 3,
+    "walk_forward" => 2,
+    "backtest" => 1
+  }
 
   @doc """
   Create a manually-authored strategy config (Strategy Editor). Enters the
@@ -42,7 +48,8 @@ defmodule OpusWeb.PipelineController do
 
   @doc """
   Run one validation stage for a config against the Rust engine. Stages are
-  the pipeline's own: backtest, walk_forward, monte_carlo, holdout. The Rust side
+  the pipeline's own: backtest, walk_forward, monte_carlo, parameter_stability,
+  holdout. The Rust side
   persists the strategy_evaluations row; the stage result is returned as-is.
   """
   def run_stage(conn, %{"config_id" => config_id, "stage" => stage}) do
@@ -51,6 +58,7 @@ defmodule OpusWeb.PipelineController do
         "backtest" -> Auro.run_pipeline_backtest(config_id)
         "walk_forward" -> Auro.run_pipeline_walk_forward(config_id)
         "monte_carlo" -> Auro.run_pipeline_monte_carlo(config_id)
+        "parameter_stability" -> Auro.run_pipeline_parameter_stability(config_id)
         "holdout" -> Auro.run_pipeline_holdout(config_id)
         _ -> {:error, :invalid_stage}
       end
@@ -63,8 +71,15 @@ defmodule OpusWeb.PipelineController do
         conn
         |> put_status(400)
         |> json(%{
-          error: "invalid stage: #{stage} (expected backtest|walk_forward|monte_carlo|holdout)"
+          error:
+            "invalid stage: #{stage} " <>
+              "(expected backtest|walk_forward|monte_carlo|parameter_stability|holdout)"
         })
+
+      {:error, :tester_down} ->
+        conn
+        |> put_status(503)
+        |> json(%{error: Auro.describe_error(:tester_down)})
 
       {:error, reason} ->
         conn
@@ -88,6 +103,11 @@ defmodule OpusWeb.PipelineController do
         |> put_status(404)
         |> json(%{error: "Pipeline config not found."})
 
+      {:error, :basket} ->
+        conn
+        |> put_status(422)
+        |> json(%{error: "A basket is tested, not traded live, so it can't be promoted."})
+
       {:error, reason} ->
         conn
         |> put_status(502)
@@ -95,8 +115,13 @@ defmodule OpusWeb.PipelineController do
     end
   end
 
-  def index(conn, _params) do
-    rows = Coordinator.list_pipeline_status()
+  @doc """
+  Every config and its stages. Configs archived as tried before the block
+  builder are left out unless `?archive=true`; `summary.archived` says how
+  many there are either way.
+  """
+  def index(conn, params) do
+    rows = Coordinator.list_pipeline_status(params["archive"] in ["true", "1"])
 
     configs =
       rows
@@ -124,6 +149,7 @@ defmodule OpusWeb.PipelineController do
           parameters: first.parameters,
           source: first.source,
           inserted_at: first.inserted_at,
+          archived: first.archived,
           stage: latest && latest.stage,
           status: latest && latest.status,
           stats: latest && latest.stats,
@@ -148,14 +174,19 @@ defmodule OpusWeb.PipelineController do
       end)
 
     furthest_stage =
-      Enum.reduce(configs, %{backtest: 0, walk_forward: 0, monte_carlo: 0, holdout: 0}, fn c,
-                                                                                           acc ->
-        case c.stage do
-          nil -> acc
-          stage -> Map.update(acc, String.to_existing_atom(stage), 1, &(&1 + 1))
+      Enum.reduce(
+        configs,
+        %{backtest: 0, walk_forward: 0, monte_carlo: 0, parameter_stability: 0, holdout: 0},
+        fn c, acc ->
+          case c.stage do
+            nil -> acc
+            stage -> Map.update(acc, String.to_existing_atom(stage), 1, &(&1 + 1))
+          end
         end
-      end)
+      )
 
-    Map.merge(%{total: total}, Map.merge(by_status, furthest_stage))
+    %{total: total, archived: Coordinator.count_archived()}
+    |> Map.merge(by_status)
+    |> Map.merge(furthest_stage)
   end
 end

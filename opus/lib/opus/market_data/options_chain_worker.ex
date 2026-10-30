@@ -20,15 +20,18 @@ defmodule Opus.MarketData.OptionsChainWorker do
   flat-file path, not this worker's job.
   """
 
-  use Oban.Worker,
-    queue: :market_data,
-    max_attempts: 3,
-    unique: [period: 30 * 60, keys: [:underlying]]
+  use Oban.Worker, queue: :market_data, max_attempts: 3
 
   require Logger
 
   alias Opus.Auro.Client
   alias Opus.{Clock, Instruments, MarketCalendar}
+
+  # Two, then four minutes between retries: long enough to ride out an
+  # engine restart or a code reload, short enough to land before the scan
+  # 15 minutes after the snapshot.
+  @impl Oban.Worker
+  def backoff(%Oban.Job{attempt: attempt}), do: attempt * 2 * 60
 
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok | {:error, term()}

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block, Series, Setting};
 use crate::engine::indicators;
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -20,6 +21,41 @@ pub struct DonchianParams {
     pub entry_period: usize,
     #[serde(default = "default_exit_period")]
     pub exit_period: usize,
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "Donchian",
+        key: "dc",
+        name: "Breakout channel",
+        watches: "The highest high and lowest low of recent bars. Breaking above that high, or below that low, is a classic breakout.",
+        settings: vec![
+            Setting::int(
+                "entry_period",
+                "Breakout over (bars)",
+                20,
+                "More bars mean only bigger breakouts count, so fewer trades.",
+            ),
+            Setting::int(
+                "exit_period",
+                "Exit over (bars)",
+                10,
+                "Fewer bars exit sooner when the move fades.",
+            ),
+        ],
+        ports: vec![
+            port("breakout_long", "the price breaks above its {entry_period:bars} high"),
+            port("breakout_short", "the price breaks below its {entry_period:bars} low"),
+            port("exit_long", "the price breaks below its {exit_period:bars} low"),
+            port("exit_short", "the price breaks above its {exit_period:bars} high"),
+        ],
+        series: vec![
+            Series::price("upper", "Channel high"),
+            Series::price("lower", "Channel low"),
+        ],
+        stop: None,
+    }
 }
 
 impl Signaler for DonchianParams {

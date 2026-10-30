@@ -10,7 +10,9 @@ defmodule OpusWeb.StrategyLive do
   in plain words, the indicator scalars right now, the test results (how it
   did against just holding the instrument over its whole test history, an
   on-demand "is it fragile?" check at nearby settings, and the evidence
-  ladder: backtest, walk-forward, Monte Carlo, holdout, live), whether its
+  ladder: backtest, walk-forward, Monte Carlo, nearby settings, holdout,
+  live; runs on other instruments from before the block builder are
+  hidden unless asked for), whether its
   live trades still behave like its backtest (`Opus.Trading.DriftCheck`,
   daily or on demand), its trades and its signal log.
 
@@ -43,7 +45,8 @@ defmodule OpusWeb.StrategyLive do
         preview_error: nil,
         drift: nil,
         drift_running: false,
-        drift_error: nil
+        drift_error: nil,
+        show_archive: false
       )
       |> WholeHistory.init()
 
@@ -52,6 +55,9 @@ defmodule OpusWeb.StrategyLive do
 
   @impl true
   def handle_event("refresh", _params, socket), do: {:noreply, load(socket)}
+
+  def handle_event("archive", _params, socket),
+    do: {:noreply, update(socket, :show_archive, &(!&1))}
 
   def handle_event("fragility_axes", params, socket),
     do: {:noreply, WholeHistory.pick_axes(socket, params)}
@@ -202,6 +208,12 @@ defmodule OpusWeb.StrategyLive do
                   class="inline-flex min-h-11 items-center rounded-field border border-base-300 px-3.5 text-[14px] font-medium hover:border-primary"
                 >
                   <.t {copy("Copy as a new strategy")} />
+                </.link>
+                <.link
+                  navigate={~p"/strategies/recipes/#{@s.recipe.id}/basket"}
+                  class="inline-flex min-h-11 items-center rounded-field border border-base-300 px-3.5 text-[14px] font-medium hover:border-primary"
+                >
+                  Test on several markets
                 </.link>
                 <.link
                   navigate={~p"/strategies/recipes/#{@s.recipe.id}/edit"}
@@ -460,11 +472,16 @@ defmodule OpusWeb.StrategyLive do
           />
 
           <.evidence results={@s.results} />
+          <.luck_check walk_forward={@s.results.walk_forward} />
           <div :if={@s.runs != []} class="flex flex-col gap-2 border-t border-neutral pt-4">
             <span class="text-[14px] font-medium">
               <.t {copy("Also tested on (not running there)")} />
             </span>
-            <.runs_list runs={@s.runs} />
+            <.runs_list runs={visible_runs(@s.runs, @show_archive)} />
+            <.archive_toggle
+              count={Enum.count(@s.runs, & &1.archived)}
+              shown={@show_archive}
+            />
           </div>
         </section>
 

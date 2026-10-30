@@ -2,7 +2,14 @@ defmodule OpusWeb.Format do
   @moduledoc """
   Number formatting for templates: money with thousands separators and a
   true minus sign, percentages, and short clock times.
+
+  Timestamps (stored in UTC) show in the viewer's zone,
+  `Opus.Clock.display_zone/0`; the clock helpers take another zone for a
+  market schedule time. A `Date` is shown as it is: a trading session's
+  date stays its New York date.
   """
+
+  alias Opus.Clock
 
   @doc """
   Formats a CAD amount: `money(1234.5)` → `"$1,234.50"`, `money(-38.0)` → `"−$38.00"`.
@@ -29,15 +36,22 @@ defmodule OpusWeb.Format do
   def signed_money(amount) when amount < 0, do: money(amount)
   def signed_money(amount), do: "+" <> money(amount)
 
-  @doc "A date with its year: `date(~D[2026-10-27])` → `\"Oct 27, 2026\"`. Takes a date or a timestamp; `nil` is an em dash."
-  @spec date(Date.t() | DateTime.t() | nil) :: String.t()
+  @doc """
+  A date with its year: `date(~D[2026-10-27])` → `"Oct 27, 2026"`. Takes a
+  date or a timestamp (its date in the viewer's zone); `nil` is an em dash.
+  """
+  @spec date(Date.t() | DateTime.t() | NaiveDateTime.t() | nil) :: String.t()
   def date(nil), do: "—"
-  def date(at), do: Calendar.strftime(at, "%b %-d, %Y")
+  def date(at), do: at |> in_zone(Clock.display_zone()) |> Calendar.strftime("%b %-d, %Y")
 
-  @doc "A date in the current year's short form: `day(~D[2026-10-27])` → `\"Oct 27\"`. `nil` is an em dash."
-  @spec day(Date.t() | DateTime.t() | nil) :: String.t()
+  @doc """
+  A date in the current year's short form: `day(~D[2026-10-27])` →
+  `"Oct 27"`. A timestamp shows its date in the viewer's zone; `nil` is an
+  em dash.
+  """
+  @spec day(Date.t() | DateTime.t() | NaiveDateTime.t() | nil) :: String.t()
   def day(nil), do: "—"
-  def day(at), do: Calendar.strftime(at, "%b %-d")
+  def day(at), do: at |> in_zone(Clock.display_zone()) |> Calendar.strftime("%b %-d")
 
   @doc """
   The colour class for a gain or loss: `"text-success"` above zero,
@@ -64,14 +78,30 @@ defmodule OpusWeb.Format do
     end
   end
 
-  @doc "Local wall-clock time, e.g. `17:31`."
-  @spec clock(DateTime.t()) :: String.t()
-  def clock(%DateTime{} = at), do: Calendar.strftime(at, "%H:%M")
+  @doc "Wall-clock time in `zone` (the viewer's by default), e.g. `17:31`."
+  @spec clock(DateTime.t() | NaiveDateTime.t(), String.t()) :: String.t()
+  def clock(at, zone \\ Clock.display_zone()),
+    do: at |> in_zone(zone) |> Calendar.strftime("%H:%M")
 
-  @doc "Day and clock time, e.g. `Oct 23 17:31`; `nil` renders as an em dash."
-  @spec stamp(DateTime.t() | NaiveDateTime.t() | nil) :: String.t()
-  def stamp(nil), do: "—"
-  def stamp(at), do: Calendar.strftime(at, "%b %-d %H:%M")
+  @doc """
+  Day and clock time in `zone` (the viewer's by default), e.g.
+  `Oct 23 17:31`; `nil` renders as an em dash.
+  """
+  @spec stamp(DateTime.t() | NaiveDateTime.t() | nil, String.t()) :: String.t()
+  def stamp(at, zone \\ Clock.display_zone())
+  def stamp(nil, _zone), do: "—"
+  def stamp(at, zone), do: at |> in_zone(zone) |> Calendar.strftime("%b %-d %H:%M")
+
+  @doc """
+  The short name of `zone` (the viewer's by default) at that instant, to
+  label a time where the zone isn't obvious: `MDT`, `MST`, `EDT`.
+  """
+  @spec zone_name(DateTime.t() | NaiveDateTime.t(), String.t()) :: String.t()
+  def zone_name(at, zone \\ Clock.display_zone()), do: in_zone(at, zone).zone_abbr
+
+  @doc "A zone's city, for a label: `\"America/New_York\"` → `\"New York\"`."
+  @spec city(String.t()) :: String.t()
+  def city(zone), do: zone |> String.split("/") |> List.last() |> String.replace("_", " ")
 
   @doc """
   A traded price with the decimals its size suggests and grouped thousands:
@@ -128,6 +158,10 @@ defmodule OpusWeb.Format do
   @spec strike(number()) :: String.t()
   def strike(value) when value == trunc(value), do: num(trunc(value))
   def strike(value), do: num(value, 1)
+
+  # A timestamp in `zone`; a date is already a date.
+  defp in_zone(%Date{} = date, _zone), do: date
+  defp in_zone(at, zone), do: Clock.local(at, zone)
 
   defp group_thousands(whole) when is_integer(whole) do
     whole

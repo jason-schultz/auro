@@ -314,12 +314,100 @@ defmodule Opus.Options.PaperBooksTest do
     assert_in_delta book_cash("put_spread"), 100_000.0 + 294.0 - 0.2 - 2_000.0, 1.0e-6
   end
 
+  test "without the daily bar yet, expiry settles on the last intraday bar to 16:00",
+       %{qqq: qqq, ids: ids} do
+    {:ok, _} = Paper.run("put_spread", "QQQ")
+
+    Repo.insert_all("option_quotes", [
+      %{
+        ticker: "Q",
+        captured_at: ~N[2026-12-07 15:00:03],
+        source: "questrade",
+        spot: 640.0,
+        bid: 0.0,
+        ask: 0.05,
+        delta: 0.0,
+        contract_id: ids[{"put", 590.0}]
+      }
+    ])
+
+    # Friday Dec 4 (EST, New York = UTC − 5): only bars before the close so
+    # far; none stands in for the closing print.
+    bar = fn granularity, utc, close ->
+      %{
+        instrument_id: qqq.id,
+        instrument: "QQQ",
+        granularity: granularity,
+        timestamp: utc,
+        open: close,
+        high: close,
+        low: close,
+        close: close,
+        volume: 1,
+        complete: true
+      }
+    end
+
+    Repo.insert_all("candles", [
+      bar.("M5", ~U[2026-12-04 20:55:00Z], 575.0),
+      bar.("M1", ~U[2026-12-04 20:59:00Z], 571.0)
+    ])
+
+    assert {:ok, [{:hold, _trade}]} = Paper.run("put_spread", "QQQ")
+    Repo.delete_all(from(e in Event, where: e.on == ^~D[2026-12-07]))
+
+    # The minute bar starting at 16:00 carries the closing print.
+    Repo.insert_all("candles", [bar.("M1", ~U[2026-12-04 21:00:00Z], 570.0)])
+
+    assert {:ok, [{:settle, _trade, 570.0}]} = Paper.run("put_spread", "QQQ")
+  end
+
+  test "a held leg outside the chain's band is managed on its session quote",
+       %{qqq: qqq, ids: ids} do
+    call = ids[{"call", 650.0}]
+
+    Repo.insert!(%Idea{
+      scanned_on: ~D[2026-10-23],
+      list: "dip_buy",
+      underlying_instrument_id: qqq.id,
+      contract_id: call,
+      kind: "call",
+      strike: 650.0,
+      expiration: @expiry,
+      dte: 42,
+      spot: @spot,
+      setup: "RSI(2) 4"
+    })
+
+    {:ok, [{:open, "long_call", _}]} = Paper.run("ideas", "QQQ")
+
+    # A week later the chain's band has moved off the 650 call; only the
+    # session's held-contract quote prices it, at more than double.
+    Repo.insert_all("option_quotes", [
+      %{
+        ticker: "Q",
+        captured_at: ~N[2026-10-30 14:00:03],
+        source: "questrade",
+        spot: 700.0,
+        bid: 1.0,
+        ask: 1.02,
+        delta: -0.01,
+        contract_id: ids[{"put", 560.0}]
+      }
+    ])
+
+    quote_at(~N[2026-10-30 14:15:00], call, 12.5, 12.7, 700.0)
+
+    assert {:ok, [{:close, _trade, [{_leg, 12.5}]}]} = Paper.run("ideas", "QQQ")
+  end
+
   test "each book has its own view, with the whole structure for a trade", %{conn: conn} do
     {:ok, _} = Paper.run("put_spread", "QQQ")
     {:ok, _view, html} = live(conn, ~p"/options?view=paper&book=put_spread")
     assert html =~ "Put spreads"
     assert html =~ "Where it stands"
-    assert html =~ "Priced at 10:00 New York"
+    # The 10:00 New York snapshot, in the viewer's zone.
+    assert html =~ "Priced at 08:00 MDT"
     assert html =~ "QQQ"
 
     [trade] = Paper.book("put_spread").trades

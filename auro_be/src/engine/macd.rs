@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block, Level, Series, Setting, AVERAGE_WHY, SIGNAL_LINE_WHY};
 use crate::engine::indicators;
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -26,6 +27,36 @@ pub struct MacdParams {
     pub slow_period: usize,
     #[serde(default = "default_signal")]
     pub signal_period: usize,
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "Macd",
+        key: "m",
+        name: "MACD",
+        watches: "The gap between a fast and a slow average (MACD), and a smoothed copy of it (the signal line). MACD crossing above its signal line means momentum is turning up.",
+        settings: vec![
+            Setting::int("fast_period", "Fast", 12, "Bars for the fast average."),
+            Setting::int("slow_period", "Slow", 26, "Bars for the slow average.")
+                .at_least(2.0, AVERAGE_WHY),
+            Setting::int(
+                "signal_period",
+                "Signal",
+                9,
+                "Bars to smooth MACD into its signal line. Fewer reacts sooner.",
+            )
+            .at_least(2.0, SIGNAL_LINE_WHY),
+        ],
+        ports: vec![
+            port("bullish", "MACD is above its signal line"),
+            port("bearish", "MACD is below its signal line"),
+            port("bullish_cross", "MACD crosses above its signal line"),
+            port("bearish_cross", "MACD crosses below its signal line"),
+        ],
+        series: vec![Series::panel("macd", "MACD", vec![Level::At(0.0)]).with("signal")],
+        stop: None,
+    }
 }
 
 impl Signaler for MacdParams {

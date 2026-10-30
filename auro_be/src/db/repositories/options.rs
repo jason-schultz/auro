@@ -105,6 +105,8 @@ pub struct OptionQuoteRow {
 
 /// Insert new contracts on `underlying`, refresh `last_seen_at` on known
 /// ones, and return every contract's id with its ticker, in the order sent.
+/// A known contract takes the ticker as sent, so the returned ticker is
+/// always the caller's spelling (callers join on it).
 pub async fn upsert_contracts(
     pool: &PgPool,
     underlying: InstrumentId,
@@ -129,6 +131,7 @@ pub async fn upsert_contracts(
                    shares_per_contract, exercise_style, primary_exchange)
             ON CONFLICT (underlying_instrument_id, expiration_date, strike, contract_type)
             DO UPDATE SET
+                ticker = EXCLUDED.ticker,
                 last_seen_at = EXCLUDED.last_seen_at,
                 exercise_style = COALESCE(EXCLUDED.exercise_style, option_contracts.exercise_style),
                 primary_exchange = COALESCE(EXCLUDED.primary_exchange, option_contracts.primary_exchange)
@@ -228,6 +231,23 @@ pub async fn insert_quotes(pool: &PgPool, rows: &[OptionQuoteRow]) -> Result<usi
         .await?;
     }
     Ok(rows.len())
+}
+
+/// The underlying price the newest stored option quote on `underlying` was
+/// captured against (chain snapshot or held-leg quote), if any.
+pub async fn latest_quote_spot(
+    pool: &PgPool,
+    underlying: &str,
+) -> Result<Option<f64>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT q.spot FROM option_quotes q \
+         JOIN option_contracts c ON c.id = q.contract_id \
+         WHERE c.underlying = $1 \
+         ORDER BY q.captured_at DESC LIMIT 1",
+    )
+    .bind(underlying)
+    .fetch_optional(pool)
+    .await
 }
 
 /// Contracts on `underlying` expiring in `[from, to]` with strikes in

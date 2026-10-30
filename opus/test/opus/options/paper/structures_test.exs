@@ -95,6 +95,25 @@ defmodule Opus.Options.Paper.StructuresTest do
       assert {:hold, ^trade} = Structures.manage(trade, %{2 => %{bid: 1.0, ask: 1.02}}, late)
     end
 
+    test "a decayed long wing with no bid doesn't block the close", %{trade: trade} do
+      # Nobody bids the long put: it is sold for nothing. The short leg's
+      # spread is too wide to open on, but its ask still buys it back.
+      quotes = %{2 => %{bid: 0.9, ask: 1.2}, 1 => %{bid: 0.0, ask: 0.05}}
+      assert {:close, ^trade, fills} = Structures.take_profit(trade, quotes)
+      assert Enum.map(fills, &elem(&1, 1)) == [0.0, 1.2]
+
+      late = %{snapshot(640.0, []) | as_of: Date.add(@as_of, @dte - 21)}
+      no_bid = %{2 => %{bid: 2.0, ask: 2.5}, 1 => %{bid: nil, ask: 0.05}}
+      assert {:close, ^trade, [{_, +0.0}, {_, 2.5}]} = Structures.manage(trade, no_bid, late)
+    end
+
+    test "a short leg needs an ask to be bought back", %{trade: trade} do
+      late = %{snapshot(640.0, []) | as_of: Date.add(@as_of, @dte - 21)}
+      quotes = %{2 => %{bid: 0.5, ask: nil}, 1 => %{bid: 0.1, ask: 0.12}}
+      assert {:hold, ^trade} = Structures.manage(trade, quotes, late)
+      assert {:hold, ^trade} = Structures.take_profit(trade, quotes)
+    end
+
     test "settles at intrinsic after expiry day, against that day's close", %{trade: trade} do
       expiration = Date.add(@as_of, @dte)
       after_expiry = %{snapshot(640.0, []) | as_of: Date.add(expiration, 3)}

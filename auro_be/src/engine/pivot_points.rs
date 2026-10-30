@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block, Series};
 use crate::engine::indicators::{self, PivotPoints};
 use crate::engine::session;
 use crate::engine::strategy::Signaler;
@@ -18,6 +19,29 @@ pub struct PivotPointsParams {}
 fn pivots(candles: &[Candle]) -> Option<PivotPoints> {
     let (high, low, close) = session::previous_session(candles)?;
     Some(indicators::pivot_points(high, low, close))
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "PivotPoints",
+        key: "pv",
+        name: "Pivot points",
+        watches: "Price levels worked out from the previous session's high, low and close: a middle pivot, a resistance level above it (R1) and a support level below (S1). Traders watch them as places the price may stall or turn.",
+        settings: vec![],
+        ports: vec![
+            port("above_pivot", "the price is above the pivot (from the previous session's high, low and close)"),
+            port("below_pivot", "the price is below the pivot (from the previous session's high, low and close)"),
+            port("above_r1", "the price is above the first resistance level (R1)"),
+            port("below_s1", "the price is below the first support level (S1)"),
+        ],
+        series: vec![
+            Series::price("pivot", "Pivot"),
+            Series::price("r1", "Resistance (R1)"),
+            Series::price("s1", "Support (S1)"),
+        ],
+        stop: None,
+    }
 }
 
 impl Signaler for PivotPointsParams {

@@ -61,6 +61,7 @@ defmodule OpusWeb.TogetherLiveTest do
     html = render_async(view, 10_000)
 
     refute html =~ "Running…"
-    assert html =~ "Auro is not running."
+    # Together runs in the tester (config/test.exs: a closed port).
+    assert html =~ "cargo run --release --bin auro-tester"
   end
 end

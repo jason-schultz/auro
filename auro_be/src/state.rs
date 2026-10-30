@@ -95,7 +95,9 @@ impl AppState {
     /// tests that never touch Postgres; OANDA points at a dead local port.
     pub(crate) fn for_tests(db: PgPool) -> Self {
         let config = Config {
+            mode: crate::config::Mode::Live,
             database_url: "postgres://test:test@localhost/test".to_string(),
+            db_pool_size: 1,
             oanda_api_key: "test-key".to_string(),
             oanda_account_id: "test-account".to_string(),
             oanda_base_url: "http://127.0.0.1:1".to_string(),

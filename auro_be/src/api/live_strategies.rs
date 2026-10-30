@@ -121,6 +121,10 @@ fn validate_parameters(payload: &CreateLiveStrategy) -> AppResult<()> {
         )));
     }
 
+    if strategy.needs_policy_rates() {
+        crate::engine::carry::currencies(&strategy.instrument).map_err(AppError::BadRequest)?;
+    }
+
     if let Some((component, param, value)) = oversized_setting(&payload.parameters) {
         return Err(AppError::BadRequest(format!(
             "{component}.{param} = {value} is out of range (at most {MAX_BLOCK_SETTING})"

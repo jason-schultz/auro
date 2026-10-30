@@ -101,7 +101,7 @@ defmodule Opus.Trading.SignalChartTest do
 
     assert [%{label: "Average", values: [nil, 101.0, 102.0, 103.0, 104.0]}] = chart.overlays
 
-    assert [%{label: "RSI", range: {0, 100}, levels: [20.0, 50.0, 80.0], also: nil}] =
+    assert [%{label: "RSI", range: {+0.0, 100.0}, levels: [20.0, 50.0, 80.0], also: nil}] =
              chart.panels
 
     assert hd(chart.panels).values == [0.0, 10.0, 20.0, 30.0, 40.0]

@@ -11,6 +11,8 @@ defmodule OpusWeb.AccountsLive do
 
   import OpusWeb.Format
 
+  require Logger
+
   alias Opus.Accounts
   alias Opus.Accounts.IndexExposure
   alias Opus.Auro.Client
@@ -29,31 +31,51 @@ defmodule OpusWeb.AccountsLive do
         exposure: nil
       )
 
+    # The broker balances take a moment (Rust asks OANDA and Questrade), so
+    # the page shows straight away and fills in when they arrive, like the
+    # other pages.
     {:ok,
      if(connected?(socket),
-       do: socket |> assign(exposure: IndexExposure.current()) |> load(&Accounts.overview/0),
+       do:
+         socket
+         |> start_async(:exposure, &IndexExposure.current/0)
+         |> start_async(:overview, &Accounts.overview/0),
        else: socket
      )}
   end
 
   @impl true
   def handle_event("refresh", _params, socket) do
-    {:noreply, socket |> assign(refreshing: true) |> load(&Accounts.refresh/0)}
+    {:noreply, socket |> assign(refreshing: true) |> start_async(:overview, &Accounts.refresh/0)}
   end
 
-  defp load(socket, fetch) do
-    case fetch.() do
-      {:ok, overview} ->
-        assign(socket,
-          overview: overview,
-          error: nil,
-          as_of: DateTime.utc_now(),
-          refreshing: false
-        )
+  @impl true
+  def handle_async(:exposure, {:ok, exposure}, socket),
+    do: {:noreply, assign(socket, exposure: exposure)}
 
-      {:error, reason} ->
-        assign(socket, error: describe(reason), refreshing: false)
-    end
+  def handle_async(:exposure, {:exit, reason}, socket) do
+    Logger.error("[Accounts] Index exposure crashed: #{inspect(reason)}")
+    {:noreply, socket}
+  end
+
+  def handle_async(:overview, {:ok, {:ok, overview}}, socket) do
+    {:noreply,
+     assign(socket,
+       overview: overview,
+       error: nil,
+       as_of: DateTime.utc_now(),
+       refreshing: false
+     )}
+  end
+
+  def handle_async(:overview, {:ok, {:error, reason}}, socket),
+    do: {:noreply, assign(socket, error: describe(reason), refreshing: false)}
+
+  def handle_async(:overview, {:exit, reason}, socket) do
+    Logger.error("[Accounts] Loading balances crashed: #{inspect(reason)}")
+
+    {:noreply,
+     assign(socket, error: "Loading the balances failed. Check the Opus log.", refreshing: false)}
   end
 
   defp describe(reason), do: Client.describe_error(reason)
@@ -237,6 +259,12 @@ defmodule OpusWeb.AccountsLive do
           </tbody>
         </table>
       </div>
+      <span :if={@table.priced_at} class="text-[12px] text-muted">
+        <.t {copy(
+          "Prices from Questrade as of %{time}, refreshed every 15 minutes while the market is open.",
+          time: "#{stamp(@table.priced_at)} #{zone_name(@table.priced_at)}"
+        )} />
+      </span>
     </section>
     """
   end

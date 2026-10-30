@@ -32,7 +32,7 @@ async fn delete_position_endpoint_removes_existing_position() {
         positions.insert("trade-1".to_string(), sample_position("trade-1"));
     }
 
-    let app = api::router().with_state(state.clone());
+    let app = api::live_router().with_state(state.clone());
     let request = common::http::request(Method::DELETE, "/api/positions/trade-1", None);
     let response = app.oneshot(request).await.unwrap();
 
@@ -48,7 +48,7 @@ async fn delete_position_endpoint_removes_existing_position() {
 #[tokio::test]
 async fn delete_position_endpoint_is_noop_for_unknown_trade_id() {
     let state = common::test_state();
-    let app = api::router().with_state(state.clone());
+    let app = api::live_router().with_state(state.clone());
     let request = common::http::request(Method::DELETE, "/api/positions/missing", None);
 
     let response = app.oneshot(request).await.unwrap();
@@ -72,7 +72,7 @@ async fn delete_position_endpoint_handles_parallel_removals() {
         }
     }
 
-    let app = api::router().with_state(state.clone());
+    let app = api::live_router().with_state(state.clone());
 
     let futures = (0..n).map(|i| {
         let app = app.clone();

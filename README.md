@@ -45,7 +45,7 @@ Two services share one PostgreSQL database:
 
 | Service | What it does | Port |
 |---|---|---|
-| **`auro_be/`** (Rust: axum, tokio, sqlx) | The engine: OANDA prices and candles, strategy evaluation, order execution, trade management, backtests and the testing pipeline's maths, broker clients (OANDA, Questrade, Wealthsimple, Massive) | 3000 |
+| **`auro_be/`** (Rust: axum, tokio, sqlx) | The engine: OANDA prices and candles, strategy evaluation, order execution, trade management, backtests and the testing pipeline's maths, broker clients (OANDA, Questrade, Wealthsimple, Massive). Two processes: `auro` (live) and `auro-tester` (backtests and the pipeline) | 3000, 3001 |
 | **`opus/`** (Elixir: Phoenix 1.8, LiveView, Ecto, Oban) | The brain and the web app: every page, scheduling, the strategy builder and testing pipeline, account-level safety rules, options paper books, alerts, and every database migration | 4321 |
 
 Opus tells the engine what to do over HTTP; the engine never calls Opus. OANDA is
@@ -81,9 +81,20 @@ engine, which refuses to start if a table it needs is missing.
 ### Day to day (development)
 
 ```sh
-cd auro_be && cargo run          # engine on :3000
-cd opus && mix phx.server        # app on http://localhost:4321
+cd auro_be && cargo run                                  # live engine on :3000
+cd auro_be && cargo run --release --bin auro-tester      # tester on :3001
+cd opus && mix phx.server                                # app on http://localhost:4321
 ```
+
+The engine runs as two processes from one crate. **`auro`** trades: OANDA
+price stream, candle feed, evaluator, trade management, live state. **`auro-tester`**
+runs every backtest: pipeline stages, the builder preview, strategy reports,
+the "Is it fragile?" grid and Together. It never connects to OANDA, Questrade
+or Massive and starts no background jobs, so it doesn't need OANDA settings.
+The live engine does not serve test endpoints at all, so testing can't slow live
+trading. With the tester stopped, those pages say so and pipeline jobs wait
+until it is back. Use `--release` for the tester: backtests are far slower in a
+debug build.
 
 Run only one copy of each. To run both as background services that start at
 login (macOS launchd), see `running_local/README.md`.
@@ -97,7 +108,9 @@ Engine (`auro_be/.env`):
 | `DATABASE_URL` | e.g. `postgres://postgres:postgres@localhost:5432/auro` |
 | `OANDA_API_KEY`, `OANDA_ACCOUNT_ID` | your practice account |
 | `OANDA_BASE_URL`, `OANDA_STREAM_URL` | `https://api-fxpractice.oanda.com`, `https://stream-fxpractice.oanda.com` |
-| `HOST`, `PORT` | default `127.0.0.1`, `3000` |
+| `HOST`, `PORT` | default `127.0.0.1`, `3000` (live engine) |
+| `AURO_TESTER_PORT` | tester's port, default `3001` (it ignores `PORT`) |
+| `AURO_LIVE_DB_POOL_SIZE`, `AURO_TESTER_DB_POOL_SIZE` | Postgres connections per process, default `5` and `10` |
 | `QUESTRADE_REFRESH_TOKEN` | optional; first-run token for Questrade |
 | `MASSIVE_API_KEY`, `MASSIVE_BASE_URL`, `MASSIVE_CALLS_PER_MINUTE` | optional; US daily bars |
 
@@ -108,7 +121,8 @@ Opus (your shell in development; `running_local/opus.env` as a service, from
 |---|---|
 | `DATABASE_URL` | same database |
 | `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, `OANDA_BASE_URL` | same account |
-| `AURO_BASE_URL` | the engine, default `http://localhost:3000` |
+| `AURO_BASE_URL` | the live engine, default `http://localhost:3000` |
+| `AURO_TESTER_URL` | the tester, default `http://localhost:3001` |
 | `DISCORD_WEBHOOK_URL` | optional; alerts go nowhere without it |
 | `SECRET_KEY_BASE`, `PHX_SERVER`, `PHX_HOST`, `PORT`, `POOL_SIZE` | release only |
 

@@ -14,7 +14,7 @@ use brokers::oanda::stream::run_price_stream;
 use brokers::oanda::{is_forex_market_open, INSTRUMENTS};
 use brokers::questrade::client::QuestradeClient;
 use brokers::wealthsimple::client::WealthsimpleClient;
-use config::Config;
+use config::{Config, Mode};
 use engine::live::account_cache::run_account_refresher;
 use engine::live::candle_feed::run_candle_feed;
 use engine::live::instrument_cache::load_instrument_metadata;
@@ -33,9 +33,15 @@ use tracing_subscriber::EnvFilter;
 
 /// The returned guard flushes the file writer; it must live for the whole
 /// process or file logging silently stops.
-fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
+/// Each process logs to its own files (`logs/auro.*` live,
+/// `logs/auro-tester.*` tester) so neither rotates over the other.
+fn init_tracing(mode: Mode) -> tracing_appender::non_blocking::WorkerGuard {
+    let prefix = match mode {
+        Mode::Live => "auro",
+        Mode::Tester => "auro-tester",
+    };
     let file_appender = Builder::new()
-        .filename_prefix("auro")
+        .filename_prefix(prefix)
         .filename_suffix("log")
         .rotation(Rotation::DAILY)
         .max_log_files(7)
@@ -55,16 +61,76 @@ fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
     file_guard
 }
 
-pub async fn run() -> anyhow::Result<()> {
+/// Start one of the two processes. `auro` (src/main.rs) runs `Mode::Live`,
+/// `auro-tester` (src/bin/auro-tester.rs) runs `Mode::Tester`.
+pub async fn run(mode: Mode) -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    let _log_guard = init_tracing();
+    let _log_guard = init_tracing(mode);
 
-    let config = Config::from_env().map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    let config =
+        Config::from_env(mode).map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
 
-    tracing::info!("Starting Auro on {}", config.listen_addr());
+    tracing::info!(
+        "Starting Auro ({}) on {}",
+        mode.as_str(),
+        config.listen_addr()
+    );
 
-    let pool = db::create_pool(&config.database_url).await?;
+    // Both processes check the schema; each sizes its own pool.
+    let pool = db::create_pool(&config.database_url, config.db_pool_size).await?;
 
+    let (state, app) = match mode {
+        Mode::Live => (start_live(config.clone(), pool).await, api::live_router()),
+        Mode::Tester => (tester_state(config.clone(), pool), api::tester_router()),
+    };
+
+    let app = app
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+
+    let listener = TcpListener::bind(config.listen_addr()).await?;
+    tracing::info!("Listening on {}", config.listen_addr());
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+/// The tester's state: the database and nothing that talks to a broker.
+/// No OANDA call, no Questrade token exchange (that would rotate the live
+/// engine's token), no Massive client, no background task. The OANDA client
+/// is inert: no tester route uses it.
+fn tester_state(config: Config, pool: sqlx::PgPool) -> AppState {
+    let oanda = OandaClient::new(
+        &config.oanda_base_url,
+        &config.oanda_stream_url,
+        &config.oanda_api_key,
+        &config.oanda_account_id,
+    );
+    let (price_tx, _) = broadcast::channel(1);
+
+    AppState {
+        db: pool.clone(),
+        config,
+        oanda,
+        start_time: chrono::Utc::now(),
+        live: Arc::new(LiveState::new()),
+        price_tx,
+        questrade: None,
+        wealthsimple: WealthsimpleClient::new(&pool),
+        massive: None,
+    }
+}
+
+/// Connect the brokers, load live state and spawn every live task: price
+/// stream, quote tracker, candle feed, account refresher, position sync,
+/// instrument metadata reload.
+async fn start_live(config: Config, pool: sqlx::PgPool) -> AppState {
     let oanda = OandaClient::new(
         &config.oanda_base_url,
         &config.oanda_stream_url,
@@ -185,19 +251,5 @@ pub async fn run() -> anyhow::Result<()> {
         });
     }
 
-    let app = api::router()
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
-
-    let listener = TcpListener::bind(config.listen_addr()).await?;
-    tracing::info!("Listening on {}", config.listen_addr());
-    axum::serve(listener, app).await?;
-
-    Ok(())
+    state
 }

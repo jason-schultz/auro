@@ -14,6 +14,10 @@ config :opus,
 # New York time for the US market schedule (Oban cron, market dates).
 config :elixir, :time_zone_database, Tz.TimeZoneDatabase
 
+# The viewer's time zone: the pages show times in it (`Opus.Clock.display_zone/0`).
+# Market schedule facts (the 16:00 close, the 10:00 chain) stay in New York.
+config :opus, :display_zone, "America/Edmonton"
+
 # Configures the endpoint
 config :opus, OpusWeb.Endpoint,
   url: [host: "localhost"],
@@ -32,15 +36,20 @@ config :opus, Oban,
     # Delete finished jobs (completed, cancelled, discarded) after two weeks;
     # Oban keeps them forever otherwise. The dashboard only reads the last day.
     {Oban.Plugins.Pruner, max_age: {14, :days}},
-    # UTC. 23:30 UTC is after the 16:00 ET close in both EDT and EST; the
-    # worker's overlapping re-fetch picks up any post-market bars it misses.
     {Oban.Plugins.Cron,
      crontab: [
-       {"30 23 * * 1-5", Opus.MarketData.QuestradeBarsWorker},
-       # 01:30 UTC Tue–Sat: the US daily bars for the session that just closed
-       # (one job per symbol). Rust treats a daily bar as final once extended
-       # hours end at 20:00 New York, which is 00:00/01:00 UTC by season.
-       {"30 1 * * 2-6", Opus.MarketData.MassiveBarsWorker},
+       # 20:30 New York, after extended hours end at 20:00, so the day's
+       # daily bar is final; the overlapping re-fetch picks up anything missed.
+       {"30 20 * * 1-5", Opus.MarketData.QuestradeBarsWorker, timezone: "America/New_York"},
+       # Every 15 minutes in the session: re-price the Wealthsimple holdings
+       # from Questrade quotes (Opus.Accounts.HoldingsPriceWorker).
+       {"*/15 9-16 * * 1-5", Opus.Accounts.HoldingsPriceWorker, timezone: "America/New_York"},
+       # 07:00 New York Tue–Sat: the US daily bars for the previous session
+       # (one job per symbol). Massive's free plan publishes a session's bar
+       # some time the next day, so the old evening run stored day D only on
+       # D+2; this lands it before the 09:15 ideas scan reads it. The run
+       # takes ~27 minutes on its own `massive` queue.
+       {"0 7 * * 2-6", Opus.MarketData.MassiveBarsWorker, timezone: "America/New_York"},
        # US options, New York time on trading days: a chain snapshot and
        # ideas scan before the open (yesterday's closing quotes, a heads-up),
        # then a snapshot on live quotes once the opening rush has settled, the
@@ -70,16 +79,18 @@ config :opus, Oban,
         args: %{check_in: true}, timezone: "America/New_York"}
      ]}
   ],
-  queues: [pipeline: 2, market_data: 1, alerts: 1]
+  queues: [pipeline: 2, market_data: 1, massive: 1, alerts: 1]
 
 # Which instruments each feed stores is a flag on the `instruments` table
 # (the Instruments page); config keeps only the feed parameters.
 
 # Questrade intraday bars persisted daily via Rust for the listings flagged
-# `feed_questrade_bars`.
+# `feed_questrade_bars` and the Wealthsimple holdings (daily bars too for
+# holdings no other feed covers).
 config :opus, Opus.MarketData.QuestradeBarsWorker,
   days: 5,
-  granularities: ["M1", "M5"]
+  granularities: ["M1", "M5"],
+  daily_days: 400
 
 # Option chain snapshots from Questrade via Rust: near-the-money contracts
 # for the next weeks on the listings flagged `feed_options_chain`, quoted

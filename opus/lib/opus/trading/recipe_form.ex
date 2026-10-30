@@ -7,12 +7,17 @@ defmodule Opus.Trading.RecipeForm do
 
       %{"name" => ..., "granularity" => "D", "notes" => ...,
         "components" => [%{"key" => "r", "type" => "RsiReversion", "params" => %{...}}],
-        "rules" => %{"entry_long" => %{"mode" => "and", "refs" => ["r.long", "t.above"]}, ...},
+        "rules" => %{"entry_long" => %{"mode" => "and", "refs" => ["r.long", "t.above"],
+                                       "timing" => %{"t.above" => %{"kind" => "within", "bars" => "5"}}}, ...},
         "stop" => %{"type" => "AtrMultiple", "params" => %{"k" => "3", "period" => "14"}},
         "hold" => "10"}
 
   A rule is one list of single rules joined by "all of" (`and`) or "any of"
-  (`or`). A recipe whose rules nest deeper than that can't be edited here
+  (`or`). Each single rule can be timed (`timing`, keyed by ref; none is
+  "right now"): "within" N holds if it held on any of the last N bars, this
+  one included, "ago" N reads it N bars back — the engine's
+  `{"within": N, "rule": ref}` / `{"ago": N, "rule": ref}`. A recipe whose
+  rules nest deeper than that can't be edited here
   (`from_definition/2` says `:too_complex`). Keys the form doesn't know
   (`version`, `strategy_id`, …) are kept from the original definition.
 
@@ -29,16 +34,21 @@ defmodule Opus.Trading.RecipeForm do
     "exit_short" => ["exit", "short"]
   }
 
-  # Components that can place their own stop (`StopConfig::FromComponent`).
-  @own_stop ~w(NoiseArea MeanReversion)
+  # The most bars a timed rule looks back (the engine's `RULE_LOOKBACK_MAX`),
+  # and the count a rule starts with when it's first timed.
+  @max_bars 500
+  @default_bars %{"within" => 5, "ago" => 1}
 
   @doc "The rule slots, in order: entry_long, entry_short, exit_long, exit_short."
   @spec rules() :: [String.t()]
   def rules, do: @rules
 
-  @doc "Component types that can set the stop themselves."
+  @doc """
+  Component types that can set the stop themselves
+  (`StopConfig::FromComponent`): the ones with stop words in the catalog.
+  """
   @spec own_stop() :: [String.t()]
-  def own_stop, do: @own_stop
+  def own_stop, do: for(%{stop: stop, type: type} <- Blocks.all(), stop, do: type)
 
   @doc "A new strategy's starting form: daily bars, no blocks, an ATR stop."
   @spec new() :: map()
@@ -48,11 +58,21 @@ defmodule Opus.Trading.RecipeForm do
       "granularity" => "D",
       "notes" => "",
       "components" => [],
-      "rules" => Map.new(@rules, &{&1, %{"mode" => "and", "refs" => []}}),
+      "rules" => Map.new(@rules, &{&1, empty_rule()}),
       "stop" => %{"type" => "AtrMultiple", "params" => %{"k" => "3", "period" => "14"}},
       "hold" => ""
     }
   end
+
+  defp empty_rule, do: %{"mode" => "and", "refs" => [], "timing" => %{}}
+
+  @doc "The most bars a timed rule can look back."
+  @spec max_bars() :: pos_integer()
+  def max_bars, do: @max_bars
+
+  @doc "How many bars a rule timed `kind` (`\"within\"`, `\"ago\"`) starts with."
+  @spec default_bars(String.t()) :: pos_integer()
+  def default_bars(kind), do: Map.fetch!(@default_bars, kind)
 
   @doc """
   Ready-made strategies to start from, each a complete form a beginner can
@@ -142,7 +162,7 @@ defmodule Opus.Trading.RecipeForm do
       )
 
     Enum.reduce(rules, form, fn {slot, {mode, refs}}, form ->
-      put_in(form, ["rules", slot], %{"mode" => mode, "refs" => refs})
+      put_in(form, ["rules", slot], %{"mode" => mode, "refs" => refs, "timing" => %{}})
     end)
   end
 
@@ -175,8 +195,12 @@ defmodule Opus.Trading.RecipeForm do
     |> Map.update!("components", &Enum.reject(&1, fn c -> c["key"] == key end))
     |> Map.update!("rules", fn rules ->
       Map.new(rules, fn {slot, rule} ->
+        keep = &(not String.starts_with?(&1, prefix))
+
         {slot,
-         Map.update!(rule, "refs", &Enum.reject(&1, fn r -> String.starts_with?(r, prefix) end))}
+         rule
+         |> Map.update!("refs", &Enum.filter(&1, keep))
+         |> Map.put("timing", Map.filter(rule["timing"] || %{}, fn {r, _} -> keep.(r) end))}
       end)
     end)
   end
@@ -218,15 +242,21 @@ defmodule Opus.Trading.RecipeForm do
     end)
   end
 
-  @doc "The form with `ref` taken out of a rule slot."
+  @doc "The form with `ref` (and its timing) taken out of a rule slot."
   @spec remove_ref(map(), String.t(), String.t()) :: map()
-  def remove_ref(form, slot, ref),
-    do: update_in(form, ["rules", slot, "refs"], &List.delete(&1, ref))
+  def remove_ref(form, slot, ref) do
+    update_in(form, ["rules", slot], fn rule ->
+      rule
+      |> Map.update!("refs", &List.delete(&1, ref))
+      |> Map.put("timing", Map.delete(rule["timing"] || %{}, ref))
+    end)
+  end
 
   @doc """
   The form for a recipe, or `{:error, :too_complex}` when a rule nests
-  deeper than "all of" or "any of" a list, or a block type isn't one the
-  builder offers.
+  deeper than "all of" or "any of" a list of single rules (each maybe
+  timed), uses one single rule twice in a slot, or a block type isn't one
+  the builder offers.
   """
   @spec from_definition(map(), String.t(), String.t(), String.t() | nil) ::
           {:ok, map()} | {:error, :too_complex}
@@ -270,22 +300,43 @@ defmodule Opus.Trading.RecipeForm do
     end)
   end
 
-  defp rule(nil), do: {:ok, %{"mode" => "and", "refs" => []}}
-  defp rule(ref) when is_binary(ref), do: {:ok, %{"mode" => "and", "refs" => [ref]}}
+  defp rule(nil), do: {:ok, empty_rule()}
 
   defp rule(%{} = expr) when map_size(expr) == 1 do
     case Enum.at(expr, 0) do
-      {mode, refs} when mode in ["and", "or"] and is_list(refs) ->
-        if Enum.all?(refs, &is_binary/1),
-          do: {:ok, %{"mode" => mode, "refs" => refs}},
-          else: :error
-
-      _ ->
-        :error
+      {mode, items} when mode in ["and", "or"] and is_list(items) -> items(mode, items)
+      _ -> :error
     end
   end
 
-  defp rule(_), do: :error
+  defp rule(item), do: items("and", [item])
+
+  defp items(mode, items) do
+    parsed = Enum.map(items, &item/1)
+    refs = Enum.map(parsed, fn {ref, _timing} -> ref end)
+
+    if Enum.all?(refs, &is_binary/1) and Enum.uniq(refs) == refs do
+      timing = for {ref, timing} <- parsed, timing, into: %{}, do: {ref, timing}
+      {:ok, %{"mode" => mode, "refs" => refs, "timing" => timing}}
+    else
+      :error
+    end
+  end
+
+  # A single rule as `{ref, timing}`; `{nil, nil}` when it isn't one.
+  defp item(ref) when is_binary(ref), do: {ref, nil}
+
+  defp item(%{"rule" => ref} = timed) when is_binary(ref) and map_size(timed) == 2 do
+    case Map.delete(timed, "rule") |> Enum.at(0) do
+      {kind, n} when kind in ["within", "ago"] and is_integer(n) ->
+        {ref, %{"kind" => kind, "bars" => to_string(n)}}
+
+      _ ->
+        {nil, nil}
+    end
+  end
+
+  defp item(_), do: {nil, nil}
 
   # The form shows a fixed stop as a positive percent; the recipe stores a
   # negative fraction (-0.02 for 2%).
@@ -332,9 +383,31 @@ defmodule Opus.Trading.RecipeForm do
   end
 
   defp expression(%{"refs" => []}), do: nil
-  defp expression(%{"refs" => [ref]}), do: ref
-  defp expression(%{"mode" => mode, "refs" => refs}), do: %{mode => refs}
+
+  defp expression(%{"refs" => refs} = rule) do
+    items = Enum.map(refs, &timed(&1, (rule["timing"] || %{})[&1]))
+
+    case items do
+      [item] -> item
+      items -> %{(rule["mode"] || "and") => items}
+    end
+  end
+
   defp expression(_), do: nil
+
+  # A single rule with its timing, as the engine reads it. A count that
+  # isn't a whole number from 1 to the max falls back to the default.
+  defp timed(ref, %{"kind" => kind} = timing) when kind in ["within", "ago"] do
+    bars =
+      case integer(timing["bars"]) do
+        n when is_integer(n) and n >= 1 and n <= @max_bars -> n
+        _ -> default_bars(kind)
+      end
+
+    %{kind => bars, "rule" => ref}
+  end
+
+  defp timed(ref, _now), do: ref
 
   defp cast_params(type, params) do
     case Blocks.get(type) do
@@ -357,6 +430,9 @@ defmodule Opus.Trading.RecipeForm do
 
   defp cast(:int, value, default), do: integer(value) || default
   defp cast(:float, value, default), do: number(value) || default / 1
+  defp cast(:bool, value, _default) when value in [true, "true"], do: true
+  defp cast(:bool, value, _default) when value in [false, "false"], do: false
+  defp cast(:bool, _value, default), do: default
 
   defp cast({:select, options}, value, default),
     do: if(value in Enum.map(options, &elem(&1, 1)), do: value, else: default)

@@ -2,6 +2,7 @@
 name = "auro"
 version = "0.1.0"
 edition = "2021"
+default-run = "auro"
 
 [dependencies]
 # Web framework + async runtime

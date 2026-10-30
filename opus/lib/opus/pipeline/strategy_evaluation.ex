@@ -9,7 +9,7 @@ defmodule Opus.Pipeline.StrategyEvaluation do
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
 
-  @stages ~w[backtest walk_forward monte_carlo holdout]
+  @stages ~w[backtest walk_forward monte_carlo parameter_stability holdout]
   @statuses ~w[pending running passed failed]
 
   @type t :: %__MODULE__{

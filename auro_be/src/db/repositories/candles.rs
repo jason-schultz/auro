@@ -141,6 +141,44 @@ pub async fn latest_candle_time(
     .await
 }
 
+/// Timestamp of the oldest complete candle, if any.
+pub async fn earliest_candle_time(
+    pool: &PgPool,
+    instrument: &str,
+    granularity: Granularity,
+) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT MIN(timestamp) FROM candles \
+         WHERE instrument = $1 AND granularity = $2 AND complete = true",
+    )
+    .bind(instrument)
+    .bind(granularity.as_str())
+    .fetch_one(pool)
+    .await
+}
+
+/// `(timestamp, close)` of the complete candles in `[from, to]`, oldest first.
+pub async fn closes_between(
+    pool: &PgPool,
+    instrument: &str,
+    granularity: Granularity,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<(DateTime<Utc>, f64)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT timestamp, close FROM candles \
+         WHERE instrument = $1 AND granularity = $2 AND complete = true \
+           AND timestamp BETWEEN $3 AND $4 \
+         ORDER BY timestamp ASC",
+    )
+    .bind(instrument)
+    .bind(granularity.as_str())
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await
+}
+
 /// Rows per INSERT statement. Keeps each statement's arrays modest while
 /// cutting round-trips by three orders of magnitude for backfills.
 const UPSERT_CHUNK: usize = 2000;

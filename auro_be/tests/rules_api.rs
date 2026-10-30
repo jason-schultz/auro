@@ -11,7 +11,7 @@ use uuid::Uuid;
 #[tokio::test]
 async fn push_rules_applies_payload_and_returns_counts() {
     let state = common::test_state();
-    let app = api::router().with_state(state.clone());
+    let app = api::live_router().with_state(state.clone());
 
     let strategy_a = Uuid::new_v4();
     let strategy_b = Uuid::new_v4();
@@ -70,7 +70,7 @@ async fn push_rules_replaces_prior_snapshot() {
     }
 
     let new_id = Uuid::new_v4();
-    let app = api::router().with_state(state.clone());
+    let app = api::live_router().with_state(state.clone());
     let body = serde_json::json!({
         "rules": {
             new_id.to_string(): { "enabled": false, "reason": "new-only" }
@@ -91,7 +91,7 @@ async fn push_rules_replaces_prior_snapshot() {
 #[tokio::test]
 async fn push_rules_rejects_malformed_json_body() {
     let state = common::test_state();
-    let app = api::router().with_state(state);
+    let app = api::live_router().with_state(state);
 
     let request = common::http::request(
         Method::POST,
@@ -112,7 +112,7 @@ async fn push_rules_rejects_malformed_json_body() {
 #[tokio::test]
 async fn push_rules_rejects_missing_computed_at() {
     let state = common::test_state();
-    let app = api::router().with_state(state);
+    let app = api::live_router().with_state(state);
 
     let request = common::http::request(
         Method::POST,
@@ -132,7 +132,7 @@ async fn push_rules_rejects_missing_computed_at() {
 #[tokio::test]
 async fn push_rules_rejects_missing_rules_object() {
     let state = common::test_state();
-    let app = api::router().with_state(state);
+    let app = api::live_router().with_state(state);
 
     let request = common::http::request(
         Method::POST,
@@ -172,7 +172,7 @@ async fn push_rules_empty_payload_clears_existing_snapshot() {
         });
     }
 
-    let app = api::router().with_state(state.clone());
+    let app = api::live_router().with_state(state.clone());
     let body = serde_json::json!({
         "rules": {},
         "computed_at": Utc.with_ymd_and_hms(2026, 5, 8, 11, 0, 0).unwrap().to_rfc3339(),
@@ -194,7 +194,7 @@ async fn push_rules_empty_payload_clears_existing_snapshot() {
 #[tokio::test]
 async fn push_rules_accepts_large_payload() {
     let state = common::test_state();
-    let app = api::router().with_state(state.clone());
+    let app = api::live_router().with_state(state.clone());
 
     let mut rules = serde_json::Map::new();
     for i in 0..1000 {
@@ -228,7 +228,7 @@ async fn push_rules_accepts_large_payload() {
 #[tokio::test]
 async fn push_rules_duplicate_strategy_key_uses_last_value() {
     let state = common::test_state();
-    let app = api::router().with_state(state.clone());
+    let app = api::live_router().with_state(state.clone());
 
     let dup_id = Uuid::new_v4();
     let raw_body = format!(

@@ -660,11 +660,11 @@ defmodule Opus.Dashboard.Alerts do
 
   defp live_closes(_input), do: []
 
-  # "Bought 1 at 29,674.4 at 15:00 New York. Stop at 29,080.1, 2.0% below."
+  # "Bought 1 at 29,674.4 at 13:00 MDT. Stop at 29,080.1, 2.0% below."
   defp live_open_words(o) do
     entry =
       "#{side_verb(o[:direction], :open)} #{units(o[:units])}at " <>
-        "#{OpusWeb.Format.price(o[:entry_price])}#{at_clock(o[:entry_time])}."
+        "#{OpusWeb.Format.price(o[:entry_price])}#{at_clock(o[:entry_time])}#{zone(o[:entry_time])}."
 
     stop =
       case {o.stop_loss_price, o[:entry_price]} do
@@ -682,14 +682,14 @@ defmodule Opus.Dashboard.Alerts do
     [entry, stop] |> Enum.reject(&is_nil/1) |> Enum.join(" ")
   end
 
-  # "Bought at 29,579.1 at 11:00, sold at 29,639.8 at 14:30 New York:
+  # "Bought at 29,579.1 at 09:00, sold at 29,639.8 at 12:30 MDT:
   # +0.2% · +$84.44. Why: the move faded."
   defp live_close_words(c) do
     result = "#{signed_pct(c.pnl_percent)}#{if c.pnl, do: " · #{signed_money(c.pnl)}", else: ""}"
 
     "#{side_verb(c[:direction], :open)} at #{OpusWeb.Format.price(c[:entry_price])}" <>
       "#{at_clock(c[:entry_time])}, #{side_verb(c[:direction], :close)} at " <>
-      "#{OpusWeb.Format.price(c[:exit_price])}#{at_clock(c[:exit_time])} New York: " <>
+      "#{OpusWeb.Format.price(c[:exit_price])}#{at_clock(c[:exit_time])}#{zone(c[:exit_time])}: " <>
       "#{result}.#{why(c)}"
   end
 
@@ -714,8 +714,12 @@ defmodule Opus.Dashboard.Alerts do
 
   defp units(_units), do: ""
 
-  defp at_clock(%DateTime{} = at), do: " at #{OpusWeb.Format.clock(Opus.Clock.local(at))}"
+  defp at_clock(%DateTime{} = at), do: " at #{OpusWeb.Format.clock(at)}"
   defp at_clock(_at), do: ""
+
+  # The viewer's zone after the last time in a sentence: " MDT".
+  defp zone(%DateTime{} = at), do: " #{OpusWeb.Format.zone_name(at)}"
+  defp zone(_at), do: ""
 
   defp ideas(%{ideas: %{count: count, scanned_on: %Date{} = on}}) do
     alert(

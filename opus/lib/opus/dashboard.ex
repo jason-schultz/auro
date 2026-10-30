@@ -226,29 +226,42 @@ defmodule Opus.Dashboard do
   end
 
   @doc """
-  Clear a job's failures from the dashboard: removes its discarded runs
-  from the last day. A run still retrying stays until it succeeds or gives
-  up. Returns how many were removed.
+  Clear a job's failures from the dashboard: marks its discarded runs from
+  the last day as cleared (`cleared_at` in the job's meta), so the alerts
+  skip them while the runs and their errors stay in Oban's history until
+  the pruner removes them. A run still retrying stays until it succeeds or
+  gives up. Returns how many were cleared.
   """
   @spec clear_failed_jobs(String.t(), DateTime.t()) :: non_neg_integer()
   def clear_failed_jobs(worker, now \\ DateTime.utc_now()) do
     since = now |> DateTime.add(-@day_seconds) |> DateTime.to_naive()
+    cleared_at = DateTime.to_iso8601(now)
 
     {count, _} =
       from(j in "oban_jobs",
-        where: j.worker == ^worker and j.state == "discarded" and j.attempted_at >= ^since
+        where:
+          j.worker == ^worker and j.state == "discarded" and j.attempted_at >= ^since and
+            fragment("(? ->> 'cleared_at') IS NULL", j.meta),
+        update: [
+          set: [
+            meta: fragment("? || jsonb_build_object('cleared_at', ?::text)", j.meta, ^cleared_at)
+          ]
+        ]
       )
-      |> Repo.delete_all()
+      |> Repo.update_all([])
 
     count
   end
 
-  # Jobs discarded, or retrying after an error, in the last day.
+  # Jobs discarded, or retrying after an error, in the last day, less the
+  # ones cleared from the dashboard.
   defp failed_jobs(now) do
     since = now |> DateTime.add(-@day_seconds) |> DateTime.to_naive()
 
     from(j in "oban_jobs",
-      where: j.state in ["discarded", "retryable"] and j.attempted_at >= ^since,
+      where:
+        j.state in ["discarded", "retryable"] and j.attempted_at >= ^since and
+          fragment("(? ->> 'cleared_at') IS NULL", j.meta),
       order_by: [desc: j.attempted_at],
       select: %{worker: j.worker, errors: j.errors}
     )

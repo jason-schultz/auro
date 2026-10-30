@@ -59,6 +59,42 @@ defmodule Opus.InstrumentsTest do
     end
   end
 
+  describe "feed_symbols/1 with Wealthsimple holdings" do
+    test "a held listing is fed like a flagged one, daily too unless Massive covers it" do
+      {:ok, flt} = Instruments.add("FLT.TO", "equity")
+      {:ok, spy} = Instruments.add("SPY", "etf")
+      {:ok, _} = Instruments.add("XIU.TO", "etf")
+      {:ok, _} = Instruments.toggle(spy, :feed_massive_daily)
+
+      %{rows: [[account]]} =
+        Repo.query!(
+          "INSERT INTO wealthsimple_accounts (account_type) VALUES ('Non-registered') RETURNING id"
+        )
+
+      hold = fn instrument, shares ->
+        Repo.query!(
+          "INSERT INTO wealthsimple_positions (account_id, symbol, shares, instrument_id) " <>
+            "VALUES ($1, $2, $3, $4)",
+          [account, instrument.symbol, shares, instrument.id]
+        )
+      end
+
+      hold.(flt, 200.0)
+      hold.(spy, 1.0)
+
+      assert Instruments.feed_symbols(:questrade_bars) == ["FLT.TO", "SPY"]
+      assert Instruments.feed_symbols(:questrade_daily) == ["FLT.TO"]
+
+      # Sold: no longer tracked.
+      Repo.query!("UPDATE wealthsimple_positions SET shares = 0 WHERE instrument_id = $1", [
+        flt.id
+      ])
+
+      assert Instruments.feed_symbols(:questrade_bars) == ["SPY"]
+      assert Instruments.feed_symbols(:questrade_daily) == []
+    end
+  end
+
   describe "id_for/1" do
     test "finds a listing by any vendor spelling, or says so" do
       {:ok, ry} = Instruments.add("RY.TO", "equity")

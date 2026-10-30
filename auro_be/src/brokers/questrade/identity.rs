@@ -75,6 +75,14 @@ pub async fn lookup(
                 "Questrade returned no detail for {symbol} (symbolId={symbol_id})"
             ))
         })?;
+    // The id is recorded permanently and overwrites exchange/currency, so
+    // it must be this listing's and not a near-miss.
+    if !detail.symbol.eq_ignore_ascii_case(symbol) {
+        return Err(AppError::Internal(format!(
+            "Questrade symbolId={symbol_id} is {}, not {symbol}",
+            detail.symbol
+        )));
+    }
     Ok(QuestradeIdentity {
         symbol_id,
         exchange: detail.listing_exchange,

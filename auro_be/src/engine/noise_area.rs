@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block, Series, Setting};
 use crate::engine::session::{
     in_regular_session, ny_open, BarClock, SESSION_CLOSE_MIN, SESSION_OPEN_MIN,
 };
@@ -177,6 +178,43 @@ impl NoiseAreaParams {
             return None;
         }
         self.bands(candles, &clock)
+    }
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "NoiseArea",
+        key: "na",
+        name: "Noise band",
+        watches: "How far the price usually moves from the US open by this time of day. Moving past that usual range suggests a real move, not noise. Intraday bars only.",
+        settings: vec![
+            Setting::int(
+                "lookback_sessions",
+                "Sessions to average",
+                14,
+                "More sessions make a steadier band.",
+            ),
+            Setting::float(
+                "band_mult",
+                "Band width ×",
+                1.0,
+                "Wider means only bigger breakouts count.",
+            ),
+        ],
+        ports: vec![
+            port("long", "the price breaks above the noise band (the usual move from the open, over the last {lookback_sessions} sessions)"),
+            port("short", "the price breaks below the noise band (the usual move from the open, over the last {lookback_sessions} sessions)"),
+            port("exit_long", "the price falls back below the band or the day's average price (VWAP)"),
+            port("exit_short", "the price rises back above the band or the day's average price (VWAP)"),
+            port("session_close", "the US session ends (16:00 New York)"),
+        ],
+        series: vec![
+            Series::price("upper", "Band top"),
+            Series::price("lower", "Band bottom"),
+            Series::price("vwap", "Day's average price (VWAP)"),
+        ],
+        stop: Some("the other side of the noise band"),
     }
 }
 

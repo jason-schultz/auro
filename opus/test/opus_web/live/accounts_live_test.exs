@@ -10,12 +10,14 @@ defmodule OpusWeb.AccountsLiveTest do
 
     assert html =~ "Accounts"
     assert html =~ "Auro"
-    assert render(view) =~ "Auro is not running."
+    assert render_async(view) =~ "Auro is not running."
   end
 
   test "refresh re-queries the engine and surfaces the same failure", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/accounts")
 
-    assert view |> element("button", "Refresh") |> render_click() =~ "Auro is not running."
+    render_async(view)
+    view |> element("button", "Refresh") |> render_click()
+    assert render_async(view) =~ "Auro is not running."
   end
 end

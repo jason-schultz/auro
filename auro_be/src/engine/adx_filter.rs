@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block, Level, Series, Setting};
 use crate::engine::indicators;
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -25,6 +26,42 @@ pub struct AdxFilterParams {
     pub period: usize,
     #[serde(default = "default_threshold")]
     pub threshold: f64,
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "AdxFilter",
+        key: "adx",
+        name: "Trend strength (ADX)",
+        watches: "How strong the current trend is, from 0 to 100, whichever way it points. Above about 25 is a real trend; below it the price is mostly drifting sideways. Use it with a block that says which way.",
+        settings: vec![
+            Setting::int(
+                "period",
+                "Bars",
+                14,
+                "Fewer bars react sooner but jump around more.",
+            )
+            .at_least(2.0, "an ADX over fewer than 2 bars is only ever 0 or 100"),
+            Setting::float(
+                "threshold",
+                "Strong trend at",
+                25,
+                "Higher means only the strongest trends count.",
+            )
+            .between(0.0, 100.0, "an ADX only reads between 0 and 100"),
+        ],
+        ports: vec![
+            port("trending", "there's a strong trend (ADX at {threshold} or more)"),
+            port("ranging", "there's no strong trend (ADX below {threshold})"),
+        ],
+        series: vec![Series::panel(
+            "adx",
+            "Trend strength (ADX)",
+            vec![Level::Setting("threshold")],
+        )],
+        stop: None,
+    }
 }
 
 impl Signaler for AdxFilterParams {

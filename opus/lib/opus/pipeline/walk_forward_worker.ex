@@ -16,8 +16,11 @@ defmodule Opus.Pipeline.WalkForwardWorker do
   alias Opus.Auro.Client
   alias Opus.Pipeline.MonteCarloWorker
 
+  # Seconds between looks while the tester is down.
+  @tester_wait 60
+
   @impl Oban.Worker
-  @spec perform(Oban.Job.t()) :: :ok | {:error, term()}
+  @spec perform(Oban.Job.t()) :: :ok | {:snooze, pos_integer()} | {:error, term()}
   def perform(%Oban.Job{args: %{"config_id" => config_id}}) do
     Logger.info("[Pipeline] Running walk_forward for config #{config_id}")
 
@@ -35,6 +38,12 @@ defmodule Opus.Pipeline.WalkForwardWorker do
       {:ok, %{"status" => "failed", "failure_reason" => reason}} ->
         Logger.info("[Pipeline] Walk-forward failed for config #{config_id}: #{reason}")
         :ok
+
+      # The tester isn't running: wait for it rather than fail the
+      # strategy (a snooze doesn't use up the one attempt).
+      {:error, :tester_down} ->
+        Logger.warning("[Pipeline] Tester down; #{config_id} waits #{@tester_wait}s")
+        {:snooze, @tester_wait}
 
       {:error, reason} ->
         Logger.error(

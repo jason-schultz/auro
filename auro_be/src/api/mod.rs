@@ -23,21 +23,37 @@ use axum::Router;
 
 use crate::state::AppState;
 
-pub fn router() -> Router<AppState> {
+/// Every route belongs to exactly one of three groups, and these two
+/// functions are the only routers the binaries serve:
+///
+/// - `live_only`: trading and live state — orders, rules, positions, the
+///   price socket, broker calls, anything that reads the in-memory buffers.
+/// - `tester_only`: backtests, pipeline stages, reports, grids, the
+///   Together replay. Heavy CPU over years of bars; never on the live
+///   process, so testing can't starve the price stream (AGENTS.md).
+/// - `shared`: cheap read-only lookups either process may answer.
+///
+/// A new route goes into one of those three groups; there is nowhere else
+/// to add it. `tests/router_modes.rs` checks the split.
+pub fn live_router() -> Router<AppState> {
+    shared().merge(live_only())
+}
+
+/// See `live_router`.
+pub fn tester_router() -> Router<AppState> {
+    shared().merge(tester_only())
+}
+
+fn shared() -> Router<AppState> {
     Router::new()
-        .route(
-            "/api/debug/positions",
-            get(live_strategies::debug_positions),
-        )
-        .route("/api/debug/buffers", get(live_strategies::debug_buffers))
         .route("/api/health", get(health::health))
-        .route("/api/health/live", get(health::live_health))
-        .route("/api/account", get(account::get_account))
-        .route("/api/instruments", get(account::get_instruments))
-        .route("/api/instruments/enrich", post(instruments::enrich))
-        .route("/api/pricing", get(account::get_pricing))
         .route("/api/candles", get(candles::get_candles))
-        .route("/api/candles/backfill", post(candles::backfill))
+}
+
+fn tester_only() -> Router<AppState> {
+    Router::new()
+        // Strategy reads over its whole history (builder, strategy page,
+        // drift check, Together)
         .route(
             "/api/strategy/signal-preview",
             post(signal_preview::preview_signals),
@@ -51,16 +67,6 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/strategy/trades",
             post(strategy_report::backtest_trades),
-        )
-        .route("/api/open-trades", get(account::get_open_trades))
-        .route(
-            "/api/indicators/{instrument}/{granularity}",
-            get(indicators::get_indicators),
-        )
-        .route("/api/rules", post(rules::push_rules))
-        .route(
-            "/api/positions/{trade_id}",
-            delete(positions::remove_in_memory_position),
         )
         // Pipeline
         .route(
@@ -76,8 +82,37 @@ pub fn router() -> Router<AppState> {
             post(pipeline::run_pipeline_monte_carlo),
         )
         .route(
+            "/api/pipeline/parameter_stability",
+            post(pipeline::run_pipeline_parameter_stability),
+        )
+        .route(
             "/api/pipeline/holdout",
             post(pipeline::run_pipeline_holdout),
+        )
+}
+
+fn live_only() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/debug/positions",
+            get(live_strategies::debug_positions),
+        )
+        .route("/api/debug/buffers", get(live_strategies::debug_buffers))
+        .route("/api/health/live", get(health::live_health))
+        .route("/api/account", get(account::get_account))
+        .route("/api/instruments", get(account::get_instruments))
+        .route("/api/instruments/enrich", post(instruments::enrich))
+        .route("/api/pricing", get(account::get_pricing))
+        .route("/api/candles/backfill", post(candles::backfill))
+        .route("/api/open-trades", get(account::get_open_trades))
+        .route(
+            "/api/indicators/{instrument}/{granularity}",
+            get(indicators::get_indicators),
+        )
+        .route("/api/rules", post(rules::push_rules))
+        .route(
+            "/api/positions/{trade_id}",
+            delete(positions::remove_in_memory_position),
         )
         // Live strategies
         .route(

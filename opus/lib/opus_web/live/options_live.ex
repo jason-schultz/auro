@@ -32,6 +32,9 @@ defmodule OpusWeb.OptionsLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    # A scan that finishes while the page is open replaces the ideas.
+    if connected?(socket), do: Options.subscribe_ideas()
+
     {:ok,
      socket
      |> assign(
@@ -292,8 +295,21 @@ defmodule OpusWeb.OptionsLive do
 
   def handle_event("dismiss", %{"id" => id}, socket) do
     case Options.set_idea_status(id, "dismissed") do
-      {:ok, _} -> {:noreply, assign_ideas(socket)}
-      {:error, _} -> {:noreply, put_flash(socket, :error, "Could not update that idea.")}
+      {:ok, _} ->
+        {:noreply, assign_ideas(socket)}
+
+      {:error, :not_found} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :info,
+           "The scan ran again and replaced that list, so the idea wasn't dismissed. " <>
+             "The fresh list is showing now; dismiss it again if it is still there."
+         )
+         |> assign_ideas()}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not update that idea.")}
     end
   end
 
@@ -327,6 +343,9 @@ defmodule OpusWeb.OptionsLive do
       {:error, reason} -> {:noreply, assign(socket, error: describe(reason), busy: false)}
     end
   end
+
+  @impl true
+  def handle_info({:ideas_updated, _scanned_on}, socket), do: {:noreply, assign_ideas(socket)}
 
   # The contract tab picks from the stored chain when its underlying has
   # one: the expiry and strike come from the snapshot, and a newly picked
@@ -629,11 +648,11 @@ defmodule OpusWeb.OptionsLive do
 
   defp scan_line(scanned_on, ideas, chain) do
     copy_n(
-      "%{day} scan · %{count} idea · chains captured %{at} UTC",
-      "%{day} scan · %{count} ideas · chains captured %{at} UTC",
+      "%{day} scan · %{count} idea · chains captured %{at}",
+      "%{day} scan · %{count} ideas · chains captured %{at}",
       length(ideas),
       day: Calendar.strftime(scanned_on, "%b %-d"),
-      at: stamp(chain.captured_at)
+      at: "#{stamp(chain.captured_at)} #{zone_name(chain.captured_at)}"
     )
   end
 
@@ -656,7 +675,13 @@ defmodule OpusWeb.OptionsLive do
       end
       |> Enum.sort_by(&{&1.list != "dip_buy", &1.iv_rv || 99.0})
 
-    assigns = assign(assigns, shown: shown, live: live, dip_buy: dip_buy)
+    assigns =
+      assign(assigns,
+        shown: shown,
+        live: live,
+        dip_buy: dip_buy,
+        cheap_vol?: Enum.any?(assigns.ideas, &(&1.list == "cheap_vol"))
+      )
 
     ~H"""
     <section class={[
@@ -706,8 +731,16 @@ defmodule OpusWeb.OptionsLive do
       >
         {if @filter == "dip_buy",
           do:
-            "No index ETF closed with RSI(2) under 10 above its 100-day average, so no calls to suggest.",
+            "No index ETF closed the last session with RSI(2) under 10 above its 100-day average (or that day's bar wasn't in yet), so no calls to suggest.",
           else: "Nothing left in this list."}
+      </p>
+      <p
+        :if={@scanned_on && !@cheap_vol? && @filter != "dip_buy"}
+        class="border-t border-base-300 px-4 py-3 text-[13px] text-muted"
+      >
+        Nothing is cheap today: on every chain the at-the-money options are priced for at least as
+        much movement as the stock has actually had over the last 20 sessions. No options to buy on
+        volatility today.
       </p>
       <div :if={@shown != []} class="max-h-[300px] overflow-y-auto border-t border-base-300">
         <table class="w-full border-collapse text-[13px]">
@@ -753,7 +786,10 @@ defmodule OpusWeb.OptionsLive do
                       class="ml-1 rounded-full bg-error px-2 py-0.5 text-[11px] font-semibold text-error-content"
                     ><.t {copy("Lottery")} /></span>
                   </span>
-                  <span :if={idea.list == "dip_buy"} class="block text-[12px] text-muted">{idea.setup}</span>
+                  <span class="block text-[12px] text-muted">{idea.setup}</span>
+                  <span :if={idea.chain_at} class="block text-[12px] text-muted">
+                    Quotes from the {stamp(idea.chain_at, Opus.Clock.market_zone())} New York chain
+                  </span>
                 </button>
               </td>
               <td class="px-2 py-2 text-right">{num(idea.ask)}</td>
@@ -778,7 +814,7 @@ defmodule OpusWeb.OptionsLive do
         </table>
       </div>
       <p :if={@scanned_on} class="border-t border-base-300 px-4 py-2.5 text-[12px] text-muted">
-        <.t {copy("IV / RV over 1 means the market prices more movement than the stock has delivered. Lottery tickets are deltas under 0.15.")} />
+        <.t {copy("IV / RV under 1 means the market prices less movement than the stock has delivered; only those are listed. Dip-buy calls are limited to deltas of 0.30 to 0.70 with a spread within 10% of the mid.")} />
       </p>
     </section>
     """
@@ -1111,9 +1147,9 @@ defmodule OpusWeb.OptionsLive do
         />
       </div>
       <p :if={quote = picked_quote(@quotes.rows, @params)} class="mt-1 text-[12px] text-muted">
-        From the {stamp(quote.captured_at)} UTC snapshot: bid {money(quote.bid)}, ask {money(
-          quote.ask
-        )}.
+        From the {stamp(quote.captured_at)} {zone_name(quote.captured_at)} snapshot: bid {money(
+          quote.bid
+        )}, ask {money(quote.ask)}.
         The premium is the {if Options.side(@params["strategy"]) == :sell,
           do: "bid (what selling gets you)",
           else: "ask (what buying costs you)"}; type over it to try another price.
@@ -1331,12 +1367,16 @@ defmodule OpusWeb.OptionsLive do
         tone: if(seller?, do: :good, else: :bad),
         hint: if(seller?, do: "Paid to you today, yours to keep.", else: "Paid by you today.")
       },
-      %{
-        label: copy("Yield"),
-        value: "#{pct(a["yield_on_capital"])} · #{pct(a["annualized_yield"])}/yr",
-        tone: :good,
-        hint: "Premium over money set aside, then scaled to a year for comparing expiries."
-      },
+      # A yield only means something when money is set aside to earn the
+      # premium; on a bought option it would be the premium over itself.
+      if(seller?,
+        do: %{
+          label: copy("Yield"),
+          value: "#{pct(a["yield_on_capital"])} · #{pct(a["annualized_yield"])}/yr",
+          tone: :good,
+          hint: "Premium over money set aside, then scaled to a year for comparing expiries."
+        }
+      ),
       %{
         label: copy("Breakeven"),
         value: money(a["breakeven"]),
@@ -1365,10 +1405,29 @@ defmodule OpusWeb.OptionsLive do
         label: copy("Worst case"),
         value: "-#{money(a["max_loss"])}",
         tone: :bad,
-        hint: "If the stock goes to zero (or, for a long call, the premium)."
+        hint: worst_case_hint(a["strategy"])
       }
     ]
+    |> Enum.reject(&is_nil/1)
   end
+
+  defp worst_case_hint("cash_secured_put"),
+    do:
+      "If the stock goes to zero: you buy the shares at the strike and they are worth nothing, less the premium you kept."
+
+  defp worst_case_hint("covered_call"),
+    do:
+      "If the stock goes to zero: the shares you hold are worth nothing, less the premium you kept."
+
+  defp worst_case_hint("long_call"),
+    do:
+      "The premium you paid, if the stock ends at or below the strike and the call expires worthless."
+
+  defp worst_case_hint("long_put"),
+    do:
+      "The premium you paid, if the stock ends at or above the strike and the put expires worthless."
+
+  defp worst_case_hint(_strategy), do: "The most this position can lose by expiry."
 
   defp outcome_text("assigned"), do: "Assigned: shares change hands at the strike"
   defp outcome_text("expires_worthless"), do: "Expires worthless: you keep the premium"

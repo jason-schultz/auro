@@ -293,6 +293,71 @@ defmodule Opus.Trading.StrategiesTest do
       assert reason =~ "before Oct 28"
     end
 
+    test "an archived run is marked, and a trading instrument keeps its own results" do
+      [config] = Repo.all(StrategyConfig)
+      with :error <- Instruments.id_for("DE30_EUR"), do: Instruments.add("DE30_EUR", "index")
+
+      %StrategyConfig{}
+      |> StrategyConfig.changeset(%{
+        instrument: "DE30_EUR",
+        granularity: "D",
+        strategy_type: "composite",
+        parameters: Map.put(config.parameters, "instrument", "DE30_EUR")
+      })
+      |> Repo.insert!()
+
+      Repo.update_all(StrategyConfig, set: [archived_at: DateTime.utc_now()])
+
+      [dip_buy, _held] = Strategies.recipes()
+      [nas, _spx] = dip_buy.assignments
+
+      assert [%{instrument: "DE30_EUR", archived: true}] = dip_buy.runs
+      # NAS100 trades on the recipe; its own run shows though archived.
+      assert %{status: :passed, stats: %{"num_trades" => 118}} = nas.results.backtest
+    end
+
+    test "the nearby-settings test sits between Monte Carlo and the holdout, except for older runs" do
+      from(e in StrategyEvaluation, where: e.stage == "walk_forward")
+      |> Repo.update_all(set: [status: "passed", stats: %{"checks" => []}, failure_reason: nil])
+
+      [config_id] = Repo.all(from(c in StrategyConfig, select: c.id))
+
+      for stage <- ~w(monte_carlo holdout) do
+        Repo.insert!(%StrategyEvaluation{
+          strategy_config_id: config_id,
+          stage: stage,
+          status: "passed",
+          stats: %{"checks" => []}
+        })
+      end
+
+      ran_on = fn at -> Repo.update_all(StrategyConfig, set: [inserted_at: at]) end
+      nas = fn -> hd(hd(Strategies.recipes()).assignments) end
+
+      # Before it joined: it was never run, and the holdout followed Monte Carlo.
+      ran_on.(~U[2026-10-20 12:00:00.000000Z])
+      assert %{status: :not_run, reason: reason} = nas.().results.parameter_stability
+      assert reason =~ "joined the pipeline on Oct 30"
+      assert nas.().results.holdout.status == :passed
+
+      # After: a Monte Carlo pass means it's next, and the holdout waits on it.
+      ran_on.(~U[2026-11-02 12:00:00.000000Z])
+      from(e in StrategyEvaluation, where: e.stage == "holdout") |> Repo.delete_all()
+      assert nas.().results.parameter_stability.status == :pending
+      assert %{status: :not_run} = nas.().results.holdout
+
+      Repo.insert!(%StrategyEvaluation{
+        strategy_config_id: config_id,
+        stage: "parameter_stability",
+        status: "failed",
+        stats: %{"checks" => []},
+        failure_reason: "Moving period (t, MaFilter) from 200 to 201 dropped the Sharpe"
+      })
+
+      assert nas.().results.holdout.reason ==
+               "Skipped because the nearby-settings test failed."
+    end
+
     test "says what each test found, and why a test has no result" do
       [dip_buy, _held] = Strategies.recipes()
       [nas, spx] = dip_buy.assignments

@@ -12,7 +12,10 @@ defmodule Opus.Options.Paper.Structures do
   Both buy the whole structure back once it costs half the credit or less,
   or at 21 days to expiry whatever its value; one still open at expiry
   settles every leg at its intrinsic value in cash. A trade reserves its
-  maximum loss, and every leg must be fillable to open or close.
+  maximum loss. Every leg must be fillable to open (a bid, and a spread
+  within 10% of the mid). Closing is looser, as it is at a broker: a long
+  leg is sold at its bid, or for nothing when nobody bids on a wing that has
+  decayed, and a short leg is bought back at its ask, so it needs one.
   """
 
   alias Opus.Options.Paper.{Legs, Pick}
@@ -103,8 +106,8 @@ defmodule Opus.Options.Paper.Structures do
   @doc """
   The take-profit on its own, as the resting order a broker would hold:
   the whole trade bought back once it costs half the credit or less, with
-  every leg fillable. Checked by the daily rules and on every intraday
-  quote.
+  every leg quoted for a close. Checked by the daily rules and on every
+  intraday quote.
   """
   @spec take_profit(trade(), %{integer() => map()}) :: tuple()
   def take_profit(trade, quotes) do
@@ -117,13 +120,18 @@ defmodule Opus.Options.Paper.Structures do
     end
   end
 
-  # The price each leg closes at, or nil unless every leg is fillable.
+  # The price each leg closes at, or nil unless every leg has one.
   defp fills(trade, quotes) do
-    quoted = Enum.map(trade.legs, &{&1, Map.get(quotes, &1.contract_id)})
-
-    if Enum.all?(quoted, fn {_leg, quote} -> Pick.fillable?(quote) end),
-      do: Enum.map(quoted, fn {leg, quote} -> {leg, Legs.close_price(leg, quote)} end)
+    fills = Enum.map(trade.legs, &{&1, close_fill(&1, Map.get(quotes, &1.contract_id))})
+    if Enum.all?(fills, fn {_leg, price} -> is_number(price) end), do: fills
   end
+
+  # A short leg is bought back at the ask; a long leg sold at the bid, or
+  # for nothing when the quote has no bid. No quote at all is no price.
+  defp close_fill(%{side: "short"}, %{ask: ask}) when is_number(ask) and ask > 0, do: ask
+  defp close_fill(%{side: "long"}, %{bid: bid}) when is_number(bid) and bid > 0, do: bid
+  defp close_fill(%{side: "long"}, %{} = _quote), do: 0.0
+  defp close_fill(_leg, _quote), do: nil
 
   @doc """
   Tonight's actions for one underlying: manage the open trade, then, with

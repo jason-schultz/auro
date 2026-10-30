@@ -30,11 +30,6 @@ defmodule Opus.Options.Paper.Legs do
   def open_price("short", quote), do: quote.bid
   def open_price("long", quote), do: quote.ask
 
-  @doc "The price a leg closes at from its quote: the ask to buy back a short, the bid to sell a long."
-  @spec close_price(map(), map()) :: float()
-  def close_price(%{side: "short"}, quote), do: quote.ask
-  def close_price(%{side: "long"}, quote), do: quote.bid
-
   @doc """
   A closed leg's P&L: what it opened and closed (or settled) at, less its
   commission. Nil for a leg still open.

@@ -21,6 +21,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{
+    port, Block, Level, Series, Setting, RSI_LEVEL_WHY, RSI_WHY, SPREAD_WHY,
+};
 use crate::engine::indicators::{self, rsi, z_score};
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -41,6 +44,79 @@ pub struct MeanReversionParams {
     /// Long stops when Z ≤ -stop_z_threshold; Short stops when Z ≥ +stop_z_threshold.
     /// Default 3.5.
     pub stop_z_threshold: f64,
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "MeanReversion",
+        key: "mr",
+        name: "Stretch from average",
+        watches: "How far the price has strayed from its average, measured in its normal wobble (standard deviations), with RSI as a second opinion. Prices that stray far often snap back.",
+        settings: vec![
+            Setting::int(
+                "ma_period",
+                "Average over (bars)",
+                20,
+                "The average the stretch is measured from.",
+            )
+            .at_least(2.0, SPREAD_WHY),
+            Setting::float(
+                "entry_z_threshold",
+                "Stretch to enter",
+                2.0,
+                "In normal wobbles. Higher means only bigger stretches count.",
+            ),
+            Setting::float(
+                "stop_z_threshold",
+                "Stretch to give up",
+                3.0,
+                "If it stretches this far instead of snapping back, the trade closes.",
+            ),
+            Setting::int(
+                "rsi_period",
+                "RSI bars",
+                14,
+                "The bars RSI looks at for its second opinion.",
+            )
+            .at_least(2.0, RSI_WHY),
+            Setting::float(
+                "rsi_oversold",
+                "RSI oversold",
+                30,
+                "RSI has to be below this to buy.",
+            )
+            .between(0.0, 100.0, RSI_LEVEL_WHY),
+            Setting::float(
+                "rsi_overbought",
+                "RSI overbought",
+                70,
+                "RSI has to be above this to sell short.",
+            )
+            .between(0.0, 100.0, RSI_LEVEL_WHY),
+        ],
+        ports: vec![
+            port("long", "the price is more than {entry_z_threshold} standard deviations below its average over {ma_period:bars} and RSI({rsi_period}) is below {rsi_oversold}"),
+            port("short", "the price is more than {entry_z_threshold} standard deviations above its average over {ma_period:bars} and RSI({rsi_period}) is above {rsi_overbought}"),
+            port("exit_long", "the price is back up to its average over {ma_period:bars}, or falls more than {stop_z_threshold} standard deviations below it"),
+            port("exit_short", "the price is back down to its average over {ma_period:bars}, or rises more than {stop_z_threshold} standard deviations above it"),
+        ],
+        series: vec![
+            Series::price("ma", "Average"),
+            Series::panel(
+                "z",
+                "Stretch (normal wobbles)",
+                vec![
+                    Level::Neg { neg: "stop_z_threshold" },
+                    Level::Neg { neg: "entry_z_threshold" },
+                    Level::At(0.0),
+                    Level::Setting("entry_z_threshold"),
+                    Level::Setting("stop_z_threshold"),
+                ],
+            ),
+        ],
+        stop: Some("{stop_z_threshold} standard deviations past the average"),
+    }
 }
 
 impl Signaler for MeanReversionParams {

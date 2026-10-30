@@ -1,16 +1,27 @@
 use chrono::NaiveDate;
 use sqlx::PgPool;
 
-use crate::engine::financing::FinancingModel;
+use crate::engine::financing::{FinancingModel, PolicyRates};
+
+/// Every policy-rate change point, as (currency, effective date, rate).
+async fn policy_rows(pool: &PgPool) -> Result<Vec<(String, NaiveDate, f64)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT currency, effective_date, rate FROM policy_rates ORDER BY currency, effective_date",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// The policy rates alone, for the live evaluator's `Carry` blocks (the
+/// backtest gets the same rows through `load_model`).
+pub async fn load_policy_rates(pool: &PgPool) -> Result<PolicyRates, sqlx::Error> {
+    Ok(PolicyRates::new(policy_rows(pool).await?))
+}
 
 /// The full financing model: every policy-rate change point and every
 /// recorded OANDA rate. Small (hundreds of rows), loaded once per backtest.
 pub async fn load_model(pool: &PgPool) -> Result<FinancingModel, sqlx::Error> {
-    let policy: Vec<(String, NaiveDate, f64)> = sqlx::query_as(
-        "SELECT currency, effective_date, rate FROM policy_rates ORDER BY currency, effective_date",
-    )
-    .fetch_all(pool)
-    .await?;
+    let policy = policy_rows(pool).await?;
 
     let recorded: Vec<(String, NaiveDate, f64, f64)> = sqlx::query_as(
         "SELECT instrument, as_of, long_rate, short_rate FROM instrument_financing \

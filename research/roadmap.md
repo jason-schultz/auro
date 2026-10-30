@@ -17,10 +17,28 @@ engine failure handling, Opus jobs) are done and fixed. Two rounds remain:
   secrets and token rotation, database backups, restart behaviour, launchd and
   release builds, what changes for real money.
 
+All four rounds ran Oct 28–30; round 4's fixes ride on the services move and
+Postgres leaving Docker. Re-running them: [`audit_checklist.md`](audit_checklist.md).
+
 Loose ends meanwhile:
 - Re-test the three index dip-buy assignments: their passes predate the Friday
   stub-bar fix, and EU50 already fails today's walk-forward bar while enabled.
 - A nightly `pg_dump` backup, ahead of round 4.
+
+## 1b. Track Wealthsimple holdings like any other security
+
+Built Oct 30 (re-priced every 15 minutes in the session; intraday and daily
+bars nightly; Questrade quotes HODL.CN fine). Still open: account linking moves
+from `auro_fe` to Opus. Every security held on Wealthsimple is tracked even
+though it can't be traded by algorithm: a row in the instruments table, regular
+Questrade quotes, shown on the same pages as everything else.
+
+- The tracked list follows the holdings: a new position starts tracking, a sold
+  one stops. No hand-kept list.
+- Check that Questrade's API quotes Canadian Securities Exchange listings
+  (HODL.CN); TSX and TSX Venture (FLT.TO, PNG.VN) should be fine.
+- Wealthsimple account linking lives only in `auro_fe` today; it moves to Opus
+  as part of this (see Parked: deprecate `auro_fe`).
 
 ## 2. More strategies through the gates
 
@@ -31,6 +49,51 @@ testing many variants (deflated Sharpe), a parameter-stability check, rotating
 out-of-sample periods. Keep the old pipeline history (`strategy_configs`,
 `strategy_evaluations`): the count of everything tried is what keeps those
 penalties honest.
+
+### Portfolio backtests (soon, the user's priority, Oct 30)
+
+The pipeline tests one market at a time. Several well-documented ideas only
+work as a portfolio, so a per-market test can't judge them fairly. Fresh ideas
+round 1–2 (Oct 30) hit this twice:
+- **Time-series momentum** (Moskowitz, Ooi & Pedersen 2012): the result comes
+  from holding every market at once, each sized to the same risk (volatility
+  scaling). One market at a time it failed everywhere, a weak verdict.
+- **FX carry** (Lustig, Roussanov & Verdelhan 2011): the papers sort currencies
+  by interest rate and hold the top against the bottom. Single pairs mostly
+  lost, also weak.
+
+Needed:
+- A backtest over a basket: positions in several markets at once, rebalanced on
+  a schedule (monthly), each sized by its recent volatility, with OANDA
+  financing on every holding. One account curve for the whole basket.
+- Cross-market blocks: rank markets by a signal (carry, 12-month return) and
+  take the top and bottom.
+- The gates judge the basket's curve: same backtest, walk-forward, luck check
+  and Monte Carlo standards. Its tries count against its own family.
+- Missing data for carry: MXN, ZAR and HKD pairs have no candles (inactive).
+- Then re-run momentum and carry the way the papers describe them.
+
+### Next, after time rules + baskets land (agreed Oct 30)
+
+1. **Count settings changes as tries.** The luck check counts markets, not
+   settings tweaks in the builder, so heavy builder use quietly weakens every
+   pass. Count distinct settings per recipe family too.
+2. **One place to add a block.** BUILT Oct 30. Each Rust block declares its
+   catalog entry next to its code (`catalog()`: name, what it watches,
+   settings with defaults, ranges and why, ports with their plain words,
+   drawn values, own-stop words); `engine/catalog.rs` lists them and
+   `setting_range` reads from it. A test writes `opus/priv/block_catalog.json`
+   and fails when it's stale; Opus compiles it into the builder
+   (`Blocks`) and the plain-words rules (`StrategyWords`). To add a block:
+   write it with its `catalog()`, add its `Component` variant and its line in
+   `catalog::blocks()`, run `UPDATE_CATALOG=1 cargo test catalog`, then put
+   its type in a group in `Opus.Trading.Blocks` (a test fails until you do).
+3. **The tester runs on its own.** BUILT Oct 30. Backtests, pipeline stages,
+   reports, the sensitivity grid and the Together replay run in a second
+   binary, `auro-tester` (port 3001, `AURO_TESTER_URL` in Opus); the live
+   engine no longer serves them (`api::live_router` / `api::tester_router`,
+   checked by `auro_be/tests/router_modes.rs`). Hard rule from now on:
+   testing never slows down live trading.
 
 ## 3. One signal, several actions (Phase 3 of `strategy_assignments_plan.md`)
 
@@ -98,6 +161,14 @@ A Settings → Integrations page where broker and data keys are entered once.
 - Base URLs and practice-vs-live come from the integration type, never typed in,
   so practice settings can't be pointed at real money by accident.
 - The Questrade refresh token already lives in the database: the precedent.
+- Rule of thumb: `.env` holds what rarely or never changes (database URL, the
+  master key). Anything a user may change (broker keys, tokens, preferences)
+  lives in user settings in the database and applies without a restart.
+- **Time zone** belongs here too. Today it's one install-wide setting
+  (`display_zone` in Opus config). Later: picked up automatically from the
+  browser when a page opens, with a per-user override in settings (e.g. show
+  everything in New York time). The automatic part needs no logins and could
+  come first, falling back to `display_zone`.
 
 ## 6. Broker router in Rust
 
@@ -150,3 +221,8 @@ securities regulation for trading on others' behalf: check before going there.
   done, an OANDA live account (or another broker), a staged start at tiny size
   with a hard daily loss cap, and an account big enough for the strategy's
   minimum size at 1% risk.
+
+### Follow-ups from the Oct 30 sweep
+- Monte Carlo still resamples whole trades, so its worst-drop figure misses drops inside long trades (now inconsistent with the backtest). Fix: resample blocks of the daily-valued account returns.
+- Daily Sharpe and correlations for single markets and Together are still booked on the day a trade closes.
+- A ranked basket's walk-forward unseen half restarts the warm-up, so a 12-month ranking needs ~10 years of history.

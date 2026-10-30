@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::engine::parallel;
 use crate::engine::pipeline::{
     self, backtest_stats_to_json, evaluate_thresholds, instrument_to_class, run_strategy, t_stat,
     StrategyConfig,
@@ -157,8 +158,11 @@ pub async fn sensitivity(
             };
             match run_strategy(&candles, &cell_config, &financing) {
                 Ok(trades) => {
-                    let (from, to) = pipeline::span(&candles);
-                    let stats = calculate_backtest_stats(&trades, from, to);
+                    let sizing = match pipeline::account_sizing(&cell_config) {
+                        Ok(sizing) => sizing,
+                        Err(e) => return json!({ "x": x, "y": y, "error": e.to_string() }),
+                    };
+                    let stats = calculate_backtest_stats(&trades, &candles, sizing);
                     let mut stats_json = backtest_stats_to_json(&stats);
                     let (status, _) = evaluate_thresholds(
                         &mut stats_json,
@@ -179,28 +183,15 @@ pub async fn sensitivity(
             }
         };
 
-        // Split over a few threads (not all cores, so the live feed keeps
-        // headroom), keeping the cells in order.
-        let per_thread = settings.len().div_ceil(WORKERS).max(1);
-        let cells: Vec<Value> = std::thread::scope(|scope| {
-            settings
-                .chunks(per_thread)
-                .map(|chunk| scope.spawn(|| chunk.iter().map(&judge).collect::<Vec<_>>()))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .zip(settings.chunks(per_thread))
-                .flat_map(|(handle, chunk)| {
-                    // A worker that panicked loses its chunk; its cells are
-                    // reported as errors rather than silently missing.
-                    handle.join().unwrap_or_else(|_| {
-                        chunk
-                            .iter()
-                            .map(|(x, y, _)| json!({ "x": x, "y": y, "error": "crashed" }))
-                            .collect()
-                    })
-                })
-                .collect()
-        });
+        // Over a few threads (not all cores, so the live feed keeps
+        // headroom), keeping the cells in order. A crashed cell is
+        // reported as an error rather than silently missing.
+        let cells: Vec<Value> = parallel::map(
+            &settings,
+            WORKERS,
+            judge,
+            |(x, y, _)| json!({ "x": x, "y": y, "error": "crashed" }),
+        );
         Ok(cells)
     })
     .await?;

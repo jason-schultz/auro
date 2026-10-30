@@ -1,12 +1,13 @@
 # Running Auro locally as services
 
-The Rust engine and Opus run as per-user launchd agents rather than in terminals.
+The Rust engine, its tester and Opus run as per-user launchd agents rather than in terminals.
 They start at login, restart after a crash, and are deployed by hand when you
 choose. Nothing here deploys automatically.
 
 | File | What it is |
 |---|---|
-| `com.auro.engine.plist` | Rust engine: the release binary, run from `auro_be/` |
+| `com.auro.engine.plist` | Rust engine (live trading): the release binary `auro`, run from `auro_be/` |
+| `com.auro.tester.plist` | Rust tester (backtests, pipeline, reports, Together): the release binary `auro-tester`, port 3001 |
 | `com.auro.opus.plist` | Opus: the prod release, started through `bin/opus-start` |
 | `bin/opus-start` | Loads `opus.env` and execs the release in the foreground |
 | `opus.env.example` | Template for `opus.env` (git-ignored, holds the secrets) |
@@ -37,16 +38,18 @@ $EDITOR running_local/opus.env         # OANDA_ACCOUNT_ID, OANDA_API_KEY
 Build both services. This is also the deploy step later:
 
 ```sh
-(cd auro_be && cargo build --release)
+(cd auro_be && cargo build --release)    # builds both auro and auro-tester
 (cd opus && MIX_ENV=prod mix do deps.get --only prod, compile, assets.deploy, release --overwrite)
 ```
 
-Stop the terminal copies first. Only one Auro instance may run. Then load the
+Stop the terminal copies first. Only one copy of each (engine, tester) may run. Then load the
 agents:
 
 ```sh
-cp running_local/com.auro.engine.plist running_local/com.auro.opus.plist ~/Library/LaunchAgents/
+cp running_local/com.auro.engine.plist running_local/com.auro.tester.plist \
+   running_local/com.auro.opus.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.auro.engine.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.auro.tester.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.auro.opus.plist
 ```
 
@@ -55,10 +58,11 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.auro.opus.plist
 | Task | Command |
 |---|---|
 | Status | `launchctl print gui/$(id -u)/com.auro.engine \| grep -E 'state\|pid\|last exit'` |
-| Restart after a deploy | `launchctl kickstart -k gui/$(id -u)/com.auro.engine` (and `com.auro.opus`) |
+| Restart after a deploy | `launchctl kickstart -k gui/$(id -u)/com.auro.engine` (and `com.auro.tester`, `com.auro.opus`) |
 | Stop (stays stopped) | `launchctl bootout gui/$(id -u)/com.auro.engine` |
 | Start again | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.auro.engine.plist` |
-| Engine logs | `auro_be/logs/` (unchanged); panics in `~/Library/Logs/auro/engine.stderr.log` |
+| Engine logs | `auro_be/logs/auro.*`; panics in `~/Library/Logs/auro/engine.stderr.log` |
+| Tester logs | `auro_be/logs/auro-tester.*`; panics in `~/Library/Logs/auro/tester.stderr.log` |
 | Opus logs | `~/Library/Logs/auro/opus.log` |
 
 Deploying is: build (above), run any pending migrations yourself
@@ -72,6 +76,8 @@ plist again, run `bootout`, then `bootstrap`.
 
 - **Engine:** restarts only after a crash, at most once every 10 minutes, so a crash
   loop can't burn through Questrade tokens. A deliberate stop stays stopped.
+- **Tester:** restarts after a crash, at most once a minute (it spends no
+  Questrade token). While it is down, testing pages say so and pipeline jobs wait.
 - **Opus:** restarts after a crash, at most once a minute.
 - **Login:** both start when you log in. If Postgres isn't up yet, the engine exits
   non-zero and retries 10 minutes later. Start Postgres with `brew services` so it

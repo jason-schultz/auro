@@ -6,8 +6,13 @@ defmodule Opus.Pipeline.Coordinator do
 
       submit_config/1
         → inserts a strategy_configs row
-        → BacktestWorker → WalkForwardWorker → MonteCarloWorker → HoldoutWorker
+        → BacktestWorker → WalkForwardWorker → MonteCarloWorker
+          → ParameterStabilityWorker → HoldoutWorker
         → any failing stage is terminal; a holdout pass promotes to live_strategies (disabled)
+
+  Walk-forward also checks the deflated Sharpe (the backtest's Sharpe against
+  the best of every try of the same idea); parameter stability re-runs the
+  backtest with each numeric setting moved one step either way.
 
   Research and parameter selection happen outside Opus (auro_research); only
   the finished rule comes here to be validated and promoted.
@@ -33,7 +38,8 @@ defmodule Opus.Pipeline.Coordinator do
           status: String.t() | nil,
           stats: map() | nil,
           failure_reason: String.t() | nil,
-          evaluated_at: DateTime.t() | nil
+          evaluated_at: DateTime.t() | nil,
+          archived: boolean()
         }
 
   @doc """
@@ -83,13 +89,19 @@ defmodule Opus.Pipeline.Coordinator do
 
   Idempotent: if the (instrument, strategy_type, parameters) combination already
   exists, Rust answers 409 and {:ok, :already_promoted} is returned.
+
+  A basket (several markets tested as one account, `parameters["basket"]`)
+  is refused with `{:error, :basket}`: baskets are tested, not traded live.
   """
   @spec promote_to_live(String.t()) ::
-          {:ok, :promoted | :already_promoted} | {:error, :not_found | term()}
+          {:ok, :promoted | :already_promoted} | {:error, :not_found | :basket | term()}
   def promote_to_live(config_id) do
     case Repo.get(StrategyConfig, config_id) do
       nil ->
         {:error, :not_found}
+
+      %StrategyConfig{parameters: %{"basket" => _}} ->
+        {:error, :basket}
 
       config ->
         case Auro.create_live_strategy(%{
@@ -121,15 +133,18 @@ defmodule Opus.Pipeline.Coordinator do
   end
 
   @doc """
-  List all configs and their current evaluation status across all stages.
-  Returns a list of maps with config + evaluation rows joined.
+  List configs and their current evaluation status across all stages.
+  Returns a list of maps with config + evaluation rows joined. Configs
+  archived as tried before the block builder are left out unless
+  `include_archived` is true.
   """
-  @spec list_pipeline_status() :: [pipeline_status_row()]
-  def list_pipeline_status do
+  @spec list_pipeline_status(boolean()) :: [pipeline_status_row()]
+  def list_pipeline_status(include_archived \\ false) do
     query =
       from(c in StrategyConfig,
         left_join: e in StrategyEvaluation,
         on: e.strategy_config_id == c.id,
+        where: ^include_archived or is_nil(c.archived_at),
         order_by: [desc: c.inserted_at, asc: e.stage],
         select: %{
           config_id: c.id,
@@ -143,10 +158,18 @@ defmodule Opus.Pipeline.Coordinator do
           status: e.status,
           stats: e.stats,
           failure_reason: e.failure_reason,
-          evaluated_at: e.evaluated_at
+          evaluated_at: e.evaluated_at,
+          archived: not is_nil(c.archived_at)
         }
       )
 
     Repo.all(query)
+  end
+
+  @doc "How many configs are archived as tried before the block builder."
+  @spec count_archived() :: non_neg_integer()
+  def count_archived do
+    from(c in StrategyConfig, where: not is_nil(c.archived_at), select: count(c.id))
+    |> Repo.one()
   end
 end

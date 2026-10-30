@@ -2,7 +2,7 @@ defmodule OpusWeb.PayoffChart do
   @moduledoc """
   The payoff chart for one option position: P&L against the underlying's
   price at expiry (the hockey stick), halfway there and today, with the
-  strike, breakeven and spot marked and the expected one-standard-deviation
+  strike, every breakeven and spot marked and the expected one-standard-deviation
   move shaded. Drawn from the curves the engine's scenario analysis returns.
   """
   use Phoenix.Component
@@ -167,11 +167,16 @@ defmodule OpusWeb.PayoffChart do
       y_ticks:
         for(q <- [0.08, 0.5, 0.92], v = y_hi - y_span * q, do: %{y: y.(v), text: money(v)}),
       markers:
-        [
-          {analysis["strike"], "Strike", "var(--color-accent)", size.font + 3},
-          {analysis["breakeven"], "Breakeven", "var(--color-neutral-content)", 2 * size.font + 8},
-          {spot, "Now", "var(--color-primary)", 3 * size.font + 13}
-        ]
+        Enum.concat([
+          [{analysis["strike"], "Strike", "var(--color-accent)", size.font + 3}],
+          # Every break-even a structure has (an iron condor has two), on
+          # one row; a single leg sends only `breakeven`.
+          for(
+            b <- breakevens(analysis),
+            do: {b, "Breakeven", "var(--color-neutral-content)", 2 * size.font + 8}
+          ),
+          [{spot, "Now", "var(--color-primary)", 3 * size.font + 13}]
+        ])
         |> Enum.reject(fn {p, _, _, _} -> is_nil(p) or p < x_lo or p > x_hi end)
         |> Enum.map(fn {p, name, color, text_y} ->
           %{x: x.(p), color: color, text_y: text_y, text: "#{name} #{price(p)}"}
@@ -184,6 +189,9 @@ defmodule OpusWeb.PayoffChart do
       x_max: price(x_hi)
     }
   end
+
+  defp breakevens(%{"breakevens" => [_ | _] = breakevens}), do: breakevens
+  defp breakevens(analysis), do: [analysis["breakeven"]]
 
   # Keep only the points within ±window of the spot (all of them when nil).
   defp window(points, _spot, nil), do: points

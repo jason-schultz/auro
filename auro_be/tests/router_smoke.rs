@@ -1,4 +1,5 @@
 #[test]
-fn router_builds_from_library_target() {
-    let _ = auro::api::router();
+fn routers_build_from_library_target() {
+    let _ = auro::api::live_router();
+    let _ = auro::api::tester_router();
 }

@@ -32,8 +32,9 @@ config :logger, level: :warning
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime
 
-# A closed port: anything that talks to the Rust engine fails fast in tests.
-config :opus, auro_base_url: "http://127.0.0.1:3999"
+# Closed ports: anything that talks to the Rust engine (live or tester) fails
+# fast in tests.
+config :opus, auro_base_url: "http://127.0.0.1:3999", auro_tester_url: "http://127.0.0.1:3998"
 
 config :opus, Oban, testing: :manual
 config :opus, start_scheduled_workers: false

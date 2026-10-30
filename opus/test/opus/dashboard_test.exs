@@ -41,8 +41,18 @@ defmodule Opus.DashboardTest do
     assert failed.detail == "(RuntimeError) boom"
     assert failed.clear_worker == "Opus.MarketData.OptionsChainWorker"
 
-    # Clearing removes the recent failure; the alert goes with it.
+    # Clearing marks the recent failure cleared; the alert goes with it, the
+    # job and its error stay in the history, and a second clear finds nothing.
     assert Dashboard.clear_failed_jobs("Opus.MarketData.OptionsChainWorker", now) == 1
+    assert Dashboard.clear_failed_jobs("Opus.MarketData.OptionsChainWorker", now) == 0
+
+    assert [%{"cleared_at" => _}] =
+             Repo.all(
+               from(j in "oban_jobs",
+                 where: j.worker == "Opus.MarketData.OptionsChainWorker",
+                 select: j.meta
+               )
+             )
 
     titles =
       now

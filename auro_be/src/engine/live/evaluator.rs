@@ -5,7 +5,10 @@ use crate::brokers::oanda::client::OandaClient;
 use crate::db::repositories::live_trades::{
     self as live_trades_repo, ClosedLiveTrade, NewLiveTrade,
 };
-use crate::db::repositories::{live_queries, live_strategies as live_strategies_repo};
+use crate::db::repositories::{
+    financing as financing_repo, live_queries, live_strategies as live_strategies_repo,
+};
+use crate::engine::financing::PolicyRates;
 use crate::engine::indicators;
 use crate::engine::rules::{entry_gate_report, Rules};
 use crate::engine::strategy::{
@@ -214,6 +217,9 @@ pub(crate) async fn evaluate_strategies(
     .await?;
 
     let mut reports: Vec<SignalReport> = Vec::new();
+    // Policy rates for `Carry` blocks, read once per pass and only when a
+    // strategy here has one: the same table the backtest reads.
+    let mut policy_rates: Option<Arc<PolicyRates>> = None;
 
     for strategy in &strategies {
         // All live strategies use the composite shape. `strategy_type` is a
@@ -222,7 +228,7 @@ pub(crate) async fn evaluate_strategies(
             .values()
             .any(|p| p.strategy_id == strategy.id);
 
-        let composite: Strategy = match serde_json::from_value(strategy.parameters.clone()) {
+        let mut composite: Strategy = match serde_json::from_value(strategy.parameters.clone()) {
             Ok(s) => s,
             // A strategy that holds a trade and can't be read can't run its
             // exits: only its OANDA stop protects it now, so say so loudly.
@@ -245,6 +251,33 @@ pub(crate) async fn evaluate_strategies(
                 continue;
             }
         };
+
+        // A Carry block without its rates can't compute: no entries and no
+        // signal exits, while the time stop and the OANDA stop still apply.
+        if composite.needs_policy_rates() {
+            if policy_rates.is_none() {
+                match financing_repo::load_policy_rates(&state.db).await {
+                    Ok(rates) => policy_rates = Some(Arc::new(rates)),
+                    Err(e) => tracing::error!(
+                        "[CARRY] policy rates unreadable for {} {}: {}",
+                        strategy.instrument,
+                        strategy.granularity,
+                        e
+                    ),
+                }
+            }
+            if let Some(rates) = &policy_rates {
+                if let Err(e) = composite.attach_policy_rates(rates) {
+                    tracing::warn!(
+                        "[CARRY] {} {} strategy {} can't compute its carry: {}",
+                        strategy.instrument,
+                        strategy.granularity,
+                        strategy.id,
+                        e
+                    );
+                }
+            }
+        }
 
         // One strategy's failure (a DB blip, a failed order) is logged and
         // the others still run; the pass never aborts halfway.
@@ -325,7 +358,7 @@ async fn evaluate_entry(
         candles.len(),
     );
 
-    let direction = match composite.evaluate_entry(&ports) {
+    let direction = match composite.evaluate_entry(candles, &ports) {
         EntrySignal::Long => Direction::Long,
         EntrySignal::Short => Direction::Short,
         EntrySignal::None => return Ok(None),
@@ -904,7 +937,7 @@ async fn evaluate_exit(
     let ports = composite.compute_ports(&buffer.candles);
     let signal_exit = ports.as_ref().is_some_and(|ports| {
         matches!(
-            composite.evaluate_exit(ports, first.direction == Direction::Long),
+            composite.evaluate_exit(&buffer.candles, ports, first.direction == Direction::Long),
             ExitSignal::Exit
         )
     });

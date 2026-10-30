@@ -26,8 +26,12 @@ defmodule Opus.MarketData.EventWindowSyncWorker do
     with {:ok, calendars} <- load_calendars() do
       now = DateTime.utc_now()
 
+      # Each row is read again just before its update: the PUT sends the
+      # whole parameter map, so an edit saved while earlier strategies were
+      # being pushed must not be overwritten with a stale copy.
       failures =
-        for s <- Repo.all(from(s in LiveStrategy)),
+        for id <- Repo.all(from(s in LiveStrategy, select: s.id, order_by: s.id)),
+            %LiveStrategy{} = s <- [Repo.get(LiveStrategy, id)],
             {:changed, params} <- [refresh_parameters(s.parameters, calendars, now)],
             result =
               Client.update_live_strategy(s.id, %{

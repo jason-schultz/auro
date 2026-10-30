@@ -15,7 +15,9 @@ pub fn test_state() -> AppState {
         .expect("lazy pool should build");
 
     let config = Config {
+        mode: auro::config::Mode::Live,
         database_url: "postgres://test:test@localhost/test".to_string(),
+        db_pool_size: 1,
         oanda_api_key: "test-key".to_string(),
         oanda_account_id: "test-account".to_string(),
         oanda_base_url: "http://localhost:9999".to_string(),

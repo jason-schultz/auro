@@ -11,6 +11,7 @@ use crate::brokers::questrade::client::QuestradeClient;
 use crate::brokers::questrade::identity;
 use crate::brokers::questrade::models::{EquityCandle, OptionQuote, QuoteResult, SymbolDetail};
 use crate::brokers::questrade::options::{select_contracts, SelectedContract};
+use crate::brokers::stock_bar_final_at;
 use crate::db::repositories::candles as candles_repo;
 use crate::db::repositories::instruments as instruments_repo;
 use crate::db::repositories::options::{
@@ -107,9 +108,8 @@ pub struct SymbolsQuery {
 }
 
 /// Tickers resolved to Questrade symbol IDs, plus the ones that failed.
-/// `requested` is kept alongside each ID because `search_symbol` falls back to
-/// the first search hit when there's no exact match — callers compare it with
-/// the `symbol` Questrade returns.
+/// `requested` is kept alongside each ID so each result can be labelled with
+/// the ticker the caller asked for.
 struct Resolved {
     ids: Vec<(String, i64)>,
     unresolved: Vec<String>,
@@ -243,9 +243,15 @@ pub async fn get_symbols(
     }))
 }
 
-/// Longest window one persist call may re-fetch; Questrade's intraday
-/// retention is ~3 months, so anything older returns nothing anyway.
-const MAX_PERSIST_DAYS: i64 = 120;
+/// Longest window one persist call may re-fetch. Questrade's intraday
+/// retention is ~3 months, so anything older returns nothing anyway; daily
+/// bars go back years and a 100-day average needs ~150 calendar days.
+fn max_persist_days(granularity: Granularity) -> i64 {
+    match granularity {
+        Granularity::D => 730,
+        _ => 120,
+    }
+}
 
 fn default_persist_days() -> i64 {
     5
@@ -286,9 +292,10 @@ pub async fn persist_candles(
         return Err(AppError::Internal("Questrade not configured".into()));
     };
     let granularity: Granularity = body.granularity.parse().map_err(AppError::BadRequest)?;
-    if !(1..=MAX_PERSIST_DAYS).contains(&body.days) {
+    let max_days = max_persist_days(granularity);
+    if !(1..=max_days).contains(&body.days) {
         return Err(AppError::BadRequest(format!(
-            "days must be in 1..={MAX_PERSIST_DAYS}, got {}",
+            "days must be in 1..={max_days}, got {}",
             body.days
         )));
     }
@@ -315,13 +322,12 @@ pub async fn persist_candles(
 
     // Only bars that have fully closed: a run during the session must not
     // store a still-forming bar that the next run would see differently.
-    let bar = Duration::minutes(granularity.minutes());
     let rows: Vec<CandleRow> = raw
         .iter()
         .map(Candle::try_from)
         .collect::<AppResult<Vec<_>>>()?
         .into_iter()
-        .filter(|c| c.time + bar <= now)
+        .filter(|c| stock_bar_final_at(c.time, granularity) <= now)
         .map(|candle| CandleRow {
             instrument: symbol.clone(),
             granularity,
@@ -561,7 +567,7 @@ fn match_contracts(
 
 /// Join the quotes back to the contracts they were requested for, by the
 /// ids the upsert handed back. A contract Questrade returned no quote for
-/// is left out, not stored empty.
+/// is left out, not stored empty; a quote that can't be joined is logged.
 fn quote_rows(
     selected: &[SelectedContract],
     stored: &[StoredContract],
@@ -578,8 +584,17 @@ fn quote_rows(
     quotes
         .iter()
         .filter_map(|q| {
-            let ticker = tickers.get(&q.symbol_id)?;
-            let contract_id = *ids.get(ticker)?;
+            let Some(ticker) = tickers.get(&q.symbol_id) else {
+                tracing::warn!(
+                    "Questrade quoted option id {} that wasn't requested; dropped",
+                    q.symbol_id
+                );
+                return None;
+            };
+            let Some(&contract_id) = ids.get(ticker) else {
+                tracing::warn!("No stored contract for {ticker}; its quote is dropped");
+                return None;
+            };
             Some(OptionQuoteRow {
                 contract_id,
                 ticker: ticker.to_string(),

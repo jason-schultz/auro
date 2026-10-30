@@ -60,7 +60,7 @@ defmodule Opus.ResearchTest do
 
   test "reaching a verdict dates an undated entry, and keeps an existing date" do
     {:ok, worked} = entry!(%{}) |> Research.set_status("worked")
-    assert worked.decided_on == Date.utc_today()
+    assert worked.decided_on == Opus.Clock.today()
 
     {:ok, testing} = entry!(%{}) |> Research.set_status("testing")
     assert testing.decided_on == nil

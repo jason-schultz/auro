@@ -506,6 +506,11 @@ defmodule Opus.Trading.Strategies do
   defp expression(%{"and" => parts}), do: Enum.map_join(parts, " and ", &expression/1)
   defp expression(%{"or" => parts}), do: Enum.map_join(parts, " or ", &expression/1)
   defp expression(%{"not" => part}), do: "not " <> expression(part)
+
+  defp expression(%{"within" => n, "rule" => part}),
+    do: "(#{expression(part)}) within #{n} bars"
+
+  defp expression(%{"ago" => n, "rule" => part}), do: "(#{expression(part)}) #{n} bars ago"
   defp expression(other), do: inspect(other)
 
   defp typed(%{"type" => type} = spec) do

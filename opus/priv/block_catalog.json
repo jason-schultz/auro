@@ -1,0 +1,1209 @@
+{
+  "about": "Generated from auro_be/src/engine/catalog.rs. Do not edit; regenerate with `UPDATE_CATALOG=1 cargo test catalog` in auro_be.",
+  "blocks": [
+    {
+      "type": "MaFilter",
+      "key": "t",
+      "name": "Moving average",
+      "watches": "The average price over a number of bars. Price above it usually means an uptrend; below it, a downtrend.",
+      "settings": [
+        {
+          "key": "period",
+          "label": "Bars",
+          "kind": "int",
+          "default": 100,
+          "help": "More bars make a slower, smoother line that only shows the big trend.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "an average over fewer than 2 bars is just the price"
+          },
+          "reads": []
+        },
+        {
+          "key": "ma_type",
+          "label": "Kind",
+          "kind": "option",
+          "options": [
+            {
+              "value": "sma",
+              "label": "Simple"
+            },
+            {
+              "value": "ema",
+              "label": "Exponential"
+            }
+          ],
+          "default": "sma",
+          "help": "Exponential reacts faster to recent prices; simple weighs every bar the same.",
+          "range": null,
+          "reads": [
+            {
+              "when": {
+                "is": "ema"
+              },
+              "text": "exponential"
+            },
+            {
+              "when": "otherwise",
+              "text": "simple"
+            }
+          ]
+        }
+      ],
+      "ports": [
+        {
+          "key": "above",
+          "words": "the price is above its {ma_type} average over {period:bars}"
+        },
+        {
+          "key": "below",
+          "words": "the price is below its {ma_type} average over {period:bars}"
+        }
+      ],
+      "series": [
+        {
+          "key": "ma",
+          "label": "Average",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "TrendFollowing",
+      "key": "tf",
+      "name": "Average crossover",
+      "watches": "Two averages, a fast one and a slow one. Fast above slow means the trend is up; the moment they cross is when the trend changes.",
+      "settings": [
+        {
+          "key": "fast_period",
+          "label": "Fast (bars)",
+          "kind": "int",
+          "default": 50,
+          "help": "Fewer bars react sooner, but give more false starts.",
+          "range": null,
+          "reads": []
+        },
+        {
+          "key": "slow_period",
+          "label": "Slow (bars)",
+          "kind": "int",
+          "default": 200,
+          "help": "The longer-term trend the fast average is compared with.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "an average over fewer than 2 bars is just the price"
+          },
+          "reads": []
+        },
+        {
+          "key": "ma_type",
+          "label": "Kind",
+          "kind": "option",
+          "options": [
+            {
+              "value": "sma",
+              "label": "Simple"
+            },
+            {
+              "value": "ema",
+              "label": "Exponential"
+            }
+          ],
+          "default": "sma",
+          "help": "Exponential reacts faster to recent prices; simple weighs every bar the same.",
+          "range": null,
+          "reads": [
+            {
+              "when": {
+                "is": "ema"
+              },
+              "text": "exponential"
+            },
+            {
+              "when": "otherwise",
+              "text": "simple"
+            }
+          ]
+        }
+      ],
+      "ports": [
+        {
+          "key": "bullish",
+          "words": "the average over {fast_period:bars} is above the one over {slow_period:bars}"
+        },
+        {
+          "key": "bearish",
+          "words": "the average over {fast_period:bars} is below the one over {slow_period:bars}"
+        },
+        {
+          "key": "bullish_cross",
+          "words": "the average over {fast_period:bars} crosses above the one over {slow_period:bars}"
+        },
+        {
+          "key": "bearish_cross",
+          "words": "the average over {fast_period:bars} crosses below the one over {slow_period:bars}"
+        }
+      ],
+      "series": [
+        {
+          "key": "fast",
+          "label": "Fast average",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "slow",
+          "label": "Slow average",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "RsiReversion",
+      "key": "r",
+      "name": "RSI",
+      "watches": "How hard the price has been pushed one way lately, from 0 to 100. Very low means it fell hard (oversold); very high means it rose hard (overbought).",
+      "settings": [
+        {
+          "key": "rsi_period",
+          "label": "Bars to look at",
+          "kind": "int",
+          "default": 2,
+          "help": "Fewer bars give a quicker, jumpier reading. 2 is very short-term.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "an RSI over fewer than 2 bars only reads 0 or 100"
+          },
+          "reads": []
+        },
+        {
+          "key": "oversold",
+          "label": "Oversold below",
+          "kind": "float",
+          "default": 20,
+          "help": "Lower means fewer, more extreme dips count.",
+          "range": {
+            "min": 0.0,
+            "max": 100.0,
+            "why": "an RSI only reads between 0 and 100"
+          },
+          "reads": []
+        },
+        {
+          "key": "overbought",
+          "label": "Overbought above",
+          "kind": "float",
+          "default": 80,
+          "help": "Higher means fewer, more extreme spikes count.",
+          "range": {
+            "min": 0.0,
+            "max": 100.0,
+            "why": "an RSI only reads between 0 and 100"
+          },
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "long",
+          "words": "RSI({rsi_period}) is below {oversold}"
+        },
+        {
+          "key": "short",
+          "words": "RSI({rsi_period}) is above {overbought}"
+        },
+        {
+          "key": "exit_long",
+          "words": "RSI({rsi_period}) is back to 50 or higher"
+        },
+        {
+          "key": "exit_short",
+          "words": "RSI({rsi_period}) is back to 50 or lower"
+        }
+      ],
+      "series": [
+        {
+          "key": "rsi",
+          "label": "RSI",
+          "place": "panel",
+          "range": [
+            0.0,
+            100.0
+          ],
+          "levels": [
+            "oversold",
+            50.0,
+            "overbought"
+          ],
+          "with": null
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "MeanReversion",
+      "key": "mr",
+      "name": "Stretch from average",
+      "watches": "How far the price has strayed from its average, measured in its normal wobble (standard deviations), with RSI as a second opinion. Prices that stray far often snap back.",
+      "settings": [
+        {
+          "key": "ma_period",
+          "label": "Average over (bars)",
+          "kind": "int",
+          "default": 20,
+          "help": "The average the stretch is measured from.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "a spread over fewer than 2 bars is always zero"
+          },
+          "reads": []
+        },
+        {
+          "key": "entry_z_threshold",
+          "label": "Stretch to enter",
+          "kind": "float",
+          "default": 2.0,
+          "help": "In normal wobbles. Higher means only bigger stretches count.",
+          "range": null,
+          "reads": []
+        },
+        {
+          "key": "stop_z_threshold",
+          "label": "Stretch to give up",
+          "kind": "float",
+          "default": 3.0,
+          "help": "If it stretches this far instead of snapping back, the trade closes.",
+          "range": null,
+          "reads": []
+        },
+        {
+          "key": "rsi_period",
+          "label": "RSI bars",
+          "kind": "int",
+          "default": 14,
+          "help": "The bars RSI looks at for its second opinion.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "an RSI over fewer than 2 bars only reads 0 or 100"
+          },
+          "reads": []
+        },
+        {
+          "key": "rsi_oversold",
+          "label": "RSI oversold",
+          "kind": "float",
+          "default": 30,
+          "help": "RSI has to be below this to buy.",
+          "range": {
+            "min": 0.0,
+            "max": 100.0,
+            "why": "an RSI only reads between 0 and 100"
+          },
+          "reads": []
+        },
+        {
+          "key": "rsi_overbought",
+          "label": "RSI overbought",
+          "kind": "float",
+          "default": 70,
+          "help": "RSI has to be above this to sell short.",
+          "range": {
+            "min": 0.0,
+            "max": 100.0,
+            "why": "an RSI only reads between 0 and 100"
+          },
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "long",
+          "words": "the price is more than {entry_z_threshold} standard deviations below its average over {ma_period:bars} and RSI({rsi_period}) is below {rsi_oversold}"
+        },
+        {
+          "key": "short",
+          "words": "the price is more than {entry_z_threshold} standard deviations above its average over {ma_period:bars} and RSI({rsi_period}) is above {rsi_overbought}"
+        },
+        {
+          "key": "exit_long",
+          "words": "the price is back up to its average over {ma_period:bars}, or falls more than {stop_z_threshold} standard deviations below it"
+        },
+        {
+          "key": "exit_short",
+          "words": "the price is back down to its average over {ma_period:bars}, or rises more than {stop_z_threshold} standard deviations above it"
+        }
+      ],
+      "series": [
+        {
+          "key": "ma",
+          "label": "Average",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "z",
+          "label": "Stretch (normal wobbles)",
+          "place": "panel",
+          "range": null,
+          "levels": [
+            {
+              "neg": "stop_z_threshold"
+            },
+            {
+              "neg": "entry_z_threshold"
+            },
+            0.0,
+            "entry_z_threshold",
+            "stop_z_threshold"
+          ],
+          "with": null
+        }
+      ],
+      "stop": "{stop_z_threshold} standard deviations past the average"
+    },
+    {
+      "type": "Donchian",
+      "key": "dc",
+      "name": "Breakout channel",
+      "watches": "The highest high and lowest low of recent bars. Breaking above that high, or below that low, is a classic breakout.",
+      "settings": [
+        {
+          "key": "entry_period",
+          "label": "Breakout over (bars)",
+          "kind": "int",
+          "default": 20,
+          "help": "More bars mean only bigger breakouts count, so fewer trades.",
+          "range": null,
+          "reads": []
+        },
+        {
+          "key": "exit_period",
+          "label": "Exit over (bars)",
+          "kind": "int",
+          "default": 10,
+          "help": "Fewer bars exit sooner when the move fades.",
+          "range": null,
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "breakout_long",
+          "words": "the price breaks above its {entry_period:bars} high"
+        },
+        {
+          "key": "breakout_short",
+          "words": "the price breaks below its {entry_period:bars} low"
+        },
+        {
+          "key": "exit_long",
+          "words": "the price breaks below its {exit_period:bars} low"
+        },
+        {
+          "key": "exit_short",
+          "words": "the price breaks above its {exit_period:bars} high"
+        }
+      ],
+      "series": [
+        {
+          "key": "upper",
+          "label": "Channel high",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "lower",
+          "label": "Channel low",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "NoiseArea",
+      "key": "na",
+      "name": "Noise band",
+      "watches": "How far the price usually moves from the US open by this time of day. Moving past that usual range suggests a real move, not noise. Intraday bars only.",
+      "settings": [
+        {
+          "key": "lookback_sessions",
+          "label": "Sessions to average",
+          "kind": "int",
+          "default": 14,
+          "help": "More sessions make a steadier band.",
+          "range": null,
+          "reads": []
+        },
+        {
+          "key": "band_mult",
+          "label": "Band width ×",
+          "kind": "float",
+          "default": 1.0,
+          "help": "Wider means only bigger breakouts count.",
+          "range": null,
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "long",
+          "words": "the price breaks above the noise band (the usual move from the open, over the last {lookback_sessions} sessions)"
+        },
+        {
+          "key": "short",
+          "words": "the price breaks below the noise band (the usual move from the open, over the last {lookback_sessions} sessions)"
+        },
+        {
+          "key": "exit_long",
+          "words": "the price falls back below the band or the day's average price (VWAP)"
+        },
+        {
+          "key": "exit_short",
+          "words": "the price rises back above the band or the day's average price (VWAP)"
+        },
+        {
+          "key": "session_close",
+          "words": "the US session ends (16:00 New York)"
+        }
+      ],
+      "series": [
+        {
+          "key": "upper",
+          "label": "Band top",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "lower",
+          "label": "Band bottom",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "vwap",
+          "label": "Day's average price (VWAP)",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        }
+      ],
+      "stop": "the other side of the noise band"
+    },
+    {
+      "type": "Macd",
+      "key": "m",
+      "name": "MACD",
+      "watches": "The gap between a fast and a slow average (MACD), and a smoothed copy of it (the signal line). MACD crossing above its signal line means momentum is turning up.",
+      "settings": [
+        {
+          "key": "fast_period",
+          "label": "Fast",
+          "kind": "int",
+          "default": 12,
+          "help": "Bars for the fast average.",
+          "range": null,
+          "reads": []
+        },
+        {
+          "key": "slow_period",
+          "label": "Slow",
+          "kind": "int",
+          "default": 26,
+          "help": "Bars for the slow average.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "an average over fewer than 2 bars is just the price"
+          },
+          "reads": []
+        },
+        {
+          "key": "signal_period",
+          "label": "Signal",
+          "kind": "int",
+          "default": 9,
+          "help": "Bars to smooth MACD into its signal line. Fewer reacts sooner.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "a signal line over fewer than 2 bars is the line itself, so the two never cross"
+          },
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "bullish",
+          "words": "MACD is above its signal line"
+        },
+        {
+          "key": "bearish",
+          "words": "MACD is below its signal line"
+        },
+        {
+          "key": "bullish_cross",
+          "words": "MACD crosses above its signal line"
+        },
+        {
+          "key": "bearish_cross",
+          "words": "MACD crosses below its signal line"
+        }
+      ],
+      "series": [
+        {
+          "key": "macd",
+          "label": "MACD",
+          "place": "panel",
+          "range": null,
+          "levels": [
+            0.0
+          ],
+          "with": "signal"
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "Momentum",
+      "key": "mo",
+      "name": "Momentum",
+      "watches": "Whether the price is higher or lower than it was a number of bars ago.",
+      "settings": [
+        {
+          "key": "lookback",
+          "label": "Bars back",
+          "kind": "int",
+          "default": 20,
+          "help": "More bars look at a longer-term direction.",
+          "range": null,
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "up",
+          "words": "the price is higher than {lookback:bars} ago"
+        },
+        {
+          "key": "down",
+          "words": "the price is lower than {lookback:bars} ago"
+        }
+      ],
+      "series": [
+        {
+          "key": "roc",
+          "label": "Change from then (%)",
+          "place": "panel",
+          "range": null,
+          "levels": [
+            0.0
+          ],
+          "with": null
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "AdxFilter",
+      "key": "adx",
+      "name": "Trend strength (ADX)",
+      "watches": "How strong the current trend is, from 0 to 100, whichever way it points. Above about 25 is a real trend; below it the price is mostly drifting sideways. Use it with a block that says which way.",
+      "settings": [
+        {
+          "key": "period",
+          "label": "Bars",
+          "kind": "int",
+          "default": 14,
+          "help": "Fewer bars react sooner but jump around more.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "an ADX over fewer than 2 bars is only ever 0 or 100"
+          },
+          "reads": []
+        },
+        {
+          "key": "threshold",
+          "label": "Strong trend at",
+          "kind": "float",
+          "default": 25,
+          "help": "Higher means only the strongest trends count.",
+          "range": {
+            "min": 0.0,
+            "max": 100.0,
+            "why": "an ADX only reads between 0 and 100"
+          },
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "trending",
+          "words": "there's a strong trend (ADX at {threshold} or more)"
+        },
+        {
+          "key": "ranging",
+          "words": "there's no strong trend (ADX below {threshold})"
+        }
+      ],
+      "series": [
+        {
+          "key": "adx",
+          "label": "Trend strength (ADX)",
+          "place": "panel",
+          "range": null,
+          "levels": [
+            "threshold"
+          ],
+          "with": null
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "Bollinger",
+      "key": "bb",
+      "name": "Bollinger bands",
+      "watches": "A band around the average price, as wide as the price's normal wobble. Closing outside the band means it has stretched further than usual; the middle line is the average it often returns to.",
+      "settings": [
+        {
+          "key": "period",
+          "label": "Bars",
+          "kind": "int",
+          "default": 20,
+          "help": "The average and the wobble are measured over this many bars.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "a spread over fewer than 2 bars is always zero"
+          },
+          "reads": []
+        },
+        {
+          "key": "std_dev_mult",
+          "label": "Band width",
+          "kind": "float",
+          "default": 2.0,
+          "help": "In normal wobbles (standard deviations). Wider means only bigger stretches count.",
+          "range": null,
+          "reads": []
+        },
+        {
+          "key": "squeeze_lookback",
+          "label": "Squeeze over (bars)",
+          "kind": "int",
+          "default": 120,
+          "help": "A squeeze is the band at its narrowest in this many bars: a quiet spell that often ends in a big move. About six months of daily bars is the usual.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "the narrowest band over 1 bar is always the current one"
+          },
+          "reads": []
+        },
+        {
+          "key": "squeeze_within",
+          "label": "Squeeze in the last (bars)",
+          "kind": "int",
+          "default": null,
+          "help": "Leave empty to skip. Set it to use \"squeezed recently\": the squeeze held on any of this many bars, so it still counts on the bar that breaks out, when the band has already started to widen. Pair it with a close outside the band.",
+          "range": {
+            "min": 1.0,
+            "max": null,
+            "why": "a squeeze in the last 0 bars never fires"
+          },
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "below_band",
+          "words": "the price closes below its lower Bollinger band ({std_dev_mult} normal wobbles under its average over {period:bars})"
+        },
+        {
+          "key": "above_band",
+          "words": "the price closes above its upper Bollinger band ({std_dev_mult} normal wobbles over its average over {period:bars})"
+        },
+        {
+          "key": "above_middle",
+          "words": "the price is back up to its average over {period:bars}"
+        },
+        {
+          "key": "below_middle",
+          "words": "the price is back down to its average over {period:bars}"
+        },
+        {
+          "key": "squeeze",
+          "words": "the Bollinger bands (over {period:bars}) are the narrowest in {squeeze_lookback:bars}: a squeeze"
+        },
+        {
+          "key": "squeeze_recent",
+          "words": "the Bollinger bands (over {period:bars}) were squeezed, the narrowest in {squeeze_lookback:bars}, at some point in the last {squeeze_within:bars|1}"
+        }
+      ],
+      "series": [
+        {
+          "key": "upper",
+          "label": "Band top",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "middle",
+          "label": "Band middle (average)",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "lower",
+          "label": "Band bottom",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "bandwidth",
+          "label": "Band width (share of the average)",
+          "place": "panel",
+          "range": null,
+          "levels": [],
+          "with": null
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "Stochastic",
+      "key": "st",
+      "name": "Stochastic",
+      "watches": "Where the price closed within its recent high-to-low range, from 0 (at the low) to 100 (at the high), plus a smoothed copy of that line. Near the bottom of its range for a while often means it's stretched down.",
+      "settings": [
+        {
+          "key": "period",
+          "label": "Bars",
+          "kind": "int",
+          "default": 14,
+          "help": "The range is the high and low of this many bars.",
+          "range": null,
+          "reads": []
+        },
+        {
+          "key": "signal_period",
+          "label": "Smoothing",
+          "kind": "int",
+          "default": 3,
+          "help": "Bars to average into the second line. More is smoother but slower.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "a signal line over fewer than 2 bars is the line itself, so the two never cross"
+          },
+          "reads": []
+        },
+        {
+          "key": "oversold",
+          "label": "Oversold below",
+          "kind": "float",
+          "default": 20,
+          "help": "Lower means fewer, more extreme dips count.",
+          "range": {
+            "min": 0.0,
+            "max": 100.0,
+            "why": "the stochastic only reads between 0 and 100"
+          },
+          "reads": []
+        },
+        {
+          "key": "overbought",
+          "label": "Overbought above",
+          "kind": "float",
+          "default": 80,
+          "help": "Higher means fewer, more extreme spikes count.",
+          "range": {
+            "min": 0.0,
+            "max": 100.0,
+            "why": "the stochastic only reads between 0 and 100"
+          },
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "oversold",
+          "words": "the stochastic (where the price sits in its {period:bars} range) is below {oversold}"
+        },
+        {
+          "key": "overbought",
+          "words": "the stochastic (where the price sits in its {period:bars} range) is above {overbought}"
+        },
+        {
+          "key": "cross_up",
+          "words": "the stochastic (where the price sits in its {period:bars} range) crosses above its smoothed line"
+        },
+        {
+          "key": "cross_down",
+          "words": "the stochastic (where the price sits in its {period:bars} range) crosses below its smoothed line"
+        }
+      ],
+      "series": [
+        {
+          "key": "k",
+          "label": "Stochastic",
+          "place": "panel",
+          "range": [
+            0.0,
+            100.0
+          ],
+          "levels": [
+            "oversold",
+            "overbought"
+          ],
+          "with": "d"
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "OpeningRange",
+      "key": "or",
+      "name": "Opening range",
+      "watches": "The high and low of the first minutes after the US open (09:30 New York). Breaking out of that early range often sets the direction for the day. Intraday bars only.",
+      "settings": [
+        {
+          "key": "minutes",
+          "label": "First minutes",
+          "kind": "int",
+          "default": 30,
+          "help": "Longer makes a wider range, so fewer but bigger breakouts. 5 with 5-minute bars makes the range the first bar alone.",
+          "range": null,
+          "reads": []
+        },
+        {
+          "key": "first_breakout_only",
+          "label": "First breakout only",
+          "kind": "bool",
+          "default": false,
+          "help": "Yes: only the day's first close outside the range counts, so a breakout trades at most once a day. If another rule blocks that first one, nothing trades later that day.",
+          "range": null,
+          "reads": [
+            {
+              "when": {
+                "is": true
+              },
+              "text": " for the first time that day"
+            },
+            {
+              "when": "otherwise",
+              "text": ""
+            }
+          ]
+        },
+        {
+          "key": "no_entry_before_close",
+          "label": "No new trades in the last (minutes)",
+          "kind": "int",
+          "default": null,
+          "help": "Leave empty for no limit. 0 stops a trade opening on the closing bar itself; 15 stops any in the last quarter hour. Closing a trade is never blocked.",
+          "range": {
+            "min": 0.0,
+            "max": null,
+            "why": "a negative guard never blocks anything, the same as none"
+          },
+          "reads": [
+            {
+              "when": {
+                "above": 0.0
+              },
+              "text": ", but not in the last {} minutes before the close"
+            },
+            {
+              "when": {
+                "is": 0
+              },
+              "text": ", but not on the closing bar"
+            },
+            {
+              "when": "otherwise",
+              "text": ""
+            }
+          ]
+        }
+      ],
+      "ports": [
+        {
+          "key": "breakout_long",
+          "words": "the price breaks above the high of the first {minutes} minutes after the US open{first_breakout_only}{no_entry_before_close}"
+        },
+        {
+          "key": "breakout_short",
+          "words": "the price breaks below the low of the first {minutes} minutes after the US open{first_breakout_only}{no_entry_before_close}"
+        },
+        {
+          "key": "inside",
+          "words": "the price is still inside the range of the first {minutes} minutes after the US open"
+        },
+        {
+          "key": "session_close",
+          "words": "the US session ends (16:00 New York)"
+        },
+        {
+          "key": "first_bar_up",
+          "words": "the first {minutes} minutes after the US open end above the 09:30 open (decided as they end){no_entry_before_close}"
+        },
+        {
+          "key": "first_bar_down",
+          "words": "the first {minutes} minutes after the US open end below the 09:30 open (decided as they end){no_entry_before_close}"
+        }
+      ],
+      "series": [
+        {
+          "key": "high",
+          "label": "Opening range high",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "low",
+          "label": "Opening range low",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        }
+      ],
+      "stop": "the other side of the opening range (its low for a buy, its high for a short)"
+    },
+    {
+      "type": "Volatility",
+      "key": "vol",
+      "name": "Calm or wild",
+      "watches": "How big the bars have been lately compared with how big they usually are. Some strategies only work in calm markets, others only when things are moving.",
+      "settings": [
+        {
+          "key": "period",
+          "label": "Recent (bars)",
+          "kind": "int",
+          "default": 14,
+          "help": "How many recent bars count as now.",
+          "range": null,
+          "reads": []
+        },
+        {
+          "key": "baseline",
+          "label": "Usual (bars)",
+          "kind": "int",
+          "default": 100,
+          "help": "How many bars set what's usual.",
+          "range": {
+            "min": 2.0,
+            "max": null,
+            "why": "the usual range needs more than 1 bar"
+          },
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "quieter",
+          "words": "the market is calmer than usual (the last {period:bars} compared with the last {baseline:bars})"
+        },
+        {
+          "key": "busier",
+          "words": "the market is wilder than usual (the last {period:bars} compared with the last {baseline:bars})"
+        }
+      ],
+      "series": [
+        {
+          "key": "recent",
+          "label": "Bar size now vs usual (% of price)",
+          "place": "panel",
+          "range": null,
+          "levels": [],
+          "with": "usual"
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "Vwap",
+      "key": "vwap",
+      "name": "Day's average price (VWAP)",
+      "watches": "The average price everyone has paid today since the US open, weighted by how much traded. Big traders watch it: above it, buyers are in control; below it, sellers are. Intraday bars only.",
+      "settings": [],
+      "ports": [
+        {
+          "key": "above",
+          "words": "the price is above the day's average price (VWAP)"
+        },
+        {
+          "key": "below",
+          "words": "the price is below the day's average price (VWAP)"
+        }
+      ],
+      "series": [
+        {
+          "key": "vwap",
+          "label": "Day's average price (VWAP)",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "PivotPoints",
+      "key": "pv",
+      "name": "Pivot points",
+      "watches": "Price levels worked out from the previous session's high, low and close: a middle pivot, a resistance level above it (R1) and a support level below (S1). Traders watch them as places the price may stall or turn.",
+      "settings": [],
+      "ports": [
+        {
+          "key": "above_pivot",
+          "words": "the price is above the pivot (from the previous session's high, low and close)"
+        },
+        {
+          "key": "below_pivot",
+          "words": "the price is below the pivot (from the previous session's high, low and close)"
+        },
+        {
+          "key": "above_r1",
+          "words": "the price is above the first resistance level (R1)"
+        },
+        {
+          "key": "below_s1",
+          "words": "the price is below the first support level (S1)"
+        }
+      ],
+      "series": [
+        {
+          "key": "pivot",
+          "label": "Pivot",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "r1",
+          "label": "Resistance (R1)",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        },
+        {
+          "key": "s1",
+          "label": "Support (S1)",
+          "place": "price",
+          "range": null,
+          "levels": [],
+          "with": null
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "Carry",
+      "key": "c",
+      "name": "Interest-rate carry",
+      "watches": "The gap between the two currencies' central-bank interest rates, as it stood on each day. Holding the higher-rate currency against the lower one earns the gap, so money tends to flow that way. Currency pairs only.",
+      "settings": [
+        {
+          "key": "min_spread",
+          "label": "Smallest gap (points)",
+          "kind": "float",
+          "default": 0.25,
+          "help": "In percentage points a year. A smaller gap counts as level and signals neither way. OANDA keeps about 1 point a year, so below that a position pays more than it earns.",
+          "range": {
+            "min": 0.0,
+            "max": null,
+            "why": "below 0 a long and a short would both fire on the same carry"
+          },
+          "reads": []
+        }
+      ],
+      "ports": [
+        {
+          "key": "long",
+          "words": "the first currency's central-bank rate is at least {min_spread} percentage points above the second's (holding it earns)"
+        },
+        {
+          "key": "short",
+          "words": "the first currency's central-bank rate is at least {min_spread} percentage points below the second's (selling it short earns)"
+        }
+      ],
+      "series": [
+        {
+          "key": "carry",
+          "label": "Rate gap (percentage points)",
+          "place": "panel",
+          "range": null,
+          "levels": [
+            {
+              "neg": "min_spread"
+            },
+            0.0,
+            "min_spread"
+          ],
+          "with": null
+        }
+      ],
+      "stop": null
+    },
+    {
+      "type": "EventWindow",
+      "key": "ev",
+      "name": "Event window",
+      "watches": "Whether the next bar falls inside a window around a scheduled announcement, such as a central-bank decision.",
+      "settings": [],
+      "ports": [
+        {
+          "key": "in_window",
+          "words": "it's inside the event window"
+        },
+        {
+          "key": "out_of_window",
+          "words": "it's outside the event window"
+        }
+      ],
+      "series": [],
+      "stop": null
+    }
+  ]
+}

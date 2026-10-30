@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use super::options::ChainWindow;
 use crate::brokers::massive::client::ContractFilter;
 use crate::brokers::massive::models::AggBar;
+use crate::brokers::stock_bar_final_at;
 use crate::db::repositories::candles as candles_repo;
 use crate::db::repositories::instruments as instruments_repo;
 use crate::db::repositories::options::{self as options_repo, ContractRow, OptionBarRow};
@@ -19,6 +20,10 @@ use crate::state::AppState;
 /// The free plan serves roughly two years of history; anything longer is a
 /// request mistake, not a backfill.
 const MAX_PERSIST_DAYS: i64 = 800;
+
+/// A refetched daily close this far from the stored one means Massive has
+/// re-adjusted the history (a split), not corrected a bar.
+const ADJUSTMENT_TOLERANCE: f64 = 0.01;
 
 fn default_persist_days() -> i64 {
     5
@@ -72,13 +77,48 @@ pub async fn persist_candles(
     let from = (now - Duration::days(body.days)).date_naive();
     let to = now.date_naive();
 
-    let raw = massive
+    let mut raw = massive
         .get_aggregates(&symbol, granularity, from, to)
         .await?;
 
     // Only bars that have fully closed: a run during the session must not
     // store a still-forming bar that the next run would see differently.
-    let rows = completed_rows(&raw, &symbol, granularity, now)?;
+    let mut rows = completed_rows(&raw, &symbol, granularity, now)?;
+
+    // Bars are split-adjusted as of the fetch, so after a split the short
+    // nightly window comes back on the new scale while older stored bars
+    // stay on the old one. Spot it in the overlap and refetch everything
+    // stored for the symbol.
+    let mut full_refetch = None;
+    if let (Granularity::D, Some(first), Some(last)) = (granularity, rows.first(), rows.last()) {
+        let stored = candles_repo::closes_between(
+            &state.db,
+            &symbol,
+            granularity,
+            first.candle.time,
+            last.candle.time,
+        )
+        .await
+        .map_err(AppError::Database)?;
+        if let Some(ratio) = adjustment_ratio(&stored, &rows) {
+            let oldest = candles_repo::earliest_candle_time(&state.db, &symbol, granularity)
+                .await
+                .map_err(AppError::Database)?
+                .map_or(from, |t| t.date_naive());
+            tracing::warn!(
+                "Massive {} daily closes moved ×{:.4} against stored bars (split?); \
+                 refetching all stored history from {}",
+                symbol,
+                ratio,
+                oldest
+            );
+            raw = massive
+                .get_aggregates(&symbol, granularity, oldest, to)
+                .await?;
+            rows = completed_rows(&raw, &symbol, granularity, now)?;
+            full_refetch = Some(json!({ "from": oldest, "ratio": ratio }));
+        }
+    }
 
     let stored = candles_repo::upsert_candles(&state.db, &rows)
         .await
@@ -100,7 +140,23 @@ pub async fn persist_candles(
         "candles_stored": stored,
         "first": rows.first().map(|r| r.candle.time),
         "last": rows.last().map(|r| r.candle.time),
+        "full_refetch": full_refetch,
     })))
+}
+
+/// Stored close ÷ refetched close at the timestamp where the two differ
+/// most, when that is more than `ADJUSTMENT_TOLERANCE` (a split of 2:1
+/// gives 2.0); None when every overlapping bar agrees.
+fn adjustment_ratio(stored: &[(DateTime<Utc>, f64)], fetched: &[CandleRow]) -> Option<f64> {
+    stored
+        .iter()
+        .filter_map(|(time, stored_close)| {
+            let row = fetched.iter().find(|r| r.candle.time == *time)?;
+            let ratio = stored_close / row.candle.mid.close;
+            ratio.is_finite().then_some(ratio)
+        })
+        .max_by(|a, b| a.ln().abs().total_cmp(&b.ln().abs()))
+        .filter(|ratio| (ratio - 1.0).abs() > ADJUSTMENT_TOLERANCE)
 }
 
 fn completed_rows(
@@ -114,24 +170,13 @@ fn completed_rows(
         .map(Candle::try_from)
         .collect::<AppResult<Vec<_>>>()?
         .into_iter()
-        .filter(|c| completes_at(c.time, granularity) <= now)
+        .filter(|c| stock_bar_final_at(c.time, granularity) <= now)
         .map(|candle| CandleRow {
             instrument: symbol.to_string(),
             granularity,
             candle,
         })
         .collect())
-}
-
-/// When a bar stops changing. Intraday bars are final one bar after they
-/// open. Massive stamps daily bars at midnight New York and keeps updating
-/// them through extended hours, which end 20:00 New York, 20 hours later, so
-/// the nightly 01:30 UTC run sees the day that just closed.
-fn completes_at(open: DateTime<Utc>, granularity: Granularity) -> DateTime<Utc> {
-    match granularity {
-        Granularity::D => open + Duration::hours(20),
-        other => open + Duration::minutes(other.minutes()),
-    }
 }
 
 // --- Options ---
@@ -324,7 +369,7 @@ fn completed_option_rows(
         .map(|b| OptionBarRow::from_agg(contract, b))
         .filter(|r| {
             r.as_ref()
-                .map(|r| completes_at(r.time, Granularity::D) <= now)
+                .map(|r| stock_bar_final_at(r.time, Granularity::D) <= now)
                 .unwrap_or(true)
         })
         .collect()
@@ -359,6 +404,42 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].instrument, "spy");
         assert_eq!(rows[0].granularity, Granularity::M5);
+    }
+
+    fn daily(day: u32, close: f64) -> CandleRow {
+        let t = Utc.with_ymd_and_hms(2026, 10, day, 4, 0, 0).unwrap();
+        let mut bar = bar(t.timestamp_millis());
+        bar.c = close;
+        completed_rows(&[bar], "NVDA", Granularity::D, t + Duration::days(1))
+            .unwrap()
+            .remove(0)
+    }
+
+    fn stored_close(day: u32, close: f64) -> (DateTime<Utc>, f64) {
+        (Utc.with_ymd_and_hms(2026, 10, day, 4, 0, 0).unwrap(), close)
+    }
+
+    #[test]
+    fn a_split_shows_as_the_stored_to_refetched_ratio() {
+        // 2:1 split effective the 22nd: the refetch halves the 20th and 21st.
+        let fetched = vec![daily(20, 100.0), daily(21, 101.0), daily(22, 102.0)];
+        let stored = vec![stored_close(20, 200.0), stored_close(21, 202.0)];
+        let ratio = adjustment_ratio(&stored, &fetched).unwrap();
+        assert!((ratio - 2.0).abs() < 1e-9);
+        // A reverse split shows below one.
+        let stored = vec![stored_close(20, 10.0)];
+        let ratio = adjustment_ratio(&stored, &fetched).unwrap();
+        assert!((ratio - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn small_corrections_and_new_bars_are_not_a_split() {
+        let fetched = vec![daily(20, 100.0), daily(21, 101.0)];
+        // Within 1%: a vendor correction, not an adjustment.
+        assert_eq!(adjustment_ratio(&[stored_close(20, 100.5)], &fetched), None);
+        // No overlap (all new bars) or nothing stored.
+        assert_eq!(adjustment_ratio(&[stored_close(19, 50.0)], &fetched), None);
+        assert_eq!(adjustment_ratio(&[], &fetched), None);
     }
 
     #[test]

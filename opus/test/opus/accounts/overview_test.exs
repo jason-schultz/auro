@@ -128,6 +128,22 @@ defmodule Opus.Accounts.OverviewTest do
     assert_in_delta hodl.gain, -4.0, 0.001
   end
 
+  test "says when the table's prices are from: the latest re-price" do
+    priced = [
+      %{
+        "id" => 2,
+        "account_type" => "Non-registered",
+        "positions" => [
+          %{"symbol" => "FLT.TO", "shares" => 200, "updated_at" => "2026-10-29T19:45:01Z"},
+          %{"symbol" => "PNG.VN", "shares" => 50, "updated_at" => "2026-10-29T20:00:02Z"}
+        ]
+      }
+    ]
+
+    assert [%{priced_at: ~U[2026-10-29 20:00:02Z]}] = Overview.build(@brokers, priced).positions
+    assert [%{priced_at: nil}] = Overview.build(@brokers, @wealthsimple).positions
+  end
+
   test "falls back to average cost when a position has never been priced" do
     unpriced = [
       %{

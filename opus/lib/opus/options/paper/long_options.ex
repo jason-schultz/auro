@@ -142,11 +142,14 @@ defmodule Opus.Options.Paper.LongOptions do
 
   @doc """
   Ideas tonight for one underlying (`ideas` or `ideas_half`): manage its
-  open calls, then buy each of tonight's dip-buy call ideas on it that the
-  book has never held, while the book has fewer than 5 open
-  (`open_elsewhere` counts the other underlyings'), the premium is at most
-  US$2,000 a contract and the cash covers it. An idea is quoted from the
-  same snapshot it was scanned on.
+  open calls, then walk `ideas`, best score first, while the book has fewer
+  than 5 open (`open_elsewhere` counts the other underlyings'). An idea on
+  this underlying (`snapshot.instrument_id`) that the book has never held
+  is bought if its premium is at most US$2,000 a contract and the cash
+  covers it, quoted from the same snapshot it was scanned on. An idea on an
+  underlying the run reaches later only holds its place in the cap, when
+  its scanned quote would pass the same tests, so the 5 go to the best
+  scores across every underlying rather than to whichever runs first.
   """
   @spec plan_ideas(
           String.t(),
@@ -167,24 +170,32 @@ defmodule Opus.Options.Paper.LongOptions do
       ideas
       |> Enum.filter(&(&1.list == "dip_buy" and &1.kind == "call"))
       |> Enum.reject(&MapSet.member?(held, &1.contract_id))
-      |> Enum.reduce({[], open_elsewhere + still_open, available}, fn idea, {buys, open, cash} ->
-        quote = Map.get(snapshot.quotes, idea.contract_id)
+      |> Enum.reduce({[], open_elsewhere + still_open, available}, fn
+        %{underlying_instrument_id: other} = idea, {buys, open, cash}
+        when other != snapshot.instrument_id ->
+          if open < @max_open and Pick.fillable?(idea) and
+               idea.ask * Pick.multiplier() <= @max_premium,
+             do: {buys, open + 1, cash},
+             else: {buys, open, cash}
 
-        leg =
-          quote &&
-            %{
-              Legs.open_leg("long", Map.merge(quote, Map.take(idea, [:contract_id])))
-              | quantity: contracts(book)
-            }
+        idea, {buys, open, cash} ->
+          quote = Map.get(snapshot.quotes, idea.contract_id)
 
-        if open < @max_open and Pick.fillable?(quote) and
-             leg.open_price * Pick.multiplier() <= @max_premium and
-             affordable?(leg, cash, commission) do
-          {buys ++ [{:open, "long_call", [leg]}], open + 1,
-           cash + Legs.open_cash([leg], commission)}
-        else
-          {buys, open, cash}
-        end
+          leg =
+            quote &&
+              %{
+                Legs.open_leg("long", Map.merge(quote, Map.take(idea, [:contract_id])))
+                | quantity: contracts(book)
+              }
+
+          if open < @max_open and Pick.fillable?(quote) and
+               leg.open_price * Pick.multiplier() <= @max_premium and
+               affordable?(leg, cash, commission) do
+            {buys ++ [{:open, "long_call", [leg]}], open + 1,
+             cash + Legs.open_cash([leg], commission)}
+          else
+            {buys, open, cash}
+          end
       end)
 
     managed ++ buys

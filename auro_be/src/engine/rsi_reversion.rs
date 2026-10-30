@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block, Level, Series, Setting, RSI_LEVEL_WHY, RSI_WHY};
 use crate::engine::indicators::rsi;
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -11,6 +12,52 @@ pub struct RsiReversionParams {
     pub rsi_period: usize,
     pub oversold: f64,
     pub overbought: f64,
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "RsiReversion",
+        key: "r",
+        name: "RSI",
+        watches: "How hard the price has been pushed one way lately, from 0 to 100. Very low means it fell hard (oversold); very high means it rose hard (overbought).",
+        settings: vec![
+            Setting::int(
+                "rsi_period",
+                "Bars to look at",
+                2,
+                "Fewer bars give a quicker, jumpier reading. 2 is very short-term.",
+            )
+            .at_least(2.0, RSI_WHY),
+            Setting::float(
+                "oversold",
+                "Oversold below",
+                20,
+                "Lower means fewer, more extreme dips count.",
+            )
+            .between(0.0, 100.0, RSI_LEVEL_WHY),
+            Setting::float(
+                "overbought",
+                "Overbought above",
+                80,
+                "Higher means fewer, more extreme spikes count.",
+            )
+            .between(0.0, 100.0, RSI_LEVEL_WHY),
+        ],
+        ports: vec![
+            port("long", "RSI({rsi_period}) is below {oversold}"),
+            port("short", "RSI({rsi_period}) is above {overbought}"),
+            port("exit_long", "RSI({rsi_period}) is back to 50 or higher"),
+            port("exit_short", "RSI({rsi_period}) is back to 50 or lower"),
+        ],
+        series: vec![Series::panel(
+            "rsi",
+            "RSI",
+            vec![Level::Setting("oversold"), Level::At(50.0), Level::Setting("overbought")],
+        )
+        .range(0.0, 100.0)],
+        stop: None,
+    }
 }
 
 impl Signaler for RsiReversionParams {

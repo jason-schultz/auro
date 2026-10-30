@@ -11,6 +11,10 @@
 //!   time, but two strategies may hold the same instrument at once (live
 //!   checks open positions per strategy, not per instrument).
 //! - **Risk budget and group cap**: the live check (`AccountLimits::breach`).
+//! - **Valued every bar**: open trades count at each bar's close
+//!   (`mark_return`), on one clock across every market, so the drawdown,
+//!   the chart and the drawdown pause see a dip that recovers before the
+//!   trade closes.
 //! - **Drawdown pause and circuit breaker** need a person to resume, which a
 //!   backtest can't do. They are reported as the dates they would have
 //!   tripped, and the replay carries on as if you had resumed at once.
@@ -20,19 +24,19 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::Serialize;
 
 use crate::engine::rules::{AccountLimits, Breach};
 use crate::engine::stats::{annual_sharpe_of, daily_returns};
-use crate::engine::types::Trade;
+use crate::engine::types::{Candle, Direction, Trade};
 
 /// Points a chart gets at most.
 const MAX_POINTS: usize = 240;
 
 /// One strategy in the replay.
 #[derive(Debug, Clone)]
-pub struct Play {
+pub struct Play<'a> {
     pub key: String,
     pub instrument: String,
     /// Share of NAV each trade risks (0.01 = 1%).
@@ -41,6 +45,10 @@ pub struct Play {
     pub max_position_pct: f64,
     pub breaker_exempt: bool,
     pub trades: Vec<Trade>,
+    /// The bars its trades were made on, oldest first. An open trade is
+    /// valued at each of their closes (`mark_return`); with none, it counts
+    /// at its entry price until it closes.
+    pub bars: &'a [Candle],
 }
 
 /// The circuit breaker's limits, as Opus runs them.
@@ -76,16 +84,28 @@ pub struct Trip {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Point {
     pub time: DateTime<Utc>,
-    /// Account return so far (0.05 = +5%).
+    /// Account return so far, open trades valued at this bar (0.05 = +5%).
     pub equity: f64,
     /// How far below its best (≤ 0).
     pub drawdown: f64,
+}
+
+/// A trade the account took, and what it did to the account.
+#[derive(Debug, Clone)]
+pub struct Fill {
+    pub key: String,
+    pub trade: Trade,
+    /// Its gain or loss as a share of the account just before it closed.
+    pub account_return: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Outcome {
     pub total_return: f64,
     pub annual_return: f64,
+    /// The account's worst fall from its high (≥ 0), valued at every bar:
+    /// open trades count at that bar's close (`mark_return`), so a trade
+    /// that dips and recovers before it closes shows its dip.
     pub max_drawdown: f64,
     pub annual_sharpe: f64,
     pub taken: usize,
@@ -97,6 +117,19 @@ pub struct Outcome {
     pub points: Vec<Point>,
     #[serde(skip)]
     pub daily: BTreeMap<NaiveDate, f64>,
+    /// Every trade taken, in the order they closed.
+    #[serde(skip)]
+    pub fills: Vec<Fill>,
+    /// The worst fall (≥ 0) with every trade on a whole account and added
+    /// up rather than sized and compounded (`BacktestStats::max_drawdown`),
+    /// valued at every bar the same way.
+    #[serde(skip)]
+    pub summed_max_drawdown: f64,
+    /// The account's return each calendar month (0.01 = +1%), from the
+    /// month of its first trade to its last bar, open trades valued at each
+    /// month's last bar. A month it held nothing is a 0.
+    #[serde(skip)]
+    pub monthly: Vec<f64>,
 }
 
 /// Share of NAV a trade's position takes: the live sizing rule before unit
@@ -110,28 +143,94 @@ pub fn position_share(risk_pct: f64, max_position_pct: f64, trade: &Trade) -> f6
     }
 }
 
+/// What `trade` is worth at `bar`'s close, as a return on its position:
+/// the price it would close at then (the bid for a long, the ask for a
+/// short, as its exit fills) against its entry, plus the financing it has
+/// run up so far. The backtest charges a trade's financing when it closes
+/// (`apply_financing`), so the part run up is that charge spread evenly
+/// over the trade's life (the daily rate barely moves within one trade).
+///
+/// This is the standard daily mark-to-market: the bar's close, not its
+/// low, so a dip inside a bar that's gone by the close doesn't count. At
+/// or before the entry bar it's 0; at or after the exit it's the trade's
+/// own return.
+pub fn mark_return(trade: &Trade, bar: &Candle) -> f64 {
+    if bar.time >= trade.exit_time {
+        return trade.pnl_percent;
+    }
+    if bar.time <= trade.entry_time {
+        return 0.0;
+    }
+    let price_return = |price: f64| match trade.direction {
+        Direction::Long => (price - trade.entry_price) / trade.entry_price,
+        Direction::Short => (trade.entry_price - price) / trade.entry_price,
+    };
+    let financing = trade.pnl_percent - price_return(trade.exit_price);
+    let life = (trade.exit_time - trade.entry_time).num_seconds() as f64;
+    let held = (bar.time - trade.entry_time).num_seconds() as f64;
+    price_return(bar.exit_fill_price(trade.direction)) + financing * held / life
+}
+
 struct Open<'a> {
-    play: &'a Play,
+    play: &'a Play<'a>,
     trade: &'a Trade,
+    share: f64,
     nav_at_entry: f64,
+    /// The first of its play's bars after the last one it was valued at.
+    next_bar: usize,
+}
+
+impl Open<'_> {
+    /// Its value at `at` as a return on its position: at the close of its
+    /// play's latest bar by then (`mark_return`).
+    fn mark(&mut self, at: DateTime<Utc>) -> f64 {
+        let bars = self.play.bars;
+        while bars.get(self.next_bar).is_some_and(|b| b.time <= at) {
+            self.next_bar += 1;
+        }
+        self.next_bar
+            .checked_sub(1)
+            .map_or(0.0, |i| mark_return(self.trade, &bars[i]))
+    }
 }
 
 /// The account as the replay runs.
 struct Replay<'a> {
     limits: Option<&'a Limits>,
+    /// Closed trades only.
     nav: f64,
+    /// The highest valued NAV so far.
     peak: f64,
     pause_peak: f64,
     max_dd: f64,
+    /// Closed trades' returns added up, each on a whole account.
+    summed: f64,
+    summed_peak: f64,
+    summed_max_dd: f64,
     open: Vec<Open<'a>>,
-    closed: Vec<(DateTime<Utc>, f64)>,
+    closed: Vec<Fill>,
     points: Vec<Point>,
     pause_trips: Vec<DateTime<Utc>>,
     breaker_trips: Vec<Trip>,
     breakers: HashMap<&'a str, BreakerState>,
+    first_entry: Option<DateTime<Utc>>,
+    /// The valued NAV at the last mark of each (year, month).
+    month_ends: BTreeMap<(i32, u32), f64>,
 }
 
 impl<'a> Replay<'a> {
+    fn open(&mut self, play: &'a Play<'a>, trade: &'a Trade) {
+        self.first_entry.get_or_insert(trade.entry_time);
+        let next_bar = play.bars.partition_point(|b| b.time <= trade.entry_time);
+        self.open.push(Open {
+            play,
+            trade,
+            share: position_share(play.risk_pct, play.max_position_pct, trade),
+            nav_at_entry: self.nav,
+            next_bar,
+        });
+    }
+
     /// Close every open trade that exits by `at` (all of them with None),
     /// in exit order.
     fn close_until(&mut self, at: Option<DateTime<Utc>>) {
@@ -147,35 +246,90 @@ impl<'a> Replay<'a> {
     }
 
     fn close(&mut self, o: Open<'a>) {
-        let share = position_share(o.play.risk_pct, o.play.max_position_pct, o.trade);
-        let pnl = o.nav_at_entry * share * o.trade.pnl_percent;
-        let exit = o.trade.exit_time;
-        self.closed.push((exit, pnl / self.nav));
-        self.nav += pnl;
-        self.peak = self.peak.max(self.nav);
-        let drawdown = self.nav / self.peak - 1.0;
-        self.max_dd = self.max_dd.min(drawdown);
-        self.points.push(Point {
-            time: exit,
-            equity: self.nav - 1.0,
-            drawdown,
+        let pnl = o.nav_at_entry * o.share * o.trade.pnl_percent;
+        self.closed.push(Fill {
+            key: o.play.key.clone(),
+            trade: *o.trade,
+            account_return: pnl / self.nav,
         });
+        // An account that loses everything stays at nothing.
+        self.nav = (self.nav + pnl).max(0.0);
+        self.summed += o.trade.pnl_percent;
 
         let Some(limits) = self.limits else { return };
-        self.pause_peak = self.pause_peak.max(self.nav);
-        if self.nav <= self.pause_peak * (1.0 - limits.drawdown_pause) {
-            self.pause_trips.push(exit);
-            self.pause_peak = self.nav;
-        }
         if !o.play.breaker_exempt {
             let state = self.breakers.entry(o.play.key.as_str()).or_default();
             if state.record(o.trade, &limits.breaker) {
                 self.breaker_trips.push(Trip {
                     key: o.play.key.clone(),
-                    at: exit,
+                    at: o.trade.exit_time,
                 });
             }
         }
+    }
+
+    /// Value the account at `at`: closed trades plus every open one at its
+    /// market's latest close. The drawdowns, the chart, the month ends and
+    /// the drawdown pause (live watches NAV, open trades included) all
+    /// read this.
+    fn mark(&mut self, at: DateTime<Utc>) {
+        let mut nav = self.nav;
+        let mut summed = self.summed;
+        for o in &mut self.open {
+            let r = o.mark(at);
+            nav += o.nav_at_entry * o.share * r;
+            summed += r;
+        }
+        let nav = nav.max(0.0);
+
+        self.peak = self.peak.max(nav);
+        let drawdown = nav / self.peak - 1.0;
+        self.max_dd = self.max_dd.min(drawdown);
+        self.summed_peak = self.summed_peak.max(summed);
+        self.summed_max_dd = self
+            .summed_max_dd
+            .min((summed - self.summed_peak) / (1.0 + self.summed_peak));
+        self.points.push(Point {
+            time: at,
+            equity: nav - 1.0,
+            drawdown,
+        });
+        self.month_ends.insert((at.year(), at.month()), nav);
+
+        let Some(limits) = self.limits else { return };
+        self.pause_peak = self.pause_peak.max(nav);
+        if nav <= self.pause_peak * (1.0 - limits.drawdown_pause) {
+            self.pause_trips.push(at);
+            self.pause_peak = nav;
+        }
+    }
+
+    /// Calendar-month returns from the month of the first trade
+    /// (`Outcome::monthly`).
+    fn monthly(&self) -> Vec<f64> {
+        let Some(first) = self.first_entry else {
+            return Vec::new();
+        };
+        let Some((&last, _)) = self.month_ends.last_key_value() else {
+            return Vec::new();
+        };
+        let mut month = (first.year(), first.month());
+        let mut prev = self
+            .month_ends
+            .range(..month)
+            .next_back()
+            .map_or(1.0, |(_, nav)| *nav);
+        let mut out = Vec::new();
+        while month <= last {
+            let nav = self.month_ends.get(&month).copied().unwrap_or(prev);
+            out.push(if prev > 0.0 { nav / prev - 1.0 } else { 0.0 });
+            prev = nav;
+            month = match month {
+                (y, 12) => (y + 1, 1),
+                (y, m) => (y, m + 1),
+            };
+        }
+        out
     }
 
     /// Why `play` can't open now, if it can't.
@@ -202,9 +356,16 @@ enum Refusal {
 
 /// Replay `plays` together between `from` and `to` (trades that open in
 /// the window), with `limits` or without.
-pub fn simulate(
-    plays: &[&Play],
-    limits: Option<&Limits>,
+///
+/// The account is valued on one shared clock: every bar of every play
+/// from `from` until the last trade closes, plus each entry and exit. At
+/// each moment trades open and close first, then every open trade is
+/// valued at its own market's latest close, so markets whose bars don't
+/// line up (a holiday, a different session) are each valued at their
+/// newest price.
+pub fn simulate<'a>(
+    plays: &[&'a Play<'a>],
+    limits: Option<&'a Limits>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Outcome {
@@ -216,48 +377,75 @@ pub fn simulate(
         .collect();
     entries.sort_by_key(|(i, t)| (t.entry_time, *i));
 
+    let until = entries
+        .iter()
+        .map(|(_, t)| t.exit_time)
+        .max()
+        .map_or(to, |last| last.max(to));
+    let mut clock: Vec<DateTime<Utc>> = plays
+        .iter()
+        .flat_map(|p| p.bars.iter().map(|b| b.time))
+        .filter(|at| *at >= from && *at <= until)
+        .chain(
+            entries
+                .iter()
+                .flat_map(|(_, t)| [t.entry_time, t.exit_time]),
+        )
+        .chain([from])
+        .collect();
+    clock.sort_unstable();
+    clock.dedup();
+
     let mut replay = Replay {
         limits,
         nav: 1.0,
         peak: 1.0,
         pause_peak: 1.0,
         max_dd: 0.0,
+        summed: 0.0,
+        summed_peak: 0.0,
+        summed_max_dd: 0.0,
         open: Vec::new(),
         closed: Vec::new(),
-        points: vec![Point {
-            time: from,
-            equity: 0.0,
-            drawdown: 0.0,
-        }],
+        points: Vec::with_capacity(clock.len()),
         pause_trips: Vec::new(),
         breaker_trips: Vec::new(),
         breakers: HashMap::new(),
+        first_entry: None,
+        month_ends: BTreeMap::new(),
     };
     let mut blocked = Blocked::default();
     let mut taken_by_play: BTreeMap<String, usize> = BTreeMap::new();
 
-    for (i, trade) in entries {
-        let play = plays[i];
-        replay.close_until(Some(trade.entry_time));
-        match replay.refusal(play) {
-            Some(Refusal::RiskBudget) => blocked.risk_budget += 1,
-            Some(Refusal::GroupCap) => blocked.group_cap += 1,
-            None => {
-                *taken_by_play.entry(play.key.clone()).or_default() += 1;
-                let nav_at_entry = replay.nav;
-                replay.open.push(Open {
-                    play,
-                    trade,
-                    nav_at_entry,
-                });
+    let mut next = entries.into_iter().peekable();
+    for &at in &clock {
+        while let Some((i, trade)) = next.next_if(|(_, t)| t.entry_time <= at) {
+            let play = plays[i];
+            replay.close_until(Some(trade.entry_time));
+            match replay.refusal(play) {
+                Some(Refusal::RiskBudget) => blocked.risk_budget += 1,
+                Some(Refusal::GroupCap) => blocked.group_cap += 1,
+                None => {
+                    *taken_by_play.entry(play.key.clone()).or_default() += 1;
+                    replay.open(play, trade);
+                }
             }
         }
+        replay.close_until(Some(at));
+        replay.mark(at);
     }
-    replay.close_until(None);
 
     let nav = replay.nav;
-    let daily = daily_returns(replay.closed, from, to);
+    let daily = daily_returns(
+        replay
+            .closed
+            .iter()
+            .map(|f| (f.trade.exit_time, f.account_return)),
+        from,
+        to,
+    );
     let years = (to - from).num_days().max(1) as f64 / 365.25;
+    let monthly = replay.monthly();
     Outcome {
         total_return: nav - 1.0,
         annual_return: if nav > 0.0 {
@@ -274,6 +462,9 @@ pub fn simulate(
         breaker_trips: replay.breaker_trips,
         points: sample(replay.points),
         daily,
+        fills: replay.closed,
+        summed_max_drawdown: replay.summed_max_dd.abs(),
+        monthly,
     }
 }
 
@@ -370,7 +561,7 @@ mod tests {
         }
     }
 
-    fn play(key: &str, instrument: &str, trades: Vec<Trade>) -> Play {
+    fn play(key: &str, instrument: &str, trades: Vec<Trade>) -> Play<'static> {
         Play {
             key: key.into(),
             instrument: instrument.into(),
@@ -378,7 +569,28 @@ mod tests {
             max_position_pct: 1.5,
             breaker_exempt: false,
             trades,
+            bars: &[],
         }
+    }
+
+    /// Daily bars closing at `closes`, the first on Jan `first_day`.
+    fn daily_bars(first_day: u32, closes: &[f64]) -> Vec<Candle> {
+        closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| Candle {
+                time: at(first_day, 0) + Duration::days(i as i64),
+                mid: crate::engine::types::OHLC {
+                    open: c,
+                    high: c,
+                    low: c,
+                    close: c,
+                },
+                volume: 1,
+                bid: None,
+                ask: None,
+            })
+            .collect()
     }
 
     fn limits(budget: f64, per_group: usize) -> Limits {
@@ -508,5 +720,110 @@ mod tests {
 
         let short: BTreeMap<_, _> = a.iter().take(10).map(|(d, v)| (*d, *v)).collect();
         assert_eq!(correlation(&a, &short), None);
+    }
+
+    #[test]
+    fn an_open_trade_is_valued_at_every_close() {
+        // Long at 100 on Jan 1, down to 90 by Jan 5, back to 100 when it
+        // closes Jan 9: no loss at the close, a 10% dip on the way.
+        let closes = [100.0, 97.0, 94.0, 92.0, 90.0, 93.0, 96.0, 99.0, 100.0];
+        let bars = daily_bars(1, &closes);
+        let t = Trade {
+            entry_time: at(1, 0),
+            exit_time: at(9, 0),
+            exit_price: 100.0,
+            pnl_percent: 0.0,
+            // No stop distance: the position is the cap, the whole account.
+            stop_price: 100.0,
+            ..trade((1, 0), (9, 0), 0.0)
+        };
+        let p = Play {
+            max_position_pct: 1.0,
+            bars: &bars,
+            ..play("a", "SPX500_USD", vec![t])
+        };
+        let out = simulate(&[&p], None, at(1, 0), at(9, 0));
+        assert!(out.total_return.abs() < 1e-12);
+        assert!((out.max_drawdown - 0.10).abs() < 1e-12);
+        assert!((out.summed_max_drawdown - 0.10).abs() < 1e-12);
+        let low = out.points.iter().map(|p| p.drawdown).fold(0.0, f64::min);
+        assert!((low + 0.10).abs() < 1e-12);
+
+        // Valued only when it closed, it would show no drop at all.
+        let blind = Play { bars: &[], ..p };
+        assert_eq!(
+            simulate(&[&blind], None, at(1, 0), at(9, 0)).max_drawdown,
+            0.0
+        );
+    }
+
+    #[test]
+    fn the_financing_a_trade_pays_is_run_up_over_its_life() {
+        // Flat price; the trade paid 1% financing over 4 days.
+        let bars = daily_bars(1, &[100.0; 5]);
+        let t = Trade {
+            exit_price: 100.0,
+            pnl_percent: -0.01,
+            ..trade((1, 0), (5, 0), 0.0)
+        };
+        assert!((mark_return(&t, &bars[2]) + 0.005).abs() < 1e-12);
+        assert_eq!(mark_return(&t, &bars[0]), 0.0);
+        assert_eq!(mark_return(&t, &bars[4]), -0.01);
+    }
+
+    #[test]
+    fn two_markets_are_valued_together_on_one_clock() {
+        // A falls 10% while B rises 10%, then each comes back. Each holds
+        // half the account (2% stop at 1% risk): together the dips cancel.
+        let a_bars = daily_bars(1, &[100.0, 95.0, 90.0, 95.0, 100.0]);
+        let b_bars = daily_bars(1, &[100.0, 105.0, 110.0, 105.0, 100.0]);
+        let flat = |pnl| Trade {
+            exit_price: 100.0,
+            ..trade((1, 0), (5, 0), pnl)
+        };
+        let a = Play {
+            bars: &a_bars,
+            ..play("a", "SPX500_USD", vec![flat(0.0)])
+        };
+        let b = Play {
+            bars: &b_bars,
+            ..play("b", "XAU_USD", vec![flat(0.0)])
+        };
+        let both = simulate(&[&a, &b], None, at(1, 0), at(5, 0));
+        assert!(both.max_drawdown < 1e-12);
+        let alone = simulate(&[&a], None, at(1, 0), at(5, 0));
+        assert!((alone.max_drawdown - 0.05).abs() < 1e-12);
+
+        // B's bars stop on Jan 3 (a holiday gap): it keeps its last price,
+        // +10%, so on Jan 4 the account is A's −2.5% plus B's +5%.
+        let b_short = &b_bars[..3];
+        let b_gap = Play {
+            bars: b_short,
+            ..b.clone()
+        };
+        let out = simulate(&[&a, &b_gap], None, at(1, 0), at(5, 0));
+        let jan4 = out.points.iter().find(|p| p.time == at(4, 0)).unwrap();
+        assert!((jan4.equity - (0.5 * -0.05 + 0.5 * 0.10)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn monthly_returns_run_from_the_first_trade_by_calendar_month() {
+        // Jan: +2% (half the account × 4%); Feb: nothing; Mar: −1%.
+        let t = |m: u32, pnl: f64| Trade {
+            entry_time: Utc.with_ymd_and_hms(2026, m, 10, 0, 0, 0).unwrap(),
+            exit_time: Utc.with_ymd_and_hms(2026, m, 12, 0, 0, 0).unwrap(),
+            ..trade((1, 0), (2, 0), pnl)
+        };
+        let p = play("a", "SPX500_USD", vec![t(1, 0.04), t(3, -0.02)]);
+        let out = simulate(
+            &[&p],
+            None,
+            at(1, 0),
+            Utc.with_ymd_and_hms(2026, 3, 31, 0, 0, 0).unwrap(),
+        );
+        assert_eq!(out.monthly.len(), 3);
+        assert!((out.monthly[0] - 0.02).abs() < 1e-12);
+        assert_eq!(out.monthly[1], 0.0);
+        assert!((out.monthly[2] + 0.01).abs() < 1e-12);
     }
 }

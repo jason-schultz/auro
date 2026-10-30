@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{port, Block, Series};
 use crate::engine::indicators;
 use crate::engine::session;
 use crate::engine::strategy::Signaler;
@@ -18,6 +19,23 @@ pub struct VwapParams {}
 
 fn session_vwap(candles: &[Candle]) -> Option<f64> {
     indicators::vwap(session::today(candles))
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "Vwap",
+        key: "vwap",
+        name: "Day's average price (VWAP)",
+        watches: "The average price everyone has paid today since the US open, weighted by how much traded. Big traders watch it: above it, buyers are in control; below it, sellers are. Intraday bars only.",
+        settings: vec![],
+        ports: vec![
+            port("above", "the price is above the day's average price (VWAP)"),
+            port("below", "the price is below the day's average price (VWAP)"),
+        ],
+        series: vec![Series::price("vwap", "Day's average price (VWAP)")],
+        stop: None,
+    }
 }
 
 impl Signaler for VwapParams {

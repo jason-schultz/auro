@@ -54,7 +54,10 @@ defmodule Opus.Trading.Together do
       from(c in StrategyConfig,
         join: e in StrategyEvaluation,
         on: e.strategy_config_id == c.id,
-        where: e.stage == "walk_forward" and e.status == "passed",
+        # A basket is several markets in one test, not a play on one.
+        where:
+          e.stage == "walk_forward" and e.status == "passed" and
+            not fragment("jsonb_exists(?, 'basket')", c.parameters),
         order_by: [desc: c.inserted_at],
         # A pass from before Oct 28 recorded no checks: older, looser rules.
         select: {c, not fragment("jsonb_exists(?, 'checks')", e.stats)}
@@ -105,7 +108,10 @@ defmodule Opus.Trading.Together do
 
   - `:with_rules` and `:without_rules`: the account's summary (yearly
     return, worst drop, Sharpe, trades taken and blocked, when the drawdown
-    pause and circuit breaker would have tripped) and its chart points;
+    pause and circuit breaker would have tripped) and its chart points. The
+    engine values the account at every bar, open trades at their market's
+    latest close, so the worst drop, the chart and the drawdown pause
+    include dips that recovered before a trade closed;
   - `:plays`: each play alone over the same years;
   - `:pairs`: how each two plays moved together, most alike first;
   - `:failed`: plays the engine couldn't test, and why.

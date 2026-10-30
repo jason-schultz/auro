@@ -127,20 +127,68 @@ pub(crate) async fn finalize_evaluation(
 
 /// How many configs with this instrument and strategy type have had a holdout
 /// evaluation, including any in progress. Every look at the sealed window by
-/// a sibling candidate weakens what a pass there proves.
+/// a sibling candidate weakens what a pass there proves. A basket's
+/// siblings are configs on the same `basket_markets` (its `instrument` is
+/// its first market); a one-market config's are other one-market configs.
 pub(crate) async fn count_holdout_looks(
     pool: &PgPool,
     instrument: &str,
     strategy_type: &str,
+    basket_markets: Option<&[String]>,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT \
          FROM strategy_evaluations e \
          JOIN strategy_configs c ON c.id = e.strategy_config_id \
-         WHERE e.stage = 'holdout' AND c.instrument = $1 AND c.strategy_type = $2",
+         WHERE e.stage = 'holdout' AND c.instrument = $1 AND c.strategy_type = $2 \
+           AND c.parameters->'basket'->'markets' IS NOT DISTINCT FROM $3",
     )
     .bind(instrument)
     .bind(strategy_type)
+    .bind(basket_markets.map(|m| serde_json::json!(m)))
     .fetch_one(pool)
+    .await
+}
+
+/// One pipeline try for the deflated Sharpe: a config with a finished
+/// backtest (passed or failed, with a Sharpe), archived ones included.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct BacktestTry {
+    pub strategy_type: String,
+    pub parameters: Value,
+    pub instrument: String,
+    pub granularity: String,
+    /// The backtest's per-trade Sharpe.
+    pub sharpe: f64,
+    /// Its trade count, 0 when not recorded.
+    pub num_trades: i64,
+}
+
+pub(crate) async fn list_backtest_tries(pool: &PgPool) -> Result<Vec<BacktestTry>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT c.strategy_type, c.parameters, c.instrument, c.granularity, \
+                (e.stats->>'sharpe')::FLOAT8 AS sharpe, \
+                COALESCE((e.stats->>'num_trades')::BIGINT, 0) AS num_trades \
+         FROM strategy_evaluations e \
+         JOIN strategy_configs c ON c.id = e.strategy_config_id \
+         WHERE e.stage = 'backtest' AND e.status IN ('passed', 'failed') \
+           AND jsonb_typeof(e.stats->'sharpe') = 'number'",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// The markets ("INSTRUMENT@GRANULARITY") research tried an idea on
+/// outside the pipeline (`research_trials`), each once.
+pub(crate) async fn list_research_markets(
+    pool: &PgPool,
+    family: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT market FROM research_trials, unnest(markets) AS market \
+         WHERE family = $1 ORDER BY market",
+    )
+    .bind(family)
+    .fetch_all(pool)
     .await
 }

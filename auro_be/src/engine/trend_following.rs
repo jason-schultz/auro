@@ -23,6 +23,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine::catalog::{ma_type, port, Block, Series, Setting, AVERAGE_WHY};
 use crate::engine::indicators::{self, MaType};
 use crate::engine::strategy::Signaler;
 use crate::engine::types::{Candle, Direction, EntryReason};
@@ -45,6 +46,43 @@ impl TrendFollowingParams {
             indicators::moving_average(candles, self.fast_period, self.ma_type)?,
             indicators::moving_average(candles, self.slow_period, self.ma_type)?,
         ))
+    }
+}
+
+/// This block in the catalog (`engine::catalog`).
+pub(crate) fn catalog() -> Block {
+    Block {
+        kind: "TrendFollowing",
+        key: "tf",
+        name: "Average crossover",
+        watches: "Two averages, a fast one and a slow one. Fast above slow means the trend is up; the moment they cross is when the trend changes.",
+        settings: vec![
+            Setting::int(
+                "fast_period",
+                "Fast (bars)",
+                50,
+                "Fewer bars react sooner, but give more false starts.",
+            ),
+            Setting::int(
+                "slow_period",
+                "Slow (bars)",
+                200,
+                "The longer-term trend the fast average is compared with.",
+            )
+            .at_least(2.0, AVERAGE_WHY),
+            ma_type(),
+        ],
+        ports: vec![
+            port("bullish", "the average over {fast_period:bars} is above the one over {slow_period:bars}"),
+            port("bearish", "the average over {fast_period:bars} is below the one over {slow_period:bars}"),
+            port("bullish_cross", "the average over {fast_period:bars} crosses above the one over {slow_period:bars}"),
+            port("bearish_cross", "the average over {fast_period:bars} crosses below the one over {slow_period:bars}"),
+        ],
+        series: vec![
+            Series::price("fast", "Fast average"),
+            Series::price("slow", "Slow average"),
+        ],
+        stop: None,
     }
 }
 

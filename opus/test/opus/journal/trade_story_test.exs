@@ -54,7 +54,7 @@ defmodule Opus.Journal.TradeStoryTest do
     story_text = Map.new(story.story)
 
     assert story_text["Opened"] =~
-             "Bought 1 unit of NAS100 at 29,203.6 on Mon Oct 26, 10:30 AM ET"
+             "Bought 1 unit of NAS100 at 29,203.6 on Mon Oct 26, 8:30 AM MDT"
 
     assert story_text["Why"] =~ "broke above its noise area"
     assert story_text["Why"] =~ "last 14 sessions"

@@ -22,6 +22,7 @@
 //! Rates are annual fractions; positive means the position earns.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::America::New_York;
@@ -54,10 +55,41 @@ fn latest_at<T: Copy>(series: &[(NaiveDate, T)], date: NaiveDate) -> Option<T> {
 /// A date-stamped series, ascending by date.
 type Series<T> = Vec<(NaiveDate, T)>;
 
+/// Central-bank policy rates (`policy_rates`): each currency's change
+/// points, ascending. The rate in force on a date is the latest change at
+/// or before it. One table, read the same way by the financing model and by
+/// the `Carry` block.
+#[derive(Debug, Default, Clone)]
+pub struct PolicyRates(HashMap<String, Series<f64>>);
+
+impl PolicyRates {
+    pub fn new(rows: Vec<(String, NaiveDate, f64)>) -> Self {
+        let mut by_currency: HashMap<String, Series<f64>> = HashMap::new();
+        for (currency, date, rate) in rows {
+            by_currency.entry(currency).or_default().push((date, rate));
+        }
+        for s in by_currency.values_mut() {
+            s.sort_by_key(|(d, _)| *d);
+        }
+        Self(by_currency)
+    }
+
+    /// Whether the table has any rate for `currency`.
+    pub fn knows(&self, currency: &str) -> bool {
+        self.0.get(currency).is_some_and(|s| !s.is_empty())
+    }
+
+    /// The rate in force for `currency` on `date` (annual fraction), or
+    /// None before its first recorded change or for an unknown currency.
+    pub fn rate_at(&self, currency: &str, date: NaiveDate) -> Option<f64> {
+        self.0.get(currency).and_then(|s| latest_at(s, date))
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct FinancingModel {
     /// Policy-rate change points per currency.
-    policy: HashMap<String, Series<f64>>,
+    policy: Arc<PolicyRates>,
     /// Recorded OANDA (long, short) rates per instrument.
     recorded: HashMap<String, Series<(f64, f64)>>,
 }
@@ -67,10 +99,10 @@ impl FinancingModel {
         policy: Vec<(String, NaiveDate, f64)>,
         recorded: Vec<(String, NaiveDate, f64, f64)>,
     ) -> Self {
-        let mut model = Self::default();
-        for (currency, date, rate) in policy {
-            model.policy.entry(currency).or_default().push((date, rate));
-        }
+        let mut model = Self {
+            policy: Arc::new(PolicyRates::new(policy)),
+            recorded: HashMap::new(),
+        };
         for (instrument, date, long, short) in recorded {
             model
                 .recorded
@@ -78,20 +110,19 @@ impl FinancingModel {
                 .or_default()
                 .push((date, (long, short)));
         }
-        for s in model.policy.values_mut() {
-            s.sort_by_key(|(d, _)| *d);
-        }
         for s in model.recorded.values_mut() {
             s.sort_by_key(|(d, _)| *d);
         }
         model
     }
 
+    /// The policy rates the model is built on (for the `Carry` block).
+    pub fn policy_rates(&self) -> &Arc<PolicyRates> {
+        &self.policy
+    }
+
     fn policy_rate(&self, currency: &str, date: NaiveDate) -> f64 {
-        self.policy
-            .get(currency)
-            .and_then(|s| latest_at(s, date))
-            .unwrap_or(0.0)
+        self.policy.rate_at(currency, date).unwrap_or(0.0)
     }
 
     /// Annual rate earned (positive) or paid (negative) for holding

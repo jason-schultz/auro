@@ -19,12 +19,19 @@ defmodule Opus.Options do
   # `option_quotes.source` of the held contracts quoted during the session.
   @held_source "questrade_legs"
 
+  # PubSub topic told when a scan has replaced the day's ideas.
+  @ideas_topic "options:ideas"
+
   @strategies [
     {"cash_secured_put", "Sell a put (cash-secured)", "put", "sell"},
     {"covered_call", "Sell a call (covered)", "call", "sell"},
     {"long_call", "Buy a call", "call", "buy"},
     {"long_put", "Buy a put", "put", "buy"}
   ]
+
+  @doc "`option_quotes.source` of the held contracts quoted during the session."
+  @spec held_source() :: String.t()
+  def held_source, do: @held_source
 
   @doc "Select options for the form: `{label, value}`."
   @spec strategy_options() :: [{String.t(), String.t()}]
@@ -116,7 +123,11 @@ defmodule Opus.Options do
     |> Enum.map(&Map.put(&1, :dte, Date.diff(&1.expiration, today)))
   end
 
-  @doc "The most recent night's ideas, best score first, with the underlying's symbol."
+  @doc """
+  The most recent scan's ideas, best score first, with the underlying's
+  symbol and `chain_at`, when the chain snapshot the idea was read from was
+  taken.
+  """
   @spec latest_ideas() :: {Date.t() | nil, [Idea.t()]}
   def latest_ideas do
     case Repo.one(from(i in Idea, select: max(i.scanned_on))) do
@@ -134,15 +145,61 @@ defmodule Opus.Options do
           )
           |> Repo.all()
 
-        {scanned_on, ideas}
+        {scanned_on, with_chain_at(ideas, scanned_on)}
     end
   end
 
-  @spec set_idea_status(integer() | String.t(), String.t()) ::
-          {:ok, Idea.t()} | {:error, Ecto.Changeset.t()}
-  def set_idea_status(id, status) do
-    Idea |> Repo.get!(id) |> Idea.status_changeset(status) |> Repo.update()
+  # Each idea's chain capture: the latest chain quote of its contract taken
+  # on the scan's date, no later than the scan recorded the idea.
+  defp with_chain_at([], _scanned_on), do: []
+
+  defp with_chain_at(ideas, scanned_on) do
+    ids = ideas |> Enum.map(& &1.contract_id) |> Enum.uniq()
+
+    captures =
+      from(q in "option_quotes",
+        where:
+          q.contract_id in type(^ids, {:array, :integer}) and q.source != @held_source and
+            q.captured_at >= type(^Opus.Clock.midnight(scanned_on), :utc_datetime_usec),
+        select: {q.contract_id, type(q.captured_at, :naive_datetime_usec)}
+      )
+      |> Repo.all()
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+
+    Enum.map(ideas, fn idea ->
+      recorded = DateTime.to_naive(idea.inserted_at)
+
+      chain_at =
+        captures
+        |> Map.get(idea.contract_id, [])
+        |> Enum.filter(&(NaiveDateTime.compare(&1, recorded) != :gt))
+        |> Enum.max(NaiveDateTime, fn -> nil end)
+
+      %{idea | chain_at: chain_at}
+    end)
   end
+
+  @doc """
+  Set an idea's status. `{:error, :not_found}` when the row is gone: a
+  re-scan replaces the day's ideas with new rows.
+  """
+  @spec set_idea_status(integer() | String.t(), String.t()) ::
+          {:ok, Idea.t()} | {:error, Ecto.Changeset.t() | :not_found}
+  def set_idea_status(id, status) do
+    case Repo.get(Idea, id) do
+      nil -> {:error, :not_found}
+      idea -> idea |> Idea.status_changeset(status) |> Repo.update()
+    end
+  end
+
+  @doc "Subscribe the caller to `{:ideas_updated, scanned_on}` after each scan."
+  @spec subscribe_ideas() :: :ok | {:error, term()}
+  def subscribe_ideas, do: Phoenix.PubSub.subscribe(Opus.PubSub, @ideas_topic)
+
+  @doc "Tell subscribers a scan has recorded `scanned_on`'s ideas."
+  @spec broadcast_ideas(Date.t()) :: :ok | {:error, term()}
+  def broadcast_ideas(scanned_on),
+    do: Phoenix.PubSub.broadcast(Opus.PubSub, @ideas_topic, {:ideas_updated, scanned_on})
 
   @doc "Expiration dates in an underlying's latest snapshot, nearest first."
   @spec expiries(String.t()) :: [Date.t()]

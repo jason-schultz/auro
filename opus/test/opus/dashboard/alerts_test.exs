@@ -469,7 +469,7 @@ defmodule Opus.Dashboard.AlertsTest do
     }
 
     [alert] = Alerts.build(input(%{live_opens: [open]}))
-    assert alert.detail == "Bought 1 at 29,674.4 at 15:00. Stop at 29,080.1, 2.0% below."
+    assert alert.detail == "Bought 1 at 29,674.4 at 13:00 MDT. Stop at 29,080.1, 2.0% below."
   end
 
   test "a live close says both prices, the result and why" do
@@ -493,7 +493,7 @@ defmodule Opus.Dashboard.AlertsTest do
     [alert] = Alerts.build(input(%{live_closes: [close]}))
 
     assert alert.detail =~
-             "Bought at 29,579.1 at 11:00, sold at 29,639.8 at 14:30 New York: +0.2% · +$84.44."
+             "Bought at 29,579.1 at 09:00, sold at 29,639.8 at 12:30 MDT: +0.2% · +$84.44."
 
     assert alert.detail =~ "Why: the move faded."
   end
