@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use crate::brokers::massive::client::MassiveClient;
 use crate::brokers::oanda::client::OandaClient;
 use crate::brokers::oanda::models::StreamMessage;
-use crate::brokers::questrade::client::QuestradeClient;
+use crate::brokers::questrade::link::QuestradeLink;
 use crate::brokers::wealthsimple::client::WealthsimpleClient;
 use crate::config::Config;
 use crate::engine::live::account_cache::AccountSnapshot;
@@ -24,7 +24,9 @@ pub struct AppState {
     pub start_time: DateTime<Utc>,
     pub live: Arc<LiveState>,
     pub price_tx: broadcast::Sender<StreamMessage>,
-    pub questrade: Option<Arc<tokio::sync::Mutex<QuestradeClient>>>,
+    /// The Questrade connection; empty until connected, replaceable while
+    /// running (`POST /api/questrade/connect`). Always empty in the tester.
+    pub questrade: Arc<QuestradeLink>,
     pub wealthsimple: WealthsimpleClient,
     pub massive: Option<MassiveClient>,
 }
@@ -125,7 +127,7 @@ impl AppState {
             start_time: Utc::now(),
             live: Arc::new(LiveState::new()),
             price_tx,
-            questrade: None,
+            questrade: Arc::new(QuestradeLink::default()),
             wealthsimple,
             massive: None,
         }

@@ -18,6 +18,7 @@ defmodule Opus.Trading.Recipes do
   import Ecto.Query
 
   alias Ecto.Multi
+  alias Opus.Instruments
   alias Opus.Pipeline.Coordinator
   alias Opus.Repo
   alias Opus.Trading.{LiveStrategy, Recipe, Strategies, StrategyWords}
@@ -176,12 +177,22 @@ defmodule Opus.Trading.Recipes do
   Whether the tests can run on `instrument` at `granularity`: they only use
   bars from before the sealed holdout window starts
   (`trading_config.pipeline_holdout_start`), so an instrument whose bars
-  all came later can be previewed but not tested.
+  all came later can be previewed but not tested; and only markets with a
+  broker set for their tests (its costs are what they're graded on).
   `{:error, {:no_history, first_bar, holdout_start}}` says why not.
   """
   @spec testable(String.t(), String.t()) ::
-          :ok | {:error, {:no_history, DateTime.t() | nil, Date.t()}}
+          :ok
+          | {:error, {:no_history, DateTime.t() | nil, Date.t()}}
+          | {:error, {:no_broker, [String.t()]}}
   def testable(instrument, granularity) do
+    case Instruments.without_broker([instrument]) do
+      [] -> history(instrument, granularity)
+      off -> {:error, {:no_broker, off}}
+    end
+  end
+
+  defp history(instrument, granularity) do
     holdout = holdout_start()
     before = DateTime.new!(holdout, ~T[00:00:00], "Etc/UTC")
 

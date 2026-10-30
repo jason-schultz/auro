@@ -4,17 +4,20 @@ defmodule Opus.Trading.StrategyResults do
   pipeline's backtest, walk-forward, Monte Carlo, parameter-stability and
   holdout stages, and its live (forward-test) trades on OANDA.
 
-  A pipeline run is matched to an assignment by instrument and the exact
-  strategy JSON, the same match Rust uses for its stats. Every stage comes
+  A pipeline run is matched to an assignment by instrument, timeframe and
+  settings (`Strategies.trade_settings/1`): names, version and sizing don't
+  count, the same match Squad and the engine's luck check use. Every stage comes
   back with a status, and a stage that has no numbers says why
-  (`:reason`), so the page never shows a bare blank.
+  (`:reason`), so the page never shows a bare blank. A stage that looks
+  waiting or running with nothing working on it is `:stuck`, with the
+  `config_id` and `stage` to resume it from (`Opus.Pipeline.Stuck`).
   """
 
   import Ecto.Query
 
-  alias Opus.Pipeline.{StrategyConfig, StrategyEvaluation}
+  alias Opus.Pipeline.{StrategyConfig, StrategyEvaluation, Stuck}
   alias Opus.Repo
-  alias Opus.Trading.LiveStrategy
+  alias Opus.Trading.{LiveStrategy, Strategies}
 
   @stages ~w(backtest walk_forward monte_carlo parameter_stability holdout)
   # Database strings to atoms by explicit mapping, never String.to_atom.
@@ -47,7 +50,17 @@ defmodule Opus.Trading.StrategyResults do
     "holdout" => "parameter_stability"
   }
 
-  @type stage :: %{status: atom(), stats: map() | nil, reason: String.t() | nil, at: term()}
+  # `old`, on a finished stage: judged by earlier rules than today's (its
+  # rules version, `StrategyEvaluation.current?/1`), so it must be re-tested
+  # before it counts. An old pass reads as `:old_pass`, an old fail as
+  # `:old_fail`.
+  @type stage :: %{
+          optional(:old) => boolean(),
+          status: atom(),
+          stats: map() | nil,
+          reason: String.t() | nil,
+          at: term()
+        }
   @type t :: %{
           backtest: stage(),
           walk_forward: stage(),
@@ -61,17 +74,17 @@ defmodule Opus.Trading.StrategyResults do
   @spec for_ids([Ecto.UUID.t()]) :: %{Ecto.UUID.t() => t()}
   def for_ids(ids) do
     configs = latest_configs(ids)
-    evaluations = configs |> Map.values() |> Enum.map(&elem(&1, 0)) |> evaluations()
+    known = configs |> Map.values() |> Enum.map(&elem(&1, 0)) |> known()
     live = live(ids)
 
     Map.new(ids, fn id ->
       run =
         case configs[id] do
-          {config_id, ran_at} -> {ran_at, Map.get(evaluations, config_id, %{})}
+          {config_id, ran_at} -> {config_id, ran_at}
           nil -> nil
         end
 
-      {id, run |> stages() |> Map.put(:live, Map.get(live, id, %{trades: 0}))}
+      {id, run |> stages(known) |> Map.put(:live, Map.get(live, id, %{trades: 0}))}
     end)
   end
 
@@ -79,37 +92,71 @@ defmodule Opus.Trading.StrategyResults do
   Test runs of a recipe that isn't assigned anywhere yet, one per
   instrument it was tested on (the newest): `%{instrument, ran_at, archived,
   stages}` with `stages` shaped as in `for_ids/1`; `archived` is a run from
-  before the block builder, which pages hide unless asked. Matched by the recipe's rules: a run's
-  strategy JSON minus instrument, timeframe and sizing, on the recipe's
-  timeframe (the same rules on another timeframe are a different test).
+  before the block builder, which pages hide unless asked. Matched by the
+  recipe's settings on the recipe's timeframe (the same rules on another
+  timeframe are a different test).
   """
   @spec for_recipe(map(), String.t()) :: [map()]
-  def for_recipe(definition, granularity) do
-    configs =
+  def for_recipe(definition, granularity),
+    do: [{definition, granularity}] |> for_recipes() |> hd()
+
+  @doc """
+  `for_recipe/2` for several recipes, `[{definition, granularity}]`, in one
+  load: a list of their results in the same order.
+  """
+  @spec for_recipes([{map(), String.t()}]) :: [[map()]]
+  def for_recipes([]), do: []
+
+  def for_recipes(recipes) do
+    granularities = recipes |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
+
+    by_settings =
       from(sc in StrategyConfig,
         where:
-          sc.granularity == ^granularity and
-            fragment(
-              "(? - 'instrument' - 'granularity' - 'sizing') = ?",
-              sc.parameters,
-              type(^definition, :map)
-            ),
+          sc.granularity in ^granularities and
+            not fragment("jsonb_exists(?, 'basket')", sc.parameters),
         order_by: [asc: sc.instrument, desc: sc.inserted_at],
-        distinct: sc.instrument,
-        select: {sc.instrument, sc.id, sc.inserted_at, not is_nil(sc.archived_at)}
+        select: %{
+          instrument: sc.instrument,
+          granularity: sc.granularity,
+          id: sc.id,
+          ran_at: sc.inserted_at,
+          archived: not is_nil(sc.archived_at),
+          parameters: sc.parameters
+        }
       )
       |> Repo.all()
+      |> Enum.group_by(&{&1.granularity, Strategies.trade_settings(&1.parameters)})
 
-    evaluations = configs |> Enum.map(&elem(&1, 1)) |> evaluations()
+    runs =
+      Enum.map(recipes, fn {definition, granularity} ->
+        by_settings
+        |> Map.get({granularity, Strategies.trade_settings(definition)}, [])
+        |> Enum.uniq_by(& &1.instrument)
+      end)
 
-    Enum.map(configs, fn {instrument, id, ran_at, archived} ->
-      %{
-        instrument: instrument,
-        ran_at: ran_at,
-        archived: archived,
-        stages: stages({ran_at, Map.get(evaluations, id, %{})})
-      }
+    known = runs |> List.flatten() |> Enum.map(& &1.id) |> Enum.uniq() |> known()
+
+    Enum.map(runs, fn configs ->
+      Enum.map(configs, fn %{instrument: instrument, id: id, ran_at: ran_at, archived: archived} ->
+        %{
+          instrument: instrument,
+          ran_at: ran_at,
+          archived: archived,
+          stages: stages({id, ran_at}, known)
+        }
+      end)
     end)
+  end
+
+  @doc """
+  The stages of pipeline runs by config id, each run given as `{config_id,
+  ran_at}`, shaped as in `for_ids/1` (without `:live`).
+  """
+  @spec for_configs([{Ecto.UUID.t(), DateTime.t()}]) :: %{Ecto.UUID.t() => map()}
+  def for_configs(runs) do
+    known = runs |> Enum.map(&elem(&1, 0)) |> known()
+    Map.new(runs, fn {id, ran_at} -> {id, stages({id, ran_at}, known)} end)
   end
 
   @doc """
@@ -117,74 +164,103 @@ defmodule Opus.Trading.StrategyResults do
   `Opus.Trading.Baskets`), newest first: `%{config_id, ran_at, basket,
   stages}` with `basket` the stored settings (`"markets"`, `"mode"`,
   `"rank"`) and `stages` shaped as in `for_ids/1`. Matched like
-  `for_recipe/2`, the basket settings set aside too.
+  `for_recipe/2`.
   """
   @spec for_baskets(map(), String.t()) :: [map()]
   def for_baskets(definition, granularity) do
     configs =
       from(sc in StrategyConfig,
         where:
-          sc.granularity == ^granularity and fragment("jsonb_exists(?, 'basket')", sc.parameters) and
-            fragment(
-              "(? - 'instrument' - 'granularity' - 'sizing' - 'basket') = ?",
-              sc.parameters,
-              type(^definition, :map)
-            ),
+          sc.granularity == ^granularity and fragment("jsonb_exists(?, 'basket')", sc.parameters),
         order_by: [desc: sc.inserted_at],
-        select: {sc.id, sc.inserted_at, sc.parameters}
+        select: %{id: sc.id, ran_at: sc.inserted_at, parameters: sc.parameters}
       )
       |> Repo.all()
+      |> same_settings(definition)
 
-    evaluations = configs |> Enum.map(&elem(&1, 0)) |> evaluations()
+    known = configs |> Enum.map(& &1.id) |> known()
 
-    Enum.map(configs, fn {id, ran_at, parameters} ->
+    Enum.map(configs, fn %{id: id, ran_at: ran_at, parameters: parameters} ->
       %{
         config_id: id,
         ran_at: ran_at,
         basket: parameters["basket"],
-        stages: stages({ran_at, Map.get(evaluations, id, %{})})
+        stages: stages({id, ran_at}, known)
       }
     end)
   end
 
-  # The five pipeline stages of one run, `{ran_at, evaluations by stage}`,
-  # or nil when the assignment has never been through the pipeline. A
-  # stage with no row yet is waiting when the one before it passed (or it's
-  # the backtest); runs from before the holdout stage existed have none.
-  defp stages(nil) do
+  # The five pipeline stages of one run, `{config_id, ran_at}`, or nil
+  # when the assignment has never been through the pipeline. A stage with
+  # no row yet is waiting when the one before it passed (or it's the
+  # backtest); runs from before the holdout stage existed have none. A
+  # waiting or running stage with nothing working on it is stuck
+  # (`Opus.Pipeline.Stuck`).
+  defp stages(nil, _known) do
     Map.new(@stages, fn stage ->
       {@stage_keys[stage], not_run("Never run through the testing pipeline.")}
     end)
   end
 
-  defp stages({ran_at, by_stage}),
-    do: Map.new(@stages, &{@stage_keys[&1], stage(&1, ran_at, by_stage)})
+  defp stages({config_id, ran_at}, known) do
+    by_stage = Map.get(known.evaluations, config_id, %{})
 
-  defp stage(stage, ran_at, by_stage) do
+    run = %{
+      config_id: config_id,
+      jobs: known.jobs,
+      now: known.now,
+      archived: MapSet.member?(known.archived, config_id)
+    }
+
+    Map.new(@stages, &{@stage_keys[&1], stage(&1, ran_at, by_stage, run)})
+  end
+
+  defp stage(stage, ran_at, by_stage, run) do
     previous = previous(stage, ran_at)
 
     case {by_stage[stage], by_stage[previous]} do
-      # A pass from before Oct 28 was judged on looser rules and recorded
-      # no checks; it reads as that, not as meeting today's standard.
-      {%{status: "passed", stats: stats} = e, _previous}
-      when is_nil(stats) or not is_map_key(stats, "checks") ->
-        %{
-          status: :old_pass,
-          stats: e.stats,
-          at: e.evaluated_at,
-          reason:
-            "Passed the rules in use before Oct 28 and hasn't been re-run since. Re-test it to judge it by today's standard.",
-          checks: []
-        }
+      # A pass judged by earlier rules (stamped with an older rules version,
+      # or none) reads as that, not as meeting today's standard.
+      {%{status: "passed"} = e, _previous} ->
+        if StrategyEvaluation.current?(e),
+          do: finished(e),
+          else: %{
+            status: :old_pass,
+            stats: e.stats,
+            at: e.evaluated_at,
+            reason:
+              "Passed the rules in use when it ran and hasn't been re-run since. Re-test it to judge it by today's standard.",
+            checks: checks(e.stats, nil),
+            old: true
+          }
 
-      {%{status: status} = e, _previous} ->
-        %{
-          status: Map.fetch!(@statuses, status),
-          stats: e.stats,
-          at: e.evaluated_at,
-          reason: if(status == "failed", do: e.failure_reason),
-          checks: checks(e.stats, e.failure_reason)
-        }
+      {%{status: status} = e, _previous} when status in ["pending", "running"] ->
+        if stuck?(stage, e, run),
+          do: stuck(stage, e, run),
+          else: %{
+            status: Map.fetch!(@statuses, status),
+            stats: nil,
+            at: nil,
+            reason: nil,
+            checks: []
+          }
+
+      # Likewise a fail: today's rules might judge it differently.
+      {%{status: "failed"} = e, _previous} ->
+        if StrategyEvaluation.current?(e),
+          do: finished(e),
+          else: %{
+            status: :old_fail,
+            stats: e.stats,
+            at: e.evaluated_at,
+            reason:
+              "Failed the rules in use when it ran and hasn't been re-run since. Re-test it to judge it by today's standard.",
+            checks: checks(e.stats, e.failure_reason),
+            old: true
+          }
+
+      {%{} = e, _previous} ->
+        finished(e)
 
       {nil, %{status: "failed"}} ->
         not_run("Skipped because the #{words(previous)} failed.")
@@ -196,7 +272,7 @@ defmodule Opus.Trading.StrategyResults do
               "Not run. The nearby-settings test joined the pipeline on Oct 30, after this ran. " <>
                 "Re-test it to include it."
             ),
-          else: waiting()
+          else: waiting(stage, run)
 
       {nil, %{status: "passed"}} when stage == "holdout" ->
         if before?(ran_at, @holdout_added),
@@ -205,17 +281,34 @@ defmodule Opus.Trading.StrategyResults do
               "Not run. It's a one-time look at data kept aside; tests run since Oct 17 " <>
                 "include it after Monte Carlo, and these ran before that."
             ),
-          else: waiting()
+          else: waiting(stage, run)
 
-      {nil, %{status: _passed_or_running}} ->
+      {nil, %{status: "passed"}} ->
+        waiting(stage, run)
+
+      # The stage before is still running (or stuck itself): this one waits on it.
+      {nil, %{status: _running}} ->
         waiting()
 
       {nil, nil} when stage == "backtest" ->
-        waiting()
+        waiting(stage, run)
 
       {nil, nil} ->
         not_run("Not run.")
     end
+  end
+
+  # A finished stage (passed or failed) as recorded; `old` when it was
+  # judged by earlier rules (`StrategyEvaluation.current?/1`).
+  defp finished(e) do
+    %{
+      status: Map.fetch!(@statuses, e.status),
+      stats: e.stats,
+      at: e.evaluated_at,
+      reason: if(e.status == "failed", do: e.failure_reason),
+      checks: checks(e.stats, e.failure_reason),
+      old: not StrategyEvaluation.current?(e)
+    }
   end
 
   # The stage a run reached this one from: before parameter stability
@@ -229,6 +322,34 @@ defmodule Opus.Trading.StrategyResults do
   defp before?(ran_at, added), do: DateTime.compare(ran_at, added) == :lt
 
   defp waiting, do: %{status: :pending, stats: nil, at: nil, reason: nil, checks: []}
+
+  # Waiting for its job, or stuck when there is none.
+  defp waiting(stage, run),
+    do: if(stuck?(stage, nil, run), do: stuck(stage, nil, run), else: waiting())
+
+  defp stuck?(stage, evaluation, run),
+    do: Stuck.stuck?(run.config_id, stage, evaluation, run.jobs, run.now)
+
+  # `config_id` and `stage` say what `Stuck.resume/3` would pick up;
+  # `started` whether the stage had begun (a `running` row). An archived
+  # run is never resumed (`Stuck.resume/3`), so it just never finished.
+  defp stuck(_stage, _evaluation, %{archived: true}),
+    do: not_run("Never finished: the run was archived first. Re-test it to finish it.")
+
+  defp stuck(stage, evaluation, run) do
+    %{
+      status: :stuck,
+      stats: nil,
+      at: nil,
+      reason:
+        "Stopped part-way (the tester restarted or the job was cleared): nothing is running it.",
+      checks: [],
+      config_id: run.config_id,
+      stage: @stage_keys[stage],
+      started: evaluation != nil
+    }
+  end
+
   defp not_run(reason), do: %{status: :not_run, stats: nil, at: nil, reason: reason, checks: []}
 
   @doc """
@@ -280,23 +401,68 @@ defmodule Opus.Trading.StrategyResults do
   defp words("parameter_stability"), do: "nearby-settings test"
 
   # Newest pipeline run per assignment: assignment id => config id.
+  # Each assignment's newest run of its own settings on its instrument and
+  # timeframe.
   defp latest_configs(ids) do
-    from(sc in StrategyConfig,
-      join: ls in LiveStrategy,
-      on:
-        ls.instrument == sc.instrument and ls.granularity == sc.granularity and
-          fragment(
-            "(? - 'instrument' - 'granularity' - 'sizing') = (? - 'instrument' - 'granularity' - 'sizing')",
-            sc.parameters,
-            ls.parameters
-          ),
-      where: ls.id in ^ids,
-      order_by: [asc: ls.id, desc: sc.inserted_at],
-      distinct: ls.id,
-      select: {ls.id, {sc.id, sc.inserted_at}}
+    assigned =
+      from(ls in LiveStrategy,
+        where: ls.id in ^ids,
+        select: %{id: ls.id, market: {ls.instrument, ls.granularity}, parameters: ls.parameters}
+      )
+      |> Repo.all()
+
+    instruments = assigned |> Enum.map(&elem(&1.market, 0)) |> Enum.uniq()
+
+    runs =
+      from(sc in StrategyConfig,
+        where:
+          sc.instrument in ^instruments and
+            not fragment("jsonb_exists(?, 'basket')", sc.parameters),
+        order_by: [desc: sc.inserted_at],
+        select: %{
+          id: sc.id,
+          ran_at: sc.inserted_at,
+          market: {sc.instrument, sc.granularity},
+          parameters: sc.parameters
+        }
+      )
+      |> Repo.all()
+      |> Enum.group_by(& &1.market)
+
+    for a <- assigned,
+        run = runs |> Map.get(a.market, []) |> same_settings(a.parameters) |> List.first(),
+        run != nil,
+        into: %{},
+        do: {a.id, {run.id, run.ran_at}}
+  end
+
+  # The runs of the same strategy as `parameters`: the same settings,
+  # whatever their names, version or sizing. Order is kept.
+  defp same_settings(runs, parameters) do
+    settings = Strategies.trade_settings(parameters)
+    Enum.filter(runs, &(Strategies.trade_settings(&1.parameters) == settings))
+  end
+
+  # What shaping a set of runs needs: their evaluation rows by stage, the
+  # stages with a live job, and one clock for all of them.
+  defp known(config_ids) do
+    %{
+      evaluations: evaluations(config_ids),
+      jobs: Stuck.live_jobs(config_ids),
+      now: DateTime.utc_now(),
+      archived: archived(config_ids)
+    }
+  end
+
+  defp archived([]), do: MapSet.new()
+
+  defp archived(config_ids) do
+    from(c in StrategyConfig,
+      where: c.id in ^config_ids and not is_nil(c.archived_at),
+      select: c.id
     )
     |> Repo.all()
-    |> Map.new()
+    |> MapSet.new()
   end
 
   defp evaluations([]), do: %{}

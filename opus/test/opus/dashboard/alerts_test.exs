@@ -80,6 +80,14 @@ defmodule Opus.Dashboard.AlertsTest do
     assert Alerts.worker_name("Opus.Something.NewWorker") == "NewWorker"
   end
 
+  test "a promote that gave up says to add the strategy from Squad" do
+    jobs = [%{worker: "Opus.Pipeline.PromoteWorker", error: "connection refused"}]
+
+    [alert] = Alerts.build(input(%{failed_jobs: jobs}))
+    assert alert.what_to_do =~ "won't run again"
+    assert alert.link == "/together"
+  end
+
   test "stale candles only matter while the market is open" do
     assert [%{level: :act}] = Alerts.build(input(%{candle_age: 601}))
     assert Alerts.build(input(%{candle_age: 600})) == []

@@ -26,7 +26,7 @@ pub async fn enrich(
     State(state): State<AppState>,
     body: Option<Json<EnrichParams>>,
 ) -> AppResult<Json<Value>> {
-    let Some(qt) = state.questrade.as_ref() else {
+    let Some(qt) = state.questrade.client() else {
         return Err(AppError::Internal("Questrade not configured".into()));
     };
     let params = body.map(|Json(p)| p).unwrap_or_default();

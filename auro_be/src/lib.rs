@@ -12,7 +12,9 @@ use crate::brokers::massive::client::MassiveClient;
 use brokers::oanda::client::OandaClient;
 use brokers::oanda::stream::run_price_stream;
 use brokers::oanda::{is_forex_market_open, INSTRUMENTS};
+use brokers::questrade::client::is_token_refused;
 use brokers::questrade::client::QuestradeClient;
+use brokers::questrade::link::{retry_until_connected, Connect, QuestradeLink};
 use brokers::wealthsimple::client::WealthsimpleClient;
 use config::{Config, Mode};
 use engine::live::account_cache::run_account_refresher;
@@ -77,7 +79,7 @@ pub async fn run(mode: Mode) -> anyhow::Result<()> {
     );
 
     // Both processes check the schema; each sizes its own pool.
-    let pool = db::create_pool(&config.database_url, config.db_pool_size).await?;
+    let pool = db::create_pool(&config.database_url, config.db_pool_size, mode).await?;
 
     let (state, app) = match mode {
         Mode::Live => (start_live(config.clone(), pool).await, api::live_router()),
@@ -121,7 +123,7 @@ fn tester_state(config: Config, pool: sqlx::PgPool) -> AppState {
         start_time: chrono::Utc::now(),
         live: Arc::new(LiveState::new()),
         price_tx,
-        questrade: None,
+        questrade: Arc::new(QuestradeLink::default()),
         wealthsimple: WealthsimpleClient::new(&pool),
         massive: None,
     }
@@ -160,21 +162,35 @@ async fn start_live(config: Config, pool: sqlx::PgPool) -> AppState {
 
     let (price_tx, _) = broadcast::channel(256);
 
-    let questrade =
-        match QuestradeClient::connect(&pool, config.questrade_refresh_token.as_deref()).await {
-            Ok(Some(client)) => {
-                tracing::info!("Questrade connected.");
-                Some(Arc::new(tokio::sync::Mutex::new(client)))
-            }
-            Ok(None) => {
-                tracing::info!("No Questrade token configured; skipping.");
-                None
-            }
-            Err(e) => {
-                tracing::warn!("Questrade init error: {}. Continuing without Questrade.", e);
-                None
-            }
-        };
+    // A failed start retries the saved token in the background, and a new
+    // token can be pasted on Opus's Accounts page; neither needs a restart.
+    let questrade = Arc::new(QuestradeLink::default());
+    match questrade
+        .connect(QuestradeClient::connect(
+            &pool,
+            config.questrade_refresh_token.as_deref(),
+        ))
+        .await
+    {
+        Ok(Connect::Connected) => tracing::info!("Questrade connected."),
+        Ok(_) => tracing::info!(
+            "No Questrade token saved or configured; connect from the Accounts page."
+        ),
+        // A refused token won't become good again: only a new one helps.
+        Err(e) if is_token_refused(&e) => tracing::warn!(
+            "Questrade init error: {}. Continuing without Questrade; paste a new token on \
+             the Accounts page.",
+            e
+        ),
+        Err(e) => {
+            tracing::warn!(
+                "Questrade init error: {}. Continuing without Questrade; retrying the saved \
+                 token in the background, or paste a new one on the Accounts page.",
+                e
+            );
+            tokio::spawn(retry_until_connected(questrade.clone(), pool.clone()));
+        }
+    }
 
     let massive = match config.massive_api_key.as_deref() {
         Some(key) => match MassiveClient::new(

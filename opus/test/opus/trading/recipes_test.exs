@@ -128,6 +128,35 @@ defmodule Opus.Trading.RecipesTest do
     assert DateTime.compare(first, ~U[2026-07-20 20:00:00Z]) == :eq
   end
 
+  test "a market with no broker set isn't tested, and says why" do
+    {:ok, _} = Opus.Instruments.add("ZZZ", "index")
+    bar!("ZZZ", ~U[2024-03-01 20:00:00Z])
+    {:ok, recipe} = Recipes.create(%{name: "Draft", granularity: "D", definition: @definition})
+
+    assert Recipes.run_tests(recipe, "ZZZ") == {:error, {:no_broker, ["ZZZ"]}}
+    assert Opus.Instruments.without_broker_words(["ZZZ"]) =~ "no broker set"
+    assert Repo.all(StrategyConfig) == []
+
+    # The pipeline's own door refuses it too, whoever calls.
+    assert Opus.Pipeline.Coordinator.submit_config(%{
+             instrument: "ZZZ",
+             granularity: "D",
+             strategy_type: "composite",
+             parameters: %{}
+           }) == {:error, {:no_broker, ["ZZZ"]}}
+  end
+
+  test "a stock or ETF is tested for Wealthsimple, an OANDA market for OANDA" do
+    {:ok, shop} = Opus.Instruments.add("SHOP", "equity")
+    {:ok, spy} = Opus.Instruments.add("SPY", "etf")
+    {:ok, gold} = Opus.Instruments.add("XAU_USD", "metal")
+
+    assert {shop.test_broker, spy.test_broker, gold.test_broker} ==
+             {"wealthsimple", "wealthsimple", "oanda"}
+
+    assert Opus.Instruments.without_broker(~w(SHOP SPY XAU_USD)) == []
+  end
+
   test "running the tests sends the recipe on the instrument through the pipeline" do
     bar!("SPX500_USD", ~U[2024-03-01 20:00:00Z])
     {:ok, recipe} = Recipes.create(%{name: "Draft", granularity: "D", definition: @definition})
@@ -137,5 +166,17 @@ defmodule Opus.Trading.RecipesTest do
 
     assert [%{instrument: "SPX500_USD", stages: %{backtest: %{status: :pending}}}] =
              StrategyResults.for_recipe(recipe.definition, "D")
+  end
+
+  test "a renamed recipe keeps its results; other settings don't share them" do
+    bar!("SPX500_USD", ~U[2024-03-01 20:00:00Z])
+    {:ok, recipe} = Recipes.create(%{name: "Draft", granularity: "D", definition: @definition})
+    {:ok, _config} = Recipes.run_tests(recipe, "SPX500_USD")
+
+    renamed = Map.put(recipe.definition, "strategy_name", "Renamed")
+    assert [%{instrument: "SPX500_USD"}] = StrategyResults.for_recipe(renamed, "D")
+
+    other = Map.put(recipe.definition, "max_hold_bars", 7)
+    assert StrategyResults.for_recipe(other, "D") == []
   end
 end

@@ -163,6 +163,8 @@ fn live_only() -> Router<AppState> {
         // Questrade
         .route("/api/financing/snapshot", post(financing::snapshot))
         .route("/api/questrade/status", get(questrade::status))
+        // Spends a Questrade refresh token: never on the tester.
+        .route("/api/questrade/connect", post(questrade::connect))
         .route("/api/questrade/candles", get(questrade::get_candles))
         .route("/api/questrade/quotes", get(questrade::get_quotes))
         .route("/api/questrade/symbols", get(questrade::get_symbols))

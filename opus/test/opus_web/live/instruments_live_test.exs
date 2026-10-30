@@ -62,6 +62,19 @@ defmodule OpusWeb.InstrumentsLiveTest do
     refute html =~ ~s(id="instrument-#{eur.id}")
   end
 
+  test "each listing says which broker's costs its tests use, and it can change", %{conn: conn} do
+    {:ok, spy} = Instruments.add("SPY", "etf")
+    {:ok, view, html} = live(conn, ~p"/instruments")
+    assert html =~ "Tested for"
+
+    view
+    |> form("#broker-#{spy.id}", %{broker: ""})
+    |> render_change(%{"instrument" => spy.id})
+
+    assert Instruments.get!(spy.id).test_broker == nil
+    assert Instruments.without_broker(["SPY"]) == ["SPY"]
+  end
+
   test "retired listings hide until asked for", %{conn: conn} do
     {:ok, ry} = Instruments.add("RY.TO", "equity")
     {:ok, _} = Instruments.toggle(ry, :active)

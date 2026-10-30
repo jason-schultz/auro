@@ -24,6 +24,7 @@ defmodule Opus.Trading.Baskets do
 
   import Ecto.Query
 
+  alias Opus.Instruments
   alias Opus.Pipeline.Coordinator
   alias Opus.Repo
   alias Opus.Trading.{Blocks, Recipe, Recipes, Strategies}
@@ -128,7 +129,9 @@ defmodule Opus.Trading.Baskets do
   Send the recipe through the tests on `markets`. `opts`:
 
     - `mode`: `"separate"`, `"together"` or `"ranked"`.
-    - `rank`: for ranked, `%{"by", "every_bars", "long_top", "short_bottom"}`.
+    - `rank`: for ranked, `%{"by", "every_bars", "long_top", "short_bottom"}`,
+      plus `"buy" => "lowest"` to buy the lowest scores and sell the
+      highest (short-term reversal); without it the highest are bought.
 
   Returns `{:ok, configs}` (one per market when separate, else one), or
   `{:error, words}` saying what to change.
@@ -181,13 +184,18 @@ defmodule Opus.Trading.Baskets do
           {:error, "It buys #{top} and sells #{bottom}: more than the #{count} markets picked."}
 
         true ->
+          # Stored only when it's the reversal, so a default ranking stays
+          # the same settings as one saved before the choice existed.
           {:ok,
-           %{
-             "by" => rank["by"],
-             "every_bars" => every,
-             "long_top" => top,
-             "short_bottom" => bottom
-           }}
+           Map.merge(
+             %{
+               "by" => rank["by"],
+               "every_bars" => every,
+               "long_top" => top,
+               "short_bottom" => bottom
+             },
+             if(rank["buy"] == "lowest", do: %{"buy" => "lowest"}, else: %{})
+           )}
       end
     end
   end
@@ -255,6 +263,7 @@ defmodule Opus.Trading.Baskets do
     |> Enum.map_join("; ", fn {field, messages} -> "#{field} #{Enum.join(messages, ", ")}" end)
   end
 
+  defp why({:no_broker, names}), do: Instruments.without_broker_words(names)
   defp why(other), do: inspect(other)
 
   @doc """
@@ -295,14 +304,24 @@ defmodule Opus.Trading.Baskets do
   def by_months?(%{basket: %{"mode" => "ranked"}}), do: true
   def by_months?(_run), do: false
 
-  @doc "How a basket was tested, in words."
-  @spec mode_words(map()) :: String.t()
-  def mode_words(%{"mode" => "ranked", "rank" => rank}) do
-    "Ranked every #{rank["every_bars"]} bars by #{rank["by"]}: buy the top #{rank["long_top"]}, " <>
-      "sell the bottom #{rank["short_bottom"]}"
+  @doc """
+  How a basket was tested, in words. `choices` (`rank_choices/1`) names
+  the ranked value the way the form did; without it the raw key shows.
+  """
+  @spec mode_words(map(), [{String.t(), String.t()}]) :: String.t()
+  def mode_words(basket, choices \\ [])
+
+  def mode_words(%{"mode" => "ranked", "rank" => rank}, choices) do
+    by = Enum.find_value(choices, rank["by"], fn {key, label} -> key == rank["by"] && label end)
+
+    {buy, sell} = if rank["buy"] == "lowest", do: {"bottom", "top"}, else: {"top", "bottom"}
+
+    "Ranked every #{rank["every_bars"]} bars by #{by}: buy the #{buy} #{rank["long_top"]}, " <>
+      "sell the #{sell} #{rank["short_bottom"]}"
   end
 
-  def mode_words(_together), do: "Together as one account, each market on the recipe's own rules"
+  def mode_words(_together, _choices),
+    do: "Together as one account, each market on the recipe's own rules"
 
   defp curve(%{"curve" => points}) when is_list(points) do
     Enum.map(points, fn p ->

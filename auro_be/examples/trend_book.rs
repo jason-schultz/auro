@@ -36,7 +36,7 @@ mod common;
 use common::{mean_std, yahoo_closes};
 
 use auro::db::repositories::{candles as candles_repo, financing as financing_repo};
-use auro::engine::financing::{apply_financing, FinancingModel};
+use auro::engine::financing::{apply_costs, FinancingModel};
 use auro::engine::strategy::{run_backtest, Strategy};
 use auro::engine::types::{Direction, Granularity};
 
@@ -429,7 +429,7 @@ async fn live_sleeves(
         let granularity = Granularity::from_str(strategy.granularity.as_str())?;
         let candles = candles_repo::load_candles(pool, &instrument, granularity).await?;
         let mut trades = run_backtest(&candles, &strategy);
-        apply_financing(&mut trades, &instrument, financing);
+        apply_costs(&mut trades, &instrument, financing);
         names.push(format!(
             "{instrument} {granularity} ({} trades)",
             trades.len()

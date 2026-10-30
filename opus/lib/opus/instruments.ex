@@ -138,6 +138,7 @@ defmodule Opus.Instruments do
     |> String.upcase()
     |> listing()
     |> Map.put(:asset_class, asset_class)
+    |> then(&Map.put(&1, :test_broker, default_broker(&1)))
     |> create()
   end
 
@@ -147,6 +148,47 @@ defmodule Opus.Instruments do
     |> Instrument.changeset(attrs)
     |> Repo.insert()
   end
+
+  # The broker a new listing's tests assume: OANDA for an OANDA market,
+  # Wealthsimple (traded by hand there) for a stock or ETF, none otherwise.
+  defp default_broker(%{oanda_symbol: name}) when is_binary(name), do: "oanda"
+  defp default_broker(%{asset_class: class}) when class in ~w(equity etf), do: "wealthsimple"
+  defp default_broker(_listing), do: nil
+
+  @doc """
+  The names among `names` whose market has no broker set for its tests
+  (`test_broker`), in order: there are no costs to grade them on, so they
+  aren't tested (the engine refuses them too). A name is matched in any
+  vendor's spelling.
+  """
+  @spec without_broker([String.t()]) :: [String.t()]
+  def without_broker(names) do
+    with_broker =
+      from(i in Instrument,
+        where:
+          not is_nil(i.test_broker) and
+            (i.oanda_symbol in ^names or i.questrade_symbol in ^names or
+               i.massive_ticker in ^names),
+        select: [i.oanda_symbol, i.questrade_symbol, i.massive_ticker]
+      )
+      |> Repo.all()
+      |> List.flatten()
+      |> MapSet.new()
+
+    Enum.reject(names, &MapSet.member?(with_broker, &1))
+  end
+
+  @doc "Why `names` (from `without_broker/1`) can't be tested, in plain words."
+  @spec without_broker_words([String.t()]) :: String.t()
+  def without_broker_words([name]),
+    do:
+      "#{name} has no broker set for its tests, so there are no costs to grade it on. " <>
+        "Pick one on the Instruments page."
+
+  def without_broker_words(names),
+    do:
+      "#{Enum.join(names, ", ")} have no broker set for their tests, so there are no costs " <>
+        "to grade them on. Pick one on the Instruments page."
 
   @doc false
   @spec listing(String.t()) :: map()
@@ -184,6 +226,25 @@ defmodule Opus.Instruments do
 
     instrument
     |> Ecto.Changeset.change(%{flag => not Map.fetch!(instrument, flag)})
+    |> Repo.update()
+  end
+
+  @doc """
+  The brokers a market can be tested for, `[{name, label}]` (`brokers`),
+  each with the costs its tests charge.
+  """
+  @spec brokers() :: [{String.t(), String.t()}]
+  def brokers do
+    from(b in "brokers", order_by: b.label, select: {b.name, b.label})
+    |> Repo.all()
+  end
+
+  @doc "Set the broker `instrument`'s tests charge the costs of; nil: not tested."
+  @spec set_broker(Instrument.t(), String.t() | nil) ::
+          {:ok, Instrument.t()} | {:error, Ecto.Changeset.t()}
+  def set_broker(%Instrument{} = instrument, broker) do
+    instrument
+    |> Instrument.changeset(%{test_broker: broker})
     |> Repo.update()
   end
 

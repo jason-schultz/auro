@@ -9,7 +9,7 @@ use crate::state::AppState;
 pub async fn list_brokers(State(state): State<AppState>) -> AppResult<Json<Vec<BrokerStatus>>> {
     let oanda_status = state.oanda.clone().broker_status().await;
 
-    let questrade_status = if let Some(qt) = state.questrade.as_ref() {
+    let questrade_status = if let Some(qt) = state.questrade.client() {
         let mut client = qt.lock().await;
         client.broker_status().await
     } else {

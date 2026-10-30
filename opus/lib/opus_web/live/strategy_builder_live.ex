@@ -20,7 +20,7 @@ defmodule OpusWeb.StrategyBuilderLive do
   use OpusWeb, :live_view
 
   import OpusWeb.SignalChart, only: [signal_chart: 1]
-  import OpusWeb.StrategyParts, only: [locked_words: 1, runs_list: 1]
+  import OpusWeb.StrategyParts, only: [field: 1, locked_words: 1, resume: 1, runs_list: 1]
 
   alias Opus.Auro.Client
 
@@ -182,6 +182,9 @@ defmodule OpusWeb.StrategyBuilderLive do
           "history from before #{Calendar.strftime(holdout, "%b %-d, %Y")} (everything after is " <>
           "kept aside for the holdout), so it can be previewed here but not tested. Pick an " <>
           "instrument with longer history, or other bars."
+
+      {:error, {:no_broker, names}} ->
+        Opus.Instruments.without_broker_words(names) <> " It can be previewed here, not tested."
     end
   end
 
@@ -264,6 +267,15 @@ defmodule OpusWeb.StrategyBuilderLive do
 
   def handle_event("pick_trade", %{"trade" => trade}, socket),
     do: {:noreply, assign(socket, focus: String.to_integer(trade))}
+
+  def handle_event("resume_stage", params, %{assigns: %{recipe: recipe}} = socket) do
+    {kind, words} = resume(params)
+
+    {:noreply,
+     socket
+     |> put_flash(kind, words)
+     |> assign(runs: StrategyResults.for_recipe(recipe.definition, recipe.granularity))}
+  end
 
   def handle_event("fragility_axes", params, socket),
     do: {:noreply, WholeHistory.pick_axes(socket, params)}
@@ -430,7 +442,7 @@ defmodule OpusWeb.StrategyBuilderLive do
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, put_flash(socket, :error, errors(changeset))}
 
-      {:error, {:no_history, _first, _holdout}} ->
+      {:error, untestable} when elem(untestable, 0) in [:no_history, :no_broker] ->
         {:noreply,
          socket
          |> put_flash(
@@ -1094,20 +1106,6 @@ defmodule OpusWeb.StrategyBuilderLive do
         </.link>
       </div>
     </Layouts.app>
-    """
-  end
-
-  attr :label, :string, required: true
-  attr :help, :string, default: nil
-  slot :inner_block, required: true
-
-  defp field(assigns) do
-    ~H"""
-    <label class="flex flex-col gap-1 text-[13px] text-muted">
-      {@label}
-      {render_slot(@inner_block)}
-      <span :if={@help} class="text-[12px] leading-snug">{@help}</span>
-    </label>
     """
   end
 

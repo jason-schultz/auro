@@ -111,7 +111,7 @@ Engine (`auro_be/.env`):
 | `HOST`, `PORT` | default `127.0.0.1`, `3000` (live engine) |
 | `AURO_TESTER_PORT` | tester's port, default `3001` (it ignores `PORT`) |
 | `AURO_LIVE_DB_POOL_SIZE`, `AURO_TESTER_DB_POOL_SIZE` | Postgres connections per process, default `5` and `10` |
-| `QUESTRADE_REFRESH_TOKEN` | optional; first-run token for Questrade |
+| `QUESTRADE_REFRESH_TOKEN` | optional; first-run token for Questrade (a start-up fallback; when Questrade later rejects the saved token, paste a new one on Opus's Accounts page, no restart) |
 | `MASSIVE_API_KEY`, `MASSIVE_BASE_URL`, `MASSIVE_CALLS_PER_MINUTE` | optional; US daily bars |
 
 Opus (your shell in development; `running_local/opus.env` as a service, from

@@ -3,7 +3,9 @@
 //! each rebalance bar every market in a basket gets a score, a value one of
 //! the recipe's blocks shows (`Signaler::series`, e.g. `carry.carry` or
 //! `mom.roc`); the highest `long_top` are bought, the lowest `short_bottom`
-//! sold, and everything else is flat until the next rebalance.
+//! sold (or the other way round, `buy: lowest`, for short-term reversal:
+//! buy the recent losers), and everything else is flat until the next
+//! rebalance.
 //!
 //! The decision is one pure function, `targets`, so the backtest
 //! (`pipeline::basket`) and a live runner can make it the same way.
@@ -28,6 +30,20 @@ pub struct RankRule {
     pub long_top: usize,
     /// How many of the lowest scores to sell short.
     pub short_bottom: usize,
+    /// Which end is bought: the highest scores (the default) or, for a
+    /// reversal, the lowest. With `Lowest`, `long_top` counts from the
+    /// bottom and `short_bottom` from the top.
+    #[serde(default)]
+    pub buy: Buy,
+}
+
+/// Which end of the ranking is bought (`RankRule::buy`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Buy {
+    #[default]
+    Highest,
+    Lowest,
 }
 
 impl RankRule {
@@ -63,8 +79,9 @@ impl RankRule {
 }
 
 /// What to hold after a rebalance: the `long_top` best-scoring markets
-/// long, the `short_bottom` worst short, every other market flat (left out
-/// of the result).
+/// long, the `short_bottom` worst short (the lowest bought and the highest
+/// sold with `Buy::Lowest`), every other market flat (left out of the
+/// result).
 ///
 /// - A market without a score (its block can't compute yet, or the value
 ///   isn't a finite number) isn't ranked, so it's flat.
@@ -83,9 +100,16 @@ pub fn targets(
     if ranked.len() < rule.long_top + rule.short_bottom || ranked.is_empty() {
         return None;
     }
-    // Best first; equal scores by name. The shorts come from the far end
-    // of what the longs left, so no market is bought and sold at once.
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    // The end to buy first; equal scores by name. The shorts come from the
+    // far end of what the longs left, so no market is bought and sold at
+    // once.
+    ranked.sort_by(|a, b| {
+        let by_score = match rule.buy {
+            Buy::Highest => b.1.total_cmp(&a.1),
+            Buy::Lowest => a.1.total_cmp(&b.1),
+        };
+        by_score.then_with(|| a.0.cmp(b.0))
+    });
     let (top, rest) = ranked.split_at(rule.long_top);
     let longs = top.iter().map(|(m, _)| (m.to_string(), Direction::Long));
     let shorts = rest
@@ -126,6 +150,7 @@ mod tests {
             every_bars: 21,
             long_top,
             short_bottom,
+            buy: Buy::Highest,
         }
     }
 
@@ -150,6 +175,36 @@ mod tests {
                 ("D".to_string(), Direction::Short),
             ]
         );
+    }
+
+    #[test]
+    fn buying_the_lowest_buys_the_losers_and_sells_the_winners() {
+        let scores = [
+            ("A", Some(0.05)),
+            ("B", Some(-0.02)),
+            ("C", Some(0.10)),
+            ("D", Some(-0.08)),
+            ("E", Some(0.01)),
+        ];
+        let reversal = RankRule {
+            buy: Buy::Lowest,
+            ..rule(2, 1)
+        };
+        assert_eq!(
+            held(targets(&scores, &reversal)),
+            vec![
+                ("D".to_string(), Direction::Long),
+                ("B".to_string(), Direction::Long),
+                ("C".to_string(), Direction::Short),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rule_saved_before_buy_existed_buys_the_highest() {
+        let saved = r#"{"by":"mom.roc","every_bars":21,"long_top":1,"short_bottom":1}"#;
+        let rule: RankRule = serde_json::from_str(saved).unwrap();
+        assert_eq!(rule.buy, Buy::Highest);
     }
 
     #[test]

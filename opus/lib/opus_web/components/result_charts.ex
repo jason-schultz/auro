@@ -157,6 +157,7 @@ defmodule OpusWeb.ResultCharts do
   attr :without_rules, :map, required: true, doc: "Together.run/1 outcome"
   attr :from, :any, required: true
   attr :to, :any, required: true
+  attr :label, :string, default: "Together", doc: "legend for the line without safety rules"
 
   @doc """
   Several strategies on one account: its running return with the safety
@@ -240,7 +241,7 @@ defmodule OpusWeb.ResultCharts do
         <span class="flex flex-wrap gap-x-4">
           <span class="inline-flex items-center gap-1.5">
             <span aria-hidden="true" class="inline-block h-0.5 w-4 bg-primary"></span>
-            {if @with_rules, do: "With your safety rules", else: "Together"} {signed_pct(
+            {if @with_rules, do: "With your safety rules", else: @label} {signed_pct(
               (@with_rules || @without_rules).total_return,
               0
             )}

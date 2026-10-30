@@ -4,8 +4,16 @@
 //! New York rollover: the interbank carry of the pair (base rate − quote rate)
 //! less a markup, applied to notional per calendar day (so Friday → Monday
 //! counts three days, matching OANDA's triple-rollover Wednesday in aggregate).
-//! The backtest runner ignores this; `apply_financing` charges it after the
+//! The backtest runner ignores this; `apply_costs` charges it after the
 //! fact, trade by trade.
+//!
+//! That is OANDA's cost. A market traded elsewhere is charged its own
+//! broker's (`BrokerCosts`, the `brokers` table via
+//! `instruments.test_broker`): a cash account at Wealthsimple has no
+//! overnight cost but a spread on every trade, and can't short. A market
+//! with no broker isn't tested at all (`pipeline::require_brokers`); the
+//! OANDA model below applies only where a market's broker says so (or, in
+//! unit tests, where no brokers are loaded).
 //!
 //! Two sources, best available first:
 //!   1. OANDA's own per-instrument long/short rates, recorded daily into
@@ -86,12 +94,39 @@ impl PolicyRates {
     }
 }
 
+/// What holding overnight costs at a broker (`brokers.overnight_cost`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overnight {
+    /// OANDA's daily financing (this module's model).
+    OandaFinancing,
+    /// Nothing: shares owned outright in a cash account.
+    None,
+}
+
+/// The costs a market's tests charge: its broker's (`brokers`), with the
+/// market's own measured spread when it has one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrokerCosts {
+    /// The broker's name (`brokers.name`), for the results page.
+    pub broker: String,
+    pub overnight: Overnight,
+    /// Round-trip spread per trade in basis points, or None to fill at the
+    /// bars' own bid/ask (OANDA's bars carry them).
+    pub spread_bps: Option<f64>,
+    /// Charged on entry and again on exit, in basis points.
+    pub commission_bps: f64,
+    /// When false the strategy's short rules are skipped.
+    pub can_short: bool,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct FinancingModel {
     /// Policy-rate change points per currency.
     policy: Arc<PolicyRates>,
     /// Recorded OANDA (long, short) rates per instrument.
     recorded: HashMap<String, Series<(f64, f64)>>,
+    /// Each market's broker costs, by every name it's known by.
+    brokers: HashMap<String, BrokerCosts>,
 }
 
 impl FinancingModel {
@@ -102,6 +137,7 @@ impl FinancingModel {
         let mut model = Self {
             policy: Arc::new(PolicyRates::new(policy)),
             recorded: HashMap::new(),
+            brokers: HashMap::new(),
         };
         for (instrument, date, long, short) in recorded {
             model
@@ -114,6 +150,23 @@ impl FinancingModel {
             s.sort_by_key(|(d, _)| *d);
         }
         model
+    }
+
+    /// The model with each market's broker costs, `(market name, costs)`.
+    pub fn with_brokers(mut self, brokers: Vec<(String, BrokerCosts)>) -> Self {
+        self.brokers = brokers.into_iter().collect();
+        self
+    }
+
+    /// The broker costs `market` is tested with, if any are loaded for it.
+    pub fn costs_for(&self, market: &str) -> Option<&BrokerCosts> {
+        self.brokers.get(market)
+    }
+
+    /// Whether `market`'s broker lets a strategy short it (yes when no
+    /// broker is loaded for it: OANDA's model).
+    pub fn can_short(&self, market: &str) -> bool {
+        self.costs_for(market).is_none_or(|c| c.can_short)
     }
 
     /// The policy rates the model is built on (for the `Carry` block).
@@ -170,10 +223,21 @@ impl FinancingModel {
     }
 }
 
-/// Charge financing into each trade's `pnl_percent`.
-pub fn apply_financing(trades: &mut [Trade], instrument: &str, model: &FinancingModel) {
+/// Charge each trade's costs into its `pnl_percent`: overnight financing
+/// where the market's broker charges OANDA's (or none is loaded: OANDA's
+/// model), and a fixed spread and commission per round trip where it sets
+/// them.
+pub fn apply_costs(trades: &mut [Trade], instrument: &str, model: &FinancingModel) {
+    let costs = model.costs_for(instrument);
+    let overnight = costs.map_or(Overnight::OandaFinancing, |c| c.overnight);
+    let per_trade = costs.map_or(0.0, |c| {
+        (c.spread_bps.unwrap_or(0.0) + 2.0 * c.commission_bps) / 10_000.0
+    });
     for trade in trades.iter_mut() {
-        trade.pnl_percent += model.trade_financing(instrument, trade);
+        if overnight == Overnight::OandaFinancing {
+            trade.pnl_percent += model.trade_financing(instrument, trade);
+        }
+        trade.pnl_percent -= per_trade;
     }
 }
 
@@ -330,10 +394,61 @@ mod tests {
     }
 
     #[test]
-    fn apply_financing_adjusts_pnl_in_place() {
+    fn apply_costs_charges_financing_in_place() {
         let mut trades = vec![trade(Direction::Long, utc(8, 18), utc(9, 18))];
         trades[0].pnl_percent = 0.01;
-        apply_financing(&mut trades, "EUR_USD", &model());
+        apply_costs(&mut trades, "EUR_USD", &model());
         assert!((trades[0].pnl_percent - (0.01 - 0.03 / 365.0)).abs() < 1e-12);
+    }
+
+    fn wealthsimple(spread_bps: f64) -> BrokerCosts {
+        BrokerCosts {
+            broker: "wealthsimple".into(),
+            overnight: Overnight::None,
+            spread_bps: Some(spread_bps),
+            commission_bps: 0.0,
+            can_short: false,
+        }
+    }
+
+    #[test]
+    fn a_cash_account_pays_its_spread_and_no_overnight_cost() {
+        let model = model().with_brokers(vec![("SPY".into(), wealthsimple(10.0))]);
+        // Held a month: OANDA's model would charge every night.
+        let mut trades = vec![trade(Direction::Long, utc(1, 18), utc(30, 18))];
+        trades[0].pnl_percent = 0.01;
+        apply_costs(&mut trades, "SPY", &model);
+        assert!((trades[0].pnl_percent - (0.01 - 0.001)).abs() < 1e-12);
+        assert!(!model.can_short("SPY"));
+    }
+
+    #[test]
+    fn commission_is_paid_on_the_way_in_and_out() {
+        let broker = BrokerCosts {
+            commission_bps: 5.0,
+            ..wealthsimple(0.0)
+        };
+        let model = FinancingModel::default().with_brokers(vec![("XIU".into(), broker)]);
+        let mut trades = vec![trade(Direction::Long, utc(8, 18), utc(9, 18))];
+        apply_costs(&mut trades, "XIU", &model);
+        assert!((trades[0].pnl_percent + 0.001).abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_oanda_market_keeps_oandas_financing_and_its_bid_ask() {
+        let oanda = BrokerCosts {
+            broker: "oanda".into(),
+            overnight: Overnight::OandaFinancing,
+            spread_bps: None,
+            commission_bps: 0.0,
+            can_short: true,
+        };
+        let with = model().with_brokers(vec![("EUR_USD".into(), oanda)]);
+        let mut a = vec![trade(Direction::Long, utc(8, 18), utc(9, 18))];
+        let mut b = a.clone();
+        apply_costs(&mut a, "EUR_USD", &with);
+        apply_costs(&mut b, "EUR_USD", &model());
+        assert_eq!(a[0].pnl_percent, b[0].pnl_percent);
+        assert!(with.can_short("EUR_USD"));
     }
 }

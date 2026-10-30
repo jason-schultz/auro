@@ -33,7 +33,7 @@ const TOKEN_PERSIST_ATTEMPTS: u32 = 3;
 /// How much of a 401 body is logged; Questrade's are a short code + message.
 const LOGGED_401_CHARS: usize = 300;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QuestradeClient {
     http: Client,
     pool: PgPool,
@@ -43,6 +43,27 @@ pub struct QuestradeClient {
     expires_at: Option<DateTime<Utc>>,
     /// ticker (uppercase) → Questrade numeric symbol ID; populated on first search
     symbol_cache: HashMap<String, i64>,
+}
+
+/// By hand so the refresh and access tokens never reach a log line.
+impl std::fmt::Debug for QuestradeClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestradeClient")
+            .field("api_server", &self.api_server)
+            .field("expires_at", &self.expires_at)
+            .field("authenticated", &self.access_token.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// How an auth error starts when Questrade answered 4xx: it refused the
+/// token itself, which no retry can fix (`is_token_refused`).
+const TOKEN_REFUSED: &str = "Questrade refused the token";
+
+/// Whether `error` is Questrade refusing the token (a 4xx from its auth
+/// endpoint), not a network or server failure worth retrying.
+pub fn is_token_refused(error: &AppError) -> bool {
+    matches!(error, AppError::Internal(message) if message.starts_with(TOKEN_REFUSED))
 }
 
 impl QuestradeClient {
@@ -81,7 +102,16 @@ impl QuestradeClient {
         last_error.map_or(Ok(None), Err)
     }
 
-    fn new(pool: &PgPool, refresh_token: String) -> AppResult<Self> {
+    /// Authenticate with one token (pasted on the Accounts page), and only
+    /// that one. The rotation is persisted by `authenticate`. Always
+    /// `Some` on success; the `Option` matches `connect`.
+    pub async fn connect_token(pool: &PgPool, token: String) -> AppResult<Option<Self>> {
+        let mut client = Self::new(pool, token)?;
+        client.authenticate().await?;
+        Ok(Some(client))
+    }
+
+    pub(super) fn new(pool: &PgPool, refresh_token: String) -> AppResult<Self> {
         let http = Client::builder()
             .timeout(StdDuration::from_secs(30))
             .connect_timeout(StdDuration::from_secs(10))
@@ -122,9 +152,15 @@ impl QuestradeClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            let prefix = if status.is_client_error() {
+                TOKEN_REFUSED
+            } else {
+                "Questrade auth error"
+            };
             return Err(AppError::Internal(format!(
-                "Questrade auth error ({}): {}",
-                status, body
+                "{prefix} ({}): {}",
+                status,
+                auth_error_text(&body, &self.refresh_token)
             )));
         }
 
@@ -564,6 +600,22 @@ fn rate_limit_wait(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) -> 
         .clamp(StdDuration::from_millis(250), MAX_RATE_LIMIT_WAIT)
 }
 
+/// A rejected token exchange's body as it may be logged or shown: short,
+/// and never containing the token that was sent.
+fn auth_error_text(body: &str, token: &str) -> String {
+    let scrubbed = if token.is_empty() {
+        body.to_string()
+    } else {
+        body.replace(token, "[token]")
+    };
+    let short: String = scrubbed.trim().chars().take(LOGGED_401_CHARS).collect();
+    if short.is_empty() {
+        "no message".to_string()
+    } else {
+        short
+    }
+}
+
 /// Questrade's multi-id query format: "1234,5678".
 fn join_ids(symbol_ids: &[i64]) -> String {
     symbol_ids
@@ -635,6 +687,38 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("X-RateLimit-Reset", HeaderValue::from(secs));
         headers
+    }
+
+    #[test]
+    fn only_a_refused_token_reads_as_refused() {
+        let refused = AppError::Internal(format!("{TOKEN_REFUSED} (400 Bad Request): Bad Request"));
+        assert!(is_token_refused(&refused));
+        let down = AppError::Internal("Questrade auth error (503 Service Unavailable): ".into());
+        assert!(!is_token_refused(&down));
+        let network = AppError::Internal("Questrade auth request failed: timed out".into());
+        assert!(!is_token_refused(&network));
+    }
+
+    #[tokio::test]
+    async fn printing_a_client_never_shows_its_tokens() {
+        let pool = PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+        let mut client = QuestradeClient::new(&pool, "refresh-secret".to_string()).unwrap();
+        client.access_token = Some("access-secret".to_string());
+        let shown = format!("{client:?}");
+        assert!(!shown.contains("refresh-secret") && !shown.contains("access-secret"));
+        assert!(shown.contains("authenticated: true"));
+    }
+
+    #[test]
+    fn an_auth_error_never_carries_the_token() {
+        let text = auth_error_text("Bad Request: token abc123 is invalid", "abc123");
+        assert_eq!(text, "Bad Request: token [token] is invalid");
+        assert_eq!(auth_error_text("  ", "abc123"), "no message");
+        let long = "x".repeat(LOGGED_401_CHARS * 2);
+        assert_eq!(
+            auth_error_text(&long, "abc123").chars().count(),
+            LOGGED_401_CHARS
+        );
     }
 
     #[test]

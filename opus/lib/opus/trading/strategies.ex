@@ -91,10 +91,16 @@ defmodule Opus.Trading.Strategies do
     context = context(ids)
     results = StrategyResults.for_ids(ids)
     by_recipe = Enum.group_by(assignments, & &1.strategy_id)
+    recipes = Repo.all(Recipe)
 
-    Recipe
-    |> Repo.all()
-    |> Enum.map(fn recipe ->
+    tested =
+      recipes
+      |> Enum.map(&{&1.definition, &1.granularity})
+      |> StrategyResults.for_recipes()
+
+    recipes
+    |> Enum.zip(tested)
+    |> Enum.map(fn {recipe, recipe_runs} ->
       rows =
         by_recipe
         |> Map.get(recipe.id, [])
@@ -117,10 +123,7 @@ defmodule Opus.Trading.Strategies do
         assignments: rows,
         locked_by: locked_by,
         # Test runs on instruments it isn't on yet: a draft's, or a copy's.
-        runs:
-          recipe.definition
-          |> StrategyResults.for_recipe(recipe.granularity)
-          |> Enum.reject(&MapSet.member?(assigned, &1.instrument)),
+        runs: Enum.reject(recipe_runs, &MapSet.member?(assigned, &1.instrument)),
         status:
           cond do
             locked_by != [] -> :trading
@@ -172,6 +175,32 @@ defmodule Opus.Trading.Strategies do
     %{recipe: recipe} = strategy = Repo.preload(strategy, :recipe)
     compose(recipe.definition, strategy.instrument, recipe.granularity, strategy.sizing)
   end
+
+  # The parts of a strategy JSON that decide its trades, as the engine's
+  # luck check counts tries (`deflated_sharpe::settings` in Rust).
+  @definition ~w(components entry exit stop max_hold_bars)
+
+  @doc """
+  A strategy JSON's settings, comparable: the blocks and their settings,
+  the entry and exit rules, the stop and the hold limit, with every number
+  a float (2 and 2.0 match) and a null hold limit the same as none. Sizing,
+  names, version, recipe id and instrument fields are left out, as the
+  engine's luck check (`deflated_sharpe::settings`) does: on one
+  instrument and timeframe, two configs are the same strategy exactly when
+  this matches.
+  """
+  @spec trade_settings(map()) :: map()
+  def trade_settings(parameters) do
+    parameters
+    |> Map.take(@definition)
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
+    |> same_numbers()
+  end
+
+  defp same_numbers(n) when is_integer(n), do: n / 1
+  defp same_numbers(list) when is_list(list), do: Enum.map(list, &same_numbers/1)
+  defp same_numbers(%{} = map), do: Map.new(map, fn {k, v} -> {k, same_numbers(v)} end)
+  defp same_numbers(other), do: other
 
   @doc """
   Where the recipe would have bought and sold over the last `count` bars of

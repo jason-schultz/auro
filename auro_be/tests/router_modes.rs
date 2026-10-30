@@ -48,6 +48,7 @@ const LIVE_ONLY: &[(&str, &str)] = &[
     ("GET", "/api/debug/buffers"),
     ("GET", "/api/brokers"),
     ("POST", "/api/financing/snapshot"),
+    ("POST", "/api/questrade/connect"),
     ("POST", "/api/questrade/candles/persist"),
     ("POST", "/api/questrade/options/snapshot"),
     ("POST", "/api/massive/candles/persist"),

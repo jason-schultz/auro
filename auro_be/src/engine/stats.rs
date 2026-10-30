@@ -4,7 +4,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 
 use crate::engine::live::sizing::MAX_POSITION_PCT_OF_NAV;
 use crate::engine::pipeline::span;
-use crate::engine::portfolio::{simulate, Play};
+use crate::engine::portfolio::{simulate, Outcome, Play};
 use crate::engine::strategy::SizingConfig;
 use crate::engine::types::{Candle, Trade};
 
@@ -89,6 +89,17 @@ pub fn calculate_backtest_stats(
     bars: &[Candle],
     sizing: AccountSizing,
 ) -> BacktestStats {
+    backtest_on_account(trades, bars, sizing).0
+}
+
+/// `calculate_backtest_stats` and the account replay it read
+/// (`portfolio::simulate`), for what else needs the valued curve (Monte
+/// Carlo redraws its daily returns, `Outcome::daily_valued`).
+pub fn backtest_on_account(
+    trades: &[Trade],
+    bars: &[Candle],
+    sizing: AccountSizing,
+) -> (BacktestStats, Outcome) {
     let (from, to) = span(bars);
     let play = Play {
         key: String::new(),
@@ -105,7 +116,7 @@ pub fn calculate_backtest_stats(
         account_return: outcome.total_return,
         account_max_drawdown: -outcome.max_drawdown,
     };
-    stats_with(trades, from, to, sizing, marked)
+    (stats_with(trades, from, to, sizing, marked), outcome)
 }
 
 /// The backtest statistics of `trades` traded between `from` and `to`,

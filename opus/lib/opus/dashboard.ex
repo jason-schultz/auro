@@ -1,9 +1,9 @@
 defmodule Opus.Dashboard do
   @moduledoc """
   The dashboard's inputs: engine health, circuit-breaker suspensions,
-  failed jobs, the paper options books, live closes, the ideas scan and
-  this month's index exposure, shaped for `Opus.Dashboard.Alerts` and the
-  page's tiles.
+  failed jobs, pipeline tests stopped part-way, the paper options books,
+  live closes, the ideas scan and this month's index exposure, shaped for
+  `Opus.Dashboard.Alerts` and the page's tiles.
 
   Broker balances are not gathered here: they are slow, so the page loads
   them after it connects (`accounts/0`) and adds any offline broker to the
@@ -21,6 +21,7 @@ defmodule Opus.Dashboard do
   alias Opus.Options.Paper
   alias Opus.Trading.{AccountPause, DriftCheck}
   alias Opus.Options.Paper.{Legs, Wheel}
+  alias Opus.Pipeline.Stuck
   alias Opus.Repo
   alias Opus.Trading.Strategies
 
@@ -44,7 +45,8 @@ defmodule Opus.Dashboard do
     paper: "open paper trades",
     paper_events: "paper book events",
     book_tiles: "paper book tiles",
-    live: "live trading tile"
+    live: "live trading tile",
+    stuck_runs: "stopped strategy tests"
   }
 
   @no_live %{engine_up: false, open_trades: 0, nav: nil, nav_change: nil}
@@ -74,6 +76,7 @@ defmodule Opus.Dashboard do
       |> section(:failed_jobs, [], fn -> failed_jobs(now) end)
       |> section(:live_closes, [], fn -> live_closes(now) end)
       |> section(:nav_age, nil, fn -> nav_age(now) end)
+      |> section(:stuck_runs, [], &Stuck.list/0)
 
     {s, failed} =
       {s, failed}
@@ -96,6 +99,7 @@ defmodule Opus.Dashboard do
       drift: s.drift,
       account_pause: s.account_pause,
       failed_jobs: s.failed_jobs,
+      stuck_runs: s.stuck_runs,
       failed_sections: failed |> Enum.reverse() |> Enum.map(&Map.fetch!(@section_names, &1)),
       offline_brokers: [],
       exposure: s.exposure,
@@ -161,8 +165,13 @@ defmodule Opus.Dashboard do
   @spec cached_accounts() :: {map(), DateTime.t()} | nil
   def cached_accounts, do: :persistent_term.get(@accounts_key, nil)
 
-  @doc "Whether a cached overview is recent enough not to ask the brokers again."
+  @doc """
+  Whether a cached overview is recent enough not to ask the brokers again.
+  One with a broker offline never is: the broker may be back (a fresh
+  Questrade token and a restart), and the tile shouldn't keep saying it's down.
+  """
   @spec fresh?({map(), DateTime.t()} | nil) :: boolean()
+  def fresh?({%{offline: [_ | _]}, _at}), do: false
   def fresh?({_overview, at}), do: DateTime.diff(DateTime.utc_now(), at) < @accounts_fresh_seconds
   def fresh?(nil), do: false
 

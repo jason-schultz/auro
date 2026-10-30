@@ -66,23 +66,23 @@ msgstr "Doomsday insurance. Pays when everything burns."
 msgid "A put spread and a call spread around the price: paid if it goes nowhere. Paper US$."
 msgstr "Betting the market does nothing. Theta and a prayer."
 
-#: lib/opus_web/live/strategy_live.ex:415
+#: lib/opus_web/live/strategy_live.ex:426
 #, elixir-autogen, elixir-format
 msgid "ADX 14"
 msgstr ""
 
-#: lib/opus_web/live/strategy_live.ex:417
+#: lib/opus_web/live/strategy_live.ex:428
 #, elixir-autogen, elixir-format
 msgid "ATR 14"
 msgstr ""
 
-#: lib/opus_web/live/accounts_live.ex:163
+#: lib/opus_web/live/accounts_live.ex:311
 #, elixir-autogen, elixir-format
 msgid "Account"
 msgstr "Bag"
 
 #: lib/opus_web/components/layouts.ex:50
-#: lib/opus_web/live/accounts_live.ex:67
+#: lib/opus_web/live/accounts_live.ex:155
 #: lib/opus_web/live/dashboard_live.ex:338
 #, elixir-autogen, elixir-format
 msgid "Accounts"
@@ -98,7 +98,7 @@ msgstr "GUH alert"
 msgid "Active"
 msgstr "Alive"
 
-#: lib/opus_web/live/strategy_builder_live.ex:792
+#: lib/opus_web/live/strategy_builder_live.ex:818
 #, elixir-autogen, elixir-format
 msgid "Add a block"
 msgstr "Add a crayon"
@@ -133,22 +133,22 @@ msgstr "No GUH today"
 msgid "Also tested on"
 msgstr "Also backtested on"
 
-#: lib/opus_web/live/strategy_live.ex:472
+#: lib/opus_web/live/strategy_live.ex:483
 #, elixir-autogen, elixir-format
 msgid "Also tested on (not running there)"
 msgstr "Also backtested on (benched there)"
 
-#: lib/opus_web/live/accounts_live.ex:215
+#: lib/opus_web/live/accounts_live.ex:363
 #, elixir-autogen, elixir-format
 msgid "Avg cost"
 msgstr "Cost basis"
 
-#: lib/opus_web/components/strategy_parts.ex:55
+#: lib/opus_web/components/strategy_parts.ex:89
 #, elixir-autogen, elixir-format
 msgid "Backtest"
 msgstr "Backtest (hopium)"
 
-#: lib/opus_web/live/strategy_live.ex:429
+#: lib/opus_web/live/strategy_live.ex:440
 #, elixir-autogen, elixir-format
 msgid "Bollinger width"
 msgstr ""
@@ -158,7 +158,7 @@ msgstr ""
 msgid "Breakeven"
 msgstr "Breakeven, where you stop being poor"
 
-#: lib/opus_web/live/strategy_builder_live.ex:560
+#: lib/opus_web/live/strategy_builder_live.ex:586
 #, elixir-autogen, elixir-format
 msgid "Build the signal from blocks, say when to act on it, and see where it would have bought and sold."
 msgstr "Stack the indicators, say when to send it, and see where it would've printed (or not)."
@@ -184,7 +184,7 @@ msgid "Calls"
 msgstr "Calls 🚀"
 
 #: lib/opus_web/components/paper_book.ex:276
-#: lib/opus_web/live/accounts_live.ex:165
+#: lib/opus_web/live/accounts_live.ex:313
 #, elixir-autogen, elixir-format
 msgid "Cash"
 msgstr "Dry powder"
@@ -214,7 +214,7 @@ msgstr "Tendies odds"
 msgid "Chance of assignment"
 msgstr "Bagholder odds"
 
-#: lib/opus_web/live/strategy_builder_live.ex:596
+#: lib/opus_web/live/strategy_builder_live.ex:622
 #, elixir-autogen, elixir-format
 msgid "Changing these rules would change a live strategy mid-trade. Pick one:"
 msgstr "Changing the rules mid-play is how accounts die. Pick one:"
@@ -254,12 +254,13 @@ msgstr "Positions or ban"
 msgid "Config"
 msgstr "Play"
 
-#: lib/opus_web/live/strategy_live.ex:210
+#: lib/opus_web/live/basket_live.ex:161
+#: lib/opus_web/live/strategy_live.ex:215
 #, elixir-autogen, elixir-format
 msgid "Copy as a new strategy"
 msgstr "Clone this play"
 
-#: lib/opus_web/live/strategy_builder_live.ex:542
+#: lib/opus_web/live/strategy_builder_live.ex:568
 #, elixir-autogen, elixir-format
 msgid "Copy of %{name}"
 msgstr "Cloning %{name}"
@@ -285,8 +286,8 @@ msgstr "Doomsday puts · house money"
 msgid "Dashboard"
 msgstr "War room"
 
-#: lib/opus_web/live/strategy_builder_live.ex:556
-#: lib/opus_web/live/strategy_live.ex:257
+#: lib/opus_web/live/strategy_builder_live.ex:582
+#: lib/opus_web/live/strategy_live.ex:268
 #, elixir-autogen, elixir-format
 msgid "Delete"
 msgstr "Yeet"
@@ -297,12 +298,12 @@ msgid "Dip-buy %{count}"
 msgstr "Buy the dip %{count}"
 
 #: lib/opus_web/live/strategies_live.ex:475
-#: lib/opus_web/live/strategy_live.ex:247
+#: lib/opus_web/live/strategy_live.ex:258
 #, elixir-autogen, elixir-format
 msgid "Disabled"
 msgstr "Benched"
 
-#: lib/opus_web/live/strategy_live.ex:421
+#: lib/opus_web/live/strategy_live.ex:432
 #, elixir-autogen, elixir-format
 msgid "Distance to MA 20"
 msgstr ""
@@ -317,18 +318,19 @@ msgstr "Napkin math"
 msgid "Each strip under the chart is one rule, lit on the bars it was true. A signal fires where its rules line up."
 msgstr "Each strip is one rule, lit when it was true. When the strips line up, the bot sends it."
 
-#: lib/opus_web/live/strategy_builder_live.ex:605
+#: lib/opus_web/live/strategy_builder_live.ex:631
 #, elixir-autogen, elixir-format
 msgid "Edit a copy"
 msgstr "Clone it"
 
-#: lib/opus_web/live/strategy_live.ex:221
+#: lib/opus_web/live/basket_live.ex:155
+#: lib/opus_web/live/strategy_live.ex:232
 #, elixir-autogen, elixir-format
 msgid "Edit the rules"
 msgstr "Tweak the play"
 
 #: lib/opus_web/live/strategies_live.ex:474
-#: lib/opus_web/live/strategy_live.ex:246
+#: lib/opus_web/live/strategy_live.ex:257
 #, elixir-autogen, elixir-format
 msgid "Enabled"
 msgstr "Sending it"
@@ -343,7 +345,7 @@ msgstr "Entry clip (bp)"
 msgid "Every listing Auro knows and which feeds store data for it. Changes apply on the next run."
 msgstr "Every ticker Auro knows and which feeds hoard data for it. Changes land on the next run."
 
-#: lib/opus_web/live/accounts_live.ex:136
+#: lib/opus_web/live/accounts_live.ex:284
 #, elixir-autogen, elixir-format
 msgid "Everything, in CAD"
 msgstr "Net worth in maple tendies (CAD)"
@@ -383,7 +385,7 @@ msgstr "Fills vs what the backtest assumed, last %{days} days. Positive = you go
 msgid "First digest lands next Monday."
 msgstr "First one drops Monday. Positions or ban."
 
-#: lib/opus_web/live/strategy_live.ex:342
+#: lib/opus_web/live/strategy_live.ex:353
 #, elixir-autogen, elixir-format
 msgid "Flat"
 msgstr "No bags"
@@ -393,13 +395,13 @@ msgstr "No bags"
 msgid "Frozen every Monday 08:00 ET for the week before."
 msgstr "Frozen every Monday 08:00 ET for the week before. Screenshots welcome."
 
-#: lib/opus_web/live/accounts_live.ex:224
+#: lib/opus_web/live/accounts_live.ex:372
 #, elixir-autogen, elixir-format
 msgid "Gain"
 msgstr "Tendies"
 
 #: lib/opus_web/live/strategies_live.ex:449
-#: lib/opus_web/live/strategy_live.ex:642
+#: lib/opus_web/live/strategy_live.ex:638
 #, elixir-autogen, elixir-format
 msgid "Held"
 msgstr "Hands tied"
@@ -409,12 +411,12 @@ msgstr "Hands tied"
 msgid "Holdout verdicts"
 msgstr "The DD got graded"
 
-#: lib/opus_web/live/strategy_builder_live.ex:593
+#: lib/opus_web/live/strategy_builder_live.ex:619
 #, elixir-autogen, elixir-format
 msgid "How do you want to change it?"
 msgstr "How we doing this?"
 
-#: lib/opus_web/live/strategy_live.ex:396
+#: lib/opus_web/live/strategy_live.ex:407
 #, elixir-autogen, elixir-format
 msgid "How it trades"
 msgstr "The DD"
@@ -514,7 +516,7 @@ msgstr "Theta gang wins: stock stays below %{strike}"
 msgid "Index exposure"
 msgstr "YOLO meter"
 
-#: lib/opus_web/live/accounts_live.ex:114
+#: lib/opus_web/live/accounts_live.ex:262
 #, elixir-autogen, elixir-format
 msgid "Index exposure for %{month}"
 msgstr "How much to YOLO into the index in %{month}"
@@ -546,12 +548,12 @@ msgstr "Loss porn"
 msgid "Just holding %{symbols}"
 msgstr "Boring index guy"
 
-#: lib/opus_web/live/strategy_builder_live.ex:628
+#: lib/opus_web/live/strategy_builder_live.ex:654
 #, elixir-autogen, elixir-format
 msgid "Keep it locked"
 msgstr "Keep diamond hands"
 
-#: lib/opus_web/live/strategy_live.ex:348
+#: lib/opus_web/live/strategy_live.ex:359
 #, elixir-autogen, elixir-format
 msgid "Last signal"
 msgstr "Last move"
@@ -566,7 +568,7 @@ msgstr "Ticker"
 msgid "Live (OANDA)"
 msgstr "Live (fake) money"
 
-#: lib/opus_web/components/strategy_parts.ex:77
+#: lib/opus_web/components/strategy_parts.ex:111
 #, elixir-autogen, elixir-format
 msgid "Live (forward)"
 msgstr "Real life"
@@ -576,17 +578,17 @@ msgstr "Real life"
 msgid "Live trading"
 msgstr "Live (fake) money"
 
-#: lib/opus_web/live/accounts_live.ex:99
+#: lib/opus_web/live/accounts_live.ex:206
 #, elixir-autogen, elixir-format
 msgid "Loading balances…"
 msgstr "Counting tendies…"
 
-#: lib/opus_web/components/strategy_parts.ex:28
+#: lib/opus_web/components/strategy_parts.ex:30
 #, elixir-autogen, elixir-format
 msgid "Locked"
 msgstr "Diamond-handed"
 
-#: lib/opus_web/live/strategy_builder_live.ex:572
+#: lib/opus_web/live/strategy_builder_live.ex:598
 #, elixir-autogen, elixir-format
 msgid "Locked."
 msgstr "Diamond-handed."
@@ -647,12 +649,12 @@ msgid "Net premium sold"
 msgstr "Theta collected"
 
 #: lib/opus_web/live/strategies_live.ex:184
-#: lib/opus_web/live/strategy_builder_live.ex:540
+#: lib/opus_web/live/strategy_builder_live.ex:566
 #, elixir-autogen, elixir-format
 msgid "New strategy"
 msgstr "New play"
 
-#: lib/opus_web/live/strategy_live.ex:631
+#: lib/opus_web/live/strategy_live.ex:627
 #, elixir-autogen, elixir-format
 msgid "No decision yet"
 msgstr "Jury's out"
@@ -672,7 +674,7 @@ msgstr "No plays yet. Positions or ban."
 msgid "No measured fills yet. Rows appear as strategies trade."
 msgstr "No fills measured yet. Rows appear once the plays play."
 
-#: lib/opus_web/live/strategy_builder_live.ex:619
+#: lib/opus_web/live/strategy_builder_live.ex:645
 #, elixir-autogen, elixir-format
 msgid "No new trades until it passes the tests again and you switch it back on. Not possible while a trade is open."
 msgstr "No new plays until it passes again and you un-bench it. Can't do it while a bag is open."
@@ -682,17 +684,17 @@ msgstr "No new plays until it passes again and you un-bench it. Can't do it whil
 msgid "No trades in this window: the rules never lined up."
 msgstr "Zero plays in this window. The rules never lined up. Theta gang would be proud."
 
-#: lib/opus_web/live/strategy_live.ex:355
+#: lib/opus_web/live/strategy_live.ex:366
 #, elixir-autogen, elixir-format
 msgid "None yet"
 msgstr "Crickets"
 
-#: lib/opus_web/live/strategy_live.ex:572
+#: lib/opus_web/live/strategy_live.ex:583
 #, elixir-autogen, elixir-format
 msgid "None yet."
 msgstr "Crickets."
 
-#: lib/opus_web/live/strategy_live.ex:515
+#: lib/opus_web/live/strategy_live.ex:526
 #, elixir-autogen, elixir-format
 msgid "None yet. The first trade this strategy opens will appear here with why it closed."
 msgstr "No positions. Ban pending. The first play shows up here with how it died."
@@ -702,7 +704,7 @@ msgstr "No positions. Ban pending. The first play shows up here with how it died
 msgid "Not running on any instrument yet, and not tested. Open it to test it on one."
 msgstr "Not riding anything yet. Open it and backtest it before you YOLO."
 
-#: lib/opus_web/components/strategy_parts.ex:20
+#: lib/opus_web/components/strategy_parts.ex:22
 #, elixir-autogen, elixir-format
 msgid "Not trading, so its rules can be changed"
 msgstr "Benched, so you can mess with it"
@@ -745,7 +747,7 @@ msgstr "No bags yet. The first trades open at the next 10:30 check."
 
 #: lib/opus_web/live/strategies_live.ex:233
 #: lib/opus_web/live/strategies_live.ex:423
-#: lib/opus_web/live/strategy_live.ex:624
+#: lib/opus_web/live/strategy_live.ex:620
 #, elixir-autogen, elixir-format
 msgid "Off"
 msgstr "Benched"
@@ -755,7 +757,7 @@ msgstr "Benched"
 msgid "On, no decision yet"
 msgstr "On, jury's out"
 
-#: lib/opus_web/live/strategy_live.ex:327
+#: lib/opus_web/live/strategy_live.ex:338
 #, elixir-autogen, elixir-format
 msgid "Open position"
 msgstr "The bag"
@@ -765,7 +767,7 @@ msgstr "The bag"
 msgid "Open positions"
 msgstr "Bags currently held"
 
-#: lib/opus_web/live/strategy_live.ex:512
+#: lib/opus_web/live/strategy_live.ex:523
 #, elixir-autogen, elixir-format
 msgid "Open the journal"
 msgstr "Open the loss porn"
@@ -822,7 +824,7 @@ msgstr "Casino chips"
 msgid "Parked"
 msgstr "Diamond-handing"
 
-#: lib/opus_web/components/strategy_parts.ex:97
+#: lib/opus_web/components/strategy_parts.ex:131
 #, elixir-autogen, elixir-format
 msgid "Passed"
 msgstr "Printed"
@@ -837,7 +839,7 @@ msgstr "Pick a play, regard"
 msgid "Position"
 msgstr "The play"
 
-#: lib/opus_web/live/strategy_live.ex:435
+#: lib/opus_web/live/strategy_live.ex:446
 #, elixir-autogen, elixir-format
 msgid "Position in bands"
 msgstr ""
@@ -852,12 +854,12 @@ msgstr ""
 msgid "Premium paid"
 msgstr "Lit on fire (so far)"
 
-#: lib/opus_web/live/strategy_builder_live.ex:943
+#: lib/opus_web/live/strategy_builder_live.ex:969
 #, elixir-autogen, elixir-format
 msgid "Preview"
 msgstr "Hindsight"
 
-#: lib/opus_web/live/accounts_live.ex:218
+#: lib/opus_web/live/accounts_live.ex:366
 #, elixir-autogen, elixir-format
 msgid "Price"
 msgstr ""
@@ -878,7 +880,7 @@ msgstr "Marked at %{time}. Refreshes every 15 min; take-profits fill the second 
 msgid "Profit factor"
 msgstr ""
 
-#: lib/opus_web/live/strategy_builder_live.ex:849
+#: lib/opus_web/live/strategy_builder_live.ex:875
 #, elixir-autogen, elixir-format
 msgid "Protect it"
 msgstr "Risk management (lol)"
@@ -893,17 +895,17 @@ msgstr "Spread degen"
 msgid "Puts"
 msgstr "Puts 🌈🐻"
 
-#: lib/opus_web/live/strategy_live.ex:425
+#: lib/opus_web/live/strategy_live.ex:436
 #, elixir-autogen, elixir-format
 msgid "Rate of change"
 msgstr ""
 
-#: lib/opus_web/live/strategy_live.ex:566
+#: lib/opus_web/live/strategy_live.ex:577
 #, elixir-autogen, elixir-format
 msgid "Recent signals"
 msgstr "Recent moves"
 
-#: lib/opus_web/live/strategy_live.ex:311
+#: lib/opus_web/live/strategy_live.ex:322
 #, elixir-autogen, elixir-format
 msgid "Regime"
 msgstr "Vibe check"
@@ -915,18 +917,18 @@ msgid "Research"
 msgstr "DD"
 
 #: lib/opus_web/live/strategies_live.ex:415
-#: lib/opus_web/live/strategy_live.ex:273
+#: lib/opus_web/live/strategy_live.ex:284
 #, elixir-autogen, elixir-format
 msgid "Reset"
 msgstr "Un-bench"
 
 #: lib/opus_web/components/trade_story.ex:66
-#: lib/opus_web/live/strategy_live.ex:527
+#: lib/opus_web/live/strategy_live.ex:538
 #, elixir-autogen, elixir-format
 msgid "Result"
 msgstr "Tendies"
 
-#: lib/opus_web/live/strategy_live.ex:408
+#: lib/opus_web/live/strategy_live.ex:419
 #, elixir-autogen, elixir-format
 msgid "Right now"
 msgstr "Vibe readout"
@@ -936,7 +938,7 @@ msgstr "Vibe readout"
 msgid "Round trip excess (bp)"
 msgstr "Total clip (bp)"
 
-#: lib/opus_web/live/strategy_live.ex:308
+#: lib/opus_web/live/strategy_live.ex:319
 #, elixir-autogen, elixir-format
 msgid "Rules engine"
 msgstr "The overlords"
@@ -946,17 +948,17 @@ msgstr "The overlords"
 msgid "Running for"
 msgstr "Days of copium"
 
-#: lib/opus_web/live/strategy_builder_live.ex:1019
+#: lib/opus_web/live/strategy_builder_live.ex:1045
 #, elixir-autogen, elixir-format
 msgid "Save and run the tests"
 msgstr "Send it to the backtest"
 
-#: lib/opus_web/live/strategy_builder_live.ex:1030
+#: lib/opus_web/live/strategy_builder_live.ex:1056
 #, elixir-autogen, elixir-format
 msgid "Save as a draft"
 msgstr "Save the napkin"
 
-#: lib/opus_web/live/strategy_builder_live.ex:1017
+#: lib/opus_web/live/strategy_builder_live.ex:1043
 #, elixir-autogen, elixir-format
 msgid "Save changes"
 msgstr "Send it"
@@ -976,7 +978,7 @@ msgstr "Cash out"
 msgid "Sell it instead"
 msgstr "🌈🐻 Bear it instead"
 
-#: lib/opus_web/live/accounts_live.ex:212
+#: lib/opus_web/live/accounts_live.ex:360
 #, elixir-autogen, elixir-format
 msgid "Shares"
 msgstr ""
@@ -986,7 +988,7 @@ msgstr ""
 msgid "Show retired"
 msgstr "Show the dead ones"
 
-#: lib/opus_web/live/strategy_builder_live.ex:721
+#: lib/opus_web/live/strategy_builder_live.ex:747
 #, elixir-autogen, elixir-format
 msgid "Signals it watches"
 msgstr "Indicators (the crayons)"
@@ -996,12 +998,12 @@ msgstr "Indicators (the crayons)"
 msgid "Since"
 msgstr ""
 
-#: lib/opus_web/live/strategy_live.ex:402
+#: lib/opus_web/live/strategy_live.ex:413
 #, elixir-autogen, elixir-format
 msgid "Size here"
 msgstr "Position size"
 
-#: lib/opus_web/live/accounts_live.ex:164
+#: lib/opus_web/live/accounts_live.ex:312
 #, elixir-autogen, elixir-format
 msgid "Source"
 msgstr ""
@@ -1011,15 +1013,16 @@ msgstr ""
 msgid "Spread (bp)"
 msgstr ""
 
-#: lib/opus_web/live/strategy_builder_live.ex:644
+#: lib/opus_web/live/strategy_builder_live.ex:670
 #, elixir-autogen, elixir-format
 msgid "Start from an example"
 msgstr "Copy someone's homework"
 
 #: lib/opus_web/components/layouts.ex:46
+#: lib/opus_web/live/basket_live.ex:134
 #: lib/opus_web/live/strategies_live.ex:164
-#: lib/opus_web/live/strategy_builder_live.ex:534
-#: lib/opus_web/live/strategy_live.ex:191
+#: lib/opus_web/live/strategy_builder_live.ex:560
+#: lib/opus_web/live/strategy_live.ex:196
 #, elixir-autogen, elixir-format
 msgid "Strategies"
 msgstr "Plays"
@@ -1035,27 +1038,27 @@ msgstr "Play"
 msgid "Suspended"
 msgstr "In timeout"
 
-#: lib/opus_web/live/strategy_live.ex:265
+#: lib/opus_web/live/strategy_live.ex:276
 #, elixir-autogen, elixir-format
 msgid "Suspended by the circuit breaker"
 msgstr "Benched by the circuit breaker"
 
-#: lib/opus_web/live/strategy_builder_live.ex:617
+#: lib/opus_web/live/strategy_builder_live.ex:643
 #, elixir-autogen, elixir-format
 msgid "Switch it off everywhere, then edit"
 msgstr "Bench it, then tweak"
 
-#: lib/opus_web/live/accounts_live.ex:209
+#: lib/opus_web/live/accounts_live.ex:357
 #, elixir-autogen, elixir-format
 msgid "Symbol"
 msgstr "Ticker"
 
-#: lib/opus_web/live/strategy_builder_live.ex:1067
+#: lib/opus_web/live/strategy_builder_live.ex:1093
 #, elixir-autogen, elixir-format
 msgid "Test results"
 msgstr "Receipts"
 
-#: lib/opus_web/live/strategy_live.ex:456
+#: lib/opus_web/live/strategy_live.ex:467
 #, elixir-autogen, elixir-format
 msgid "Test results on %{instrument}"
 msgstr "Receipts on %{instrument}"
@@ -1070,7 +1073,7 @@ msgstr "In the lab"
 msgid "The latest %{count}, newest first. Strategy records cover the last %{days} days."
 msgstr "Newest first. Click one for the post-mortem."
 
-#: lib/opus_web/live/strategy_builder_live.ex:609
+#: lib/opus_web/live/strategy_builder_live.ex:635
 #, elixir-autogen, elixir-format
 msgid "The original keeps trading untouched. The copy goes through the tests, then you choose where it runs."
 msgstr "The original keeps cooking. The clone has to pass the tests before it gets money."
@@ -1110,6 +1113,7 @@ msgstr "Holding the bag"
 msgid "Trade"
 msgstr "Play"
 
+#: lib/opus_web/live/basket_live.ex:520
 #: lib/opus_web/live/journal_live.ex:112
 #: lib/opus_web/live/journal_live.ex:145
 #: lib/opus_web/live/journal_live.ex:194
@@ -1120,7 +1124,7 @@ msgstr "Plays"
 
 #: lib/opus_web/live/strategies_live.ex:227
 #: lib/opus_web/live/strategies_live.ex:436
-#: lib/opus_web/live/strategy_live.ex:641
+#: lib/opus_web/live/strategy_live.ex:637
 #, elixir-autogen, elixir-format
 msgid "Trading"
 msgstr "Sending it"
@@ -1140,8 +1144,8 @@ msgstr "Type your own degen contract"
 msgid "Unlimited upside"
 msgstr "To the moon 🚀"
 
-#: lib/opus_web/live/strategy_builder_live.ex:582
-#: lib/opus_web/live/strategy_live.ex:223
+#: lib/opus_web/live/strategy_builder_live.ex:608
+#: lib/opus_web/live/strategy_live.ex:234
 #, elixir-autogen, elixir-format
 msgid "Unlock to edit"
 msgstr "Paper-hand the lock"
@@ -1192,12 +1196,12 @@ msgstr "Tendies report"
 msgid "What happens next"
 msgstr "The plan, regard"
 
-#: lib/opus_web/live/strategy_builder_live.ex:977
+#: lib/opus_web/live/strategy_builder_live.ex:1003
 #, elixir-autogen, elixir-format
 msgid "What happens when you save"
 msgstr "What happens when you send it"
 
-#: lib/opus_web/live/strategy_builder_live.ex:677
+#: lib/opus_web/live/strategy_builder_live.ex:703
 #, elixir-autogen, elixir-format
 msgid "What it is"
 msgstr "The play"
@@ -1232,13 +1236,13 @@ msgstr "Theta gang"
 msgid "When"
 msgstr ""
 
-#: lib/opus_web/live/strategy_builder_live.ex:819
+#: lib/opus_web/live/strategy_builder_live.ex:845
 #, elixir-autogen, elixir-format
 msgid "When to act"
 msgstr "When to send it"
 
 #: lib/opus_web/components/trade_story.ex:69
-#: lib/opus_web/live/strategy_live.ex:531
+#: lib/opus_web/live/strategy_live.ex:542
 #, elixir-autogen, elixir-format
 msgid "Why it closed"
 msgstr "How it died"
@@ -1269,7 +1273,7 @@ msgstr "Worst case · GUH"
 msgid "Yield"
 msgstr "Theta gang pay"
 
-#: lib/opus_web/live/strategy_builder_live.ex:574
+#: lib/opus_web/live/strategy_builder_live.ex:600
 #, elixir-autogen, elixir-format
 msgid "You can look and preview, but not change anything."
 msgstr "Look, don't touch."
@@ -1289,17 +1293,17 @@ msgstr "ATM"
 msgid "buy"
 msgstr "load up"
 
-#: lib/opus_web/live/strategy_live.ex:645
+#: lib/opus_web/live/strategy_live.ex:641
 #, elixir-autogen, elixir-format
 msgid "decided"
 msgstr "ruled"
 
-#: lib/opus_web/live/strategy_live.ex:203
+#: lib/opus_web/live/strategy_live.ex:208
 #, elixir-autogen, elixir-format
 msgid "deployed"
 msgstr "sent"
 
-#: lib/opus_web/live/strategy_live.ex:625
+#: lib/opus_web/live/strategy_live.ex:621
 #, elixir-autogen, elixir-format
 msgid "disabled, the rules engine skips it"
 msgstr "benched, the overlords skip it"
@@ -1314,12 +1318,12 @@ msgstr "sending it"
 msgid "entries"
 msgstr "posts of DD"
 
-#: lib/opus_web/live/strategy_live.ex:367
+#: lib/opus_web/live/strategy_live.ex:378
 #, elixir-autogen, elixir-format
 msgid "every buy and sell the rules made over the last 120 bars"
 msgstr "every time it would have loaded up or cashed out, last 120 bars"
 
-#: lib/opus_web/live/strategy_live.ex:568
+#: lib/opus_web/live/strategy_live.ex:579
 #, elixir-autogen, elixir-format
 msgid "every evaluation that did something, newest first"
 msgstr "every time the bot twitched, newest first"
@@ -1329,7 +1333,7 @@ msgstr "every time the bot twitched, newest first"
 msgid "implied vs realized, at the money · cheapest first"
 msgstr "vol tax at the money · cheapest first"
 
-#: lib/opus_web/live/accounts_live.ex:120
+#: lib/opus_web/live/accounts_live.ex:268
 #, elixir-autogen, elixir-format
 msgid "invested, the rest in cash"
 msgstr "sent, the rest on the sidelines"
@@ -1354,7 +1358,7 @@ msgstr ""
 msgid "no trades yet"
 msgstr "no plays yet, positions or ban"
 
-#: lib/opus_web/live/accounts_live.ex:203
+#: lib/opus_web/live/accounts_live.ex:351
 #, elixir-autogen, elixir-format
 msgid "positions"
 msgstr "bags"
@@ -1387,8 +1391,8 @@ msgctxt "buyer"
 msgid "If the stock stays below %{strike}"
 msgstr "GUH: stock stays below %{strike}"
 
-#: lib/opus_web/live/accounts_live.ex:166
-#: lib/opus_web/live/accounts_live.ex:221
+#: lib/opus_web/live/accounts_live.ex:314
+#: lib/opus_web/live/accounts_live.ex:369
 #, elixir-autogen, elixir-format
 msgctxt "account"
 msgid "Value"
@@ -1436,13 +1440,13 @@ msgctxt "section"
 msgid "Trades"
 msgstr "The plays, one by one"
 
-#: lib/opus_web/live/strategy_live.ex:508
+#: lib/opus_web/live/strategy_live.ex:519
 #, elixir-autogen, elixir-format
 msgctxt "strategy page"
 msgid "Trades"
 msgstr "Positions (or ban)"
 
-#: lib/opus_web/components/strategy_parts.ex:100
+#: lib/opus_web/components/strategy_parts.ex:134
 #, elixir-autogen, elixir-format
 msgctxt "test result"
 msgid "Failed"
@@ -1465,12 +1469,12 @@ msgstr "Unbench the account"
 msgid "Trading is paused: the account fell %{down} from its peak"
 msgstr "GUH. Account down %{down} from the top, everything's benched"
 
-#: lib/opus_web/live/strategy_live.ex:648
+#: lib/opus_web/live/strategy_live.ex:644
 #, elixir-autogen, elixir-format
 msgid "Circuit breaker off: kept trading through losing streaks by choice."
 msgstr "No circuit breaker. Diamond hands through the red, by choice."
 
-#: lib/opus_web/live/strategy_builder_live.ex:1044
+#: lib/opus_web/live/strategy_builder_live.ex:1070
 #, elixir-autogen, elixir-format
 msgid "Over its whole history on %{instrument}"
 msgstr "The full send on %{instrument}, every bar"
@@ -1505,12 +1509,12 @@ msgstr "Rug-pull pause"
 msgid "Group limit"
 msgstr "No all-in on one sector"
 
-#: lib/opus_web/live/strategy_live.ex:489
+#: lib/opus_web/live/strategy_live.ex:500
 #, elixir-autogen, elixir-format
 msgid "Live against its backtest"
 msgstr "Live vs. the backtest copium"
 
-#: lib/opus_web/live/together_live.ex:628
+#: lib/opus_web/live/together_live.ex:737
 #, elixir-autogen, elixir-format
 msgid "No other play shares enough history with it to compare."
 msgstr "No other play has enough shared history to compare. Lonely."
@@ -1530,7 +1534,7 @@ msgstr "Guardrails"
 msgid "Save"
 msgstr "Lock it in"
 
-#: lib/opus_web/live/together_live.ex:138
+#: lib/opus_web/live/together_live.ex:233
 #, elixir-autogen, elixir-format
 msgid "Strategies together"
 msgstr "Ape together strong"
@@ -1551,17 +1555,17 @@ msgstr "Squad"
 msgid "Yes, loosen it"
 msgstr "Send it"
 
-#: lib/opus_web/live/together_live.ex:167
+#: lib/opus_web/live/together_live.ex:262
 #, elixir-autogen, elixir-format
 msgid "1 · Your team"
 msgstr "1 · Assemble the apes"
 
-#: lib/opus_web/live/together_live.ex:460
+#: lib/opus_web/live/together_live.ex:569
 #, elixir-autogen, elixir-format
 msgid "2 · How the account would have done"
 msgstr "2 · Would the account have mooned?"
 
-#: lib/opus_web/live/together_live.ex:267
+#: lib/opus_web/live/together_live.ex:364
 #, elixir-autogen, elixir-format
 msgid "3 · Find a teammate"
 msgstr "3 · Find another ape"
@@ -1581,7 +1585,7 @@ msgstr "Four guardrails stop you from blowing up the account, whatever the plays
 msgid "Show the numbers"
 msgstr "Show me the tendies math"
 
-#: lib/opus_web/live/together_live.ex:273
+#: lib/opus_web/live/together_live.ex:370
 #, elixir-autogen, elixir-format
 msgid "Two plays that lose on the same days are one bigger bet. Two that lose on different days cover for each other: the account's bad days get smaller while the good ones add up. Pick a strategy, and Auro tries every other play next to it and ranks the ones that make the pair steadiest."
 msgstr "Two plays that dump on the same days are one bigger YOLO. Two that dump on different days cover for each other: red days shrink, green days stack. Pick a play and Auro tries every other play next to it, best wingmen first."
@@ -1596,7 +1600,7 @@ msgstr "Nvm"
 msgid "What changed, and when"
 msgstr "Who touched the guardrails"
 
-#: lib/opus_web/live/together_live.ex:271
+#: lib/opus_web/live/together_live.ex:368
 #, elixir-autogen, elixir-format
 msgid "Why a teammate helps"
 msgstr "Why apes need other apes"
@@ -1606,110 +1610,208 @@ msgstr "Why apes need other apes"
 msgid "Your guardrails"
 msgstr "Your guardrails"
 
-#: lib/opus_web/live/together_live.ex:141
+#: lib/opus_web/live/together_live.ex:236
 #, elixir-autogen, elixir-format
 msgid "Your strategies don't trade alone: they share one account. See how they'd have done as a team, and find a teammate that makes the account steadier."
 msgstr "Your plays don't YOLO alone: they share one account. See how the squad would've done, and find another ape that keeps the account alive."
 
-#: lib/opus_web/components/strategy_parts.ex:103
+#: lib/opus_web/components/strategy_parts.ex:137
 #, elixir-autogen, elixir-format
 msgid "Passed older rules"
 msgstr "Passed the boomer rules"
 
-#: lib/opus_web/live/accounts_live.ex:241
+#: lib/opus_web/live/accounts_live.ex:389
 #, elixir-autogen, elixir-format
 msgid "Prices from Questrade as of %{time}, refreshed every 15 minutes while the market is open."
 msgstr "Damage report from Questrade as of %{time}, refreshed every 15 minutes while the casino is open."
 
-#: lib/opus_web/components/strategy_parts.ex:409
+#: lib/opus_web/components/strategy_parts.ex:640
 #, elixir-autogen, elixir-format
 msgid "%{count} nearby settings tried. %{reason}"
 msgstr "Nudged the knobs %{count} times. It snapped: %{reason}"
 
-#: lib/opus_web/components/strategy_parts.ex:414
+#: lib/opus_web/components/strategy_parts.ex:645
 #, elixir-autogen, elixir-format
 msgid "%{count} nearby settings tried; the weakest kept %{kept} of the Sharpe"
 msgstr "Nudged the knobs %{count} times; worst nudge still kept %{kept} of the Sharpe. Not a one-knob wonder"
 
-#: lib/opus_web/live/strategy_builder_live.ex:992
+#: lib/opus_web/live/strategy_builder_live.ex:1018
 #, elixir-autogen, elixir-format
 msgid "It's tested on %{instrument}: backtest, walk-forward, Monte Carlo, nearby settings, then the holdout (a one-time look at data kept aside)."
 msgstr "It gets hazed on %{instrument}: backtest, walk-forward, Monte Carlo, knob-nudging, then the holdout (one peek at the stash of data nobody touched)."
 
-#: lib/opus_web/components/strategy_parts.ex:67
+#: lib/opus_web/components/strategy_parts.ex:101
 #, elixir-autogen, elixir-format
 msgid "Nearby settings"
 msgstr "Knob nudge"
 
-#: lib/opus_web/components/strategy_parts.ex:233
+#: lib/opus_web/components/strategy_parts.ex:355
 #, elixir-autogen, elixir-format
 msgid "Hide the archive"
 msgstr "Rebury the graveyard"
 
-#: lib/opus_web/components/strategy_parts.ex:231
+#: lib/opus_web/components/strategy_parts.ex:353
 #, elixir-autogen, elixir-format
 msgid "Show the archive (%{count}): tried before the block builder"
 msgstr "Dig up the graveyard (%{count}): tries from before the crayons"
 
-#: lib/opus_web/components/strategy_parts.ex:241
+#: lib/opus_web/components/strategy_parts.ex:363
 #, elixir-autogen, elixir-format
 msgctxt "test run"
 msgid "archive"
 msgstr "graveyard"
 
-#: lib/opus_web/components/strategy_parts.ex:158
+#: lib/opus_web/components/strategy_parts.ex:258
 #, elixir-autogen, elixir-format
 msgid "%{sure} sure this isn't luck, after trying it on %{count} market"
 msgid_plural "%{sure} sure this isn't luck, after trying it on %{count} markets"
 msgstr[0] "%{sure} sure you're not just a lucky regard, after YOLOing it on %{count} market"
 msgstr[1] "%{sure} sure you're not just a lucky regard, after YOLOing it on %{count} markets"
 
-#: lib/opus_web/components/strategy_parts.ex:157
+#: lib/opus_web/components/strategy_parts.ex:257
 #, elixir-autogen, elixir-format
 msgid "Luck check:"
 msgstr "Lucky regard check:"
 
-#: lib/opus_web/components/strategy_parts.ex:174
+#: lib/opus_web/components/strategy_parts.ex:283
 #, elixir-autogen, elixir-format
 msgid "below the bar"
 msgstr "could still be dumb luck"
 
-#: lib/opus_web/components/strategy_parts.ex:168
+#: lib/opus_web/components/strategy_parts.ex:277
 #, elixir-autogen, elixir-format
 msgid "clears the bar"
 msgstr "actual skill, apparently"
 
-#: lib/opus_web/components/strategy_parts.ex:165
+#: lib/opus_web/components/strategy_parts.ex:274
 #, elixir-autogen, elixir-format
 msgid "needs %{needed}"
 msgstr "needs %{needed}"
 
-#: lib/opus_web/components/strategy_parts.ex:171
+#: lib/opus_web/components/strategy_parts.ex:280
 #, elixir-autogen, elixir-format
 msgid "passes, but under %{clean}: watch it"
 msgstr "probably not luck, but keep one eye on it (under %{clean})"
 
-#: lib/opus_web/components/strategy_parts.ex:342
+#: lib/opus_web/components/strategy_parts.ex:541
 #, elixir-autogen, elixir-format
 msgid "Account %{account} at %{risk} risk a trade, compounded; its worst drop %{account_drop}. %{count} trades, %{won} won. Trades added up: %{sum}, worst drop %{drop}"
 msgstr "Real account %{account} betting %{risk} a play, stacked; worst gut punch %{account_drop}. %{count} plays, %{won} hit. All-in fantasy math: %{sum}, worst drop %{drop}"
 
-#: lib/opus_web/components/strategy_parts.ex:82
+#: lib/opus_web/components/strategy_parts.ex:116
 #, elixir-autogen, elixir-format
 msgid "Account figures size each trade the way it would trade live, at the risk shown, and compound them. \"Trades added up\" is each trade's price move summed as if every trade used the whole account: the pass marks were set on it, so it stays, named for what it is. The Together page shows several strategies on one account."
 msgstr "The account number is what your actual stack does, each play sized like live and stacked. \"Trades added up\" is the all-in fantasy where every play bets the house; the pass marks were set on it, so it stays, labelled as fantasy. The squad page shows the real account."
 
-#: lib/opus_web/components/strategy_parts.ex:356
+#: lib/opus_web/components/strategy_parts.ex:555
 #, elixir-autogen, elixir-format
 msgid "Trades added up: %{sum} over %{count} trades, %{won} won, worst drop %{drop}"
 msgstr "All-in fantasy math: %{sum} over %{count} plays, %{won} hit, worst drop %{drop}"
 
-#: lib/opus_web/components/strategy_parts.ex:376
+#: lib/opus_web/components/strategy_parts.ex:592
 #, elixir-autogen, elixir-format
 msgid "fitted on older data: account %{is_account} over %{is_count} trades (added up %{is_sum}); then on later data it hadn't seen: account %{oos_account} over %{oos_count} trades (added up %{oos_sum})"
 msgstr "on the tape it studied: account %{is_account} over %{is_count} plays (fantasy %{is_sum}); then on tape it never saw: account %{oos_account} over %{oos_count} plays (fantasy %{oos_sum})"
 
-#: lib/opus_web/components/strategy_parts.ex:388
+#: lib/opus_web/components/strategy_parts.ex:604
 #, elixir-autogen, elixir-format
 msgid "fitted on older data: trades added up %{is_sum} over %{is_count} trades; then on later data it hadn't seen: %{oos_sum} over %{oos_count} trades"
 msgstr "on the tape it studied: fantasy %{is_sum} over %{is_count} plays; then on tape it never saw: %{oos_sum} over %{oos_count} plays"
+
+#: lib/opus_web/live/basket_live.ex:140
+#, elixir-autogen, elixir-format
+msgid "Test it on several markets"
+msgstr "Spray it across the whole casino"
+
+#: lib/opus_web/live/basket_live.ex:188
+#, elixir-autogen, elixir-format
+msgid "Pick the markets"
+msgstr "Pick your tables"
+
+#: lib/opus_web/live/basket_live.ex:254
+#, elixir-autogen, elixir-format
+msgid "How to test them"
+msgstr "How to send it"
+
+#: lib/opus_web/live/basket_live.ex:362
+#, elixir-autogen, elixir-format
+msgid "What happens when you run it"
+msgstr "What happens when you send it"
+
+#: lib/opus_web/live/basket_live.ex:397
+#, elixir-autogen, elixir-format
+msgid "Basket results"
+msgstr "Basket receipts"
+
+#: lib/opus_web/live/basket_live.ex:501
+#, elixir-autogen, elixir-format
+msgid "Account growth"
+msgstr "Account gains (or loss porn)"
+
+#: lib/opus_web/live/basket_live.ex:506
+#, elixir-autogen, elixir-format
+msgid "A year"
+msgstr "A year, annualized hopium"
+
+#: lib/opus_web/live/basket_live.ex:510
+#, elixir-autogen, elixir-format
+msgid "Worst drop"
+msgstr "Worst bag-hold"
+
+#: lib/opus_web/live/basket_live.ex:515
+#, elixir-autogen, elixir-format
+msgid "Months of results"
+msgstr "Months at the casino"
+
+#: lib/opus_web/live/together_live.ex:267
+#, elixir-autogen, elixir-format
+msgid "Strategies that are switched on already trade as one team on your account. To add a teammate for real: it has to pass every test, then you switch it on."
+msgstr "Apes that are switched on already YOLO as one squad on your account. To recruit an ape for real: it has to survive every test, then you switch it on."
+
+#: lib/opus_web/live/together_live.ex:852
+#, elixir-autogen, elixir-format
+msgid "Show old tests (%{count}): tested before the current rules"
+msgstr "Show the boomer tests (%{count}): judged before today's rules"
+
+#: lib/opus_web/live/together_live.ex:854
+#, elixir-autogen, elixir-format
+msgid "Hide old tests"
+msgstr "Hide the boomer tests"
+
+#: lib/opus_web/components/strategy_parts.ex:146
+#, elixir-autogen, elixir-format
+msgctxt "test stage"
+msgid "Stopped"
+msgstr "Got rugged mid-test"
+
+#: lib/opus_web/components/strategy_parts.ex:205
+#, elixir-autogen, elixir-format
+msgid "Resume from %{stage}"
+msgstr "Send it again from the %{stage}"
+
+#: lib/opus_web/components/strategy_parts.ex:526
+#, elixir-autogen, elixir-format
+msgid "Account %{account} over %{months} months of results (%{count} positions held across re-ranks); its worst drop, valued at every close, %{account_drop}"
+msgstr ""
+
+#: lib/opus_web/components/strategy_parts.ex:140
+#, elixir-autogen, elixir-format
+msgid "Failed older rules"
+msgstr "Got rekt by the boomer rules"
+
+#: lib/opus_web/components/strategy_parts.ex:286
+#, elixir-autogen, elixir-format
+msgid "Settings tried on one market mostly repeat each other, so each market counts as the square root of its settings: 4 settings count as 2 tries, 9 as 3."
+msgstr ""
+
+#: lib/opus_web/components/strategy_parts.ex:574
+#, elixir-autogen, elixir-format
+msgid "fitted on older data: account %{is_account} over %{is_months} months; then on later data it hadn't seen: account %{oos_account} over %{oos_months} months"
+msgstr "on the tape it studied: account %{is_account} over %{is_months} months; then on tape it never saw: account %{oos_account} over %{oos_months} months"
+
+#: lib/opus_web/components/strategy_parts.ex:266
+#, elixir-autogen, elixir-format
+msgid "with %{settings} different settings, counted as about %{count} try"
+msgid_plural "with %{settings} different settings, counted as about %{count} tries"
+msgstr[0] ""
+msgstr[1] ""

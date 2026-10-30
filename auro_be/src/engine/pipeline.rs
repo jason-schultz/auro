@@ -10,8 +10,10 @@ use crate::db::repositories::candles::load_candles;
 use crate::db::repositories::financing as financing_repo;
 use crate::db::repositories::live_strategies as live_strategies_repo;
 use crate::db::repositories::pipeline as pipeline_repo;
-use crate::engine::financing::{apply_financing, FinancingModel};
-use crate::engine::stats::{calculate_backtest_stats, AccountSizing, BacktestStats};
+use crate::engine::financing::{apply_costs, FinancingModel, Overnight};
+use crate::engine::stats::{
+    backtest_on_account, calculate_backtest_stats, AccountSizing, BacktestStats,
+};
 use crate::engine::strategy::{self as strategy_mod, SizingConfig, Strategy};
 use crate::engine::types::{Candle, Granularity, Trade};
 use crate::error::{AppError, AppResult};
@@ -19,6 +21,26 @@ use crate::error::{AppError, AppResult};
 pub(crate) mod basket;
 mod deflated_sharpe;
 mod parameter_stability;
+
+/// The version of the rules the pipeline judges by, saved with every stage
+/// result (`strategy_evaluations.rules_version`). Opus reads a result with
+/// a lower version, or none, as old: judged by earlier rules, so it has to
+/// be re-tested before it counts.
+///
+/// Bump it whenever a change can turn a past pass into a fail or vice
+/// versa (a threshold, a metric's definition, how a stage tests, a stage
+/// added or removed), then run `UPDATE_RULES_VERSION=1 cargo test
+/// rules_version` to rewrite `opus/priv/rules_version.json`, and add a line
+/// below.
+///
+/// - none (NULL): judged before results were stamped, Oct 30 2026 or earlier.
+/// - 1: the rules as of Oct 30 2026: drawdowns valued daily on the account;
+///   Monte Carlo redraws the account's daily returns in blocks
+///   (`daily_block_bootstrap`) with the 10% account gate; the luck check
+///   counts each market's k settings tries as √k; ranked baskets judged on
+///   months; the walk-forward's in-sample minimum; the nearby-settings
+///   (parameter stability) stage.
+pub const RULES_VERSION: i32 = 1;
 
 #[derive(Clone)]
 pub struct StrategyConfig {
@@ -124,7 +146,13 @@ pub(crate) fn run_strategy(
 ) -> AppResult<Vec<Trade>> {
     // All strategies use the composite shape. Pre-composite flat-shape strategies
     // were purged with the DB wipe; see [[decision-canonical-strategy-shape]].
-    let strategy = parse_strategy(&config.parameters, financing).map_err(|e| {
+    // A broker that can't short (Wealthsimple) tests the long side only.
+    let parameters = if financing.can_short(&config.instrument) {
+        config.parameters.clone()
+    } else {
+        long_only(&config.parameters)
+    };
+    let strategy = parse_strategy(&parameters, financing).map_err(|e| {
         AppError::BadRequest(format!(
             "invalid composite strategy parameters for strategy_type={}: {}",
             config.strategy_type, e
@@ -143,8 +171,44 @@ pub(crate) fn run_strategy(
     }
 
     let mut trades = strategy_mod::run_backtest(candles, &strategy);
-    apply_financing(&mut trades, &config.instrument, financing);
+    apply_costs(&mut trades, &config.instrument, financing);
     Ok(trades)
+}
+
+/// The strategy JSON without its short entry rule, for a broker that can't
+/// short: it never opens a short, so its short exit rule never fires.
+pub(crate) fn long_only(parameters: &Value) -> Value {
+    let mut out = parameters.clone();
+    if let Some(Value::Object(entry)) = out.get_mut("entry") {
+        entry.remove("short");
+    }
+    out
+}
+
+/// Whether `parameters` has a short entry rule its broker skipped.
+pub(crate) fn shorts_skipped(parameters: &Value, market: &str, financing: &FinancingModel) -> bool {
+    !financing.can_short(market) && parameters.pointer("/entry/short").is_some()
+}
+
+/// The costs a one-market test charged, for the results page: its broker,
+/// what holding overnight cost, the spread and commission per trade (a
+/// null spread: the bars' own bid/ask), and whether its short rules were
+/// skipped. None for a basket, whose markets each have their own.
+fn costs_json(config: &StrategyConfig, financing: &FinancingModel) -> Option<Value> {
+    if config.parameters.get("basket").is_some() {
+        return None;
+    }
+    let costs = financing.costs_for(&config.instrument)?;
+    Some(serde_json::json!({
+        "broker": costs.broker,
+        "overnight": match costs.overnight {
+            Overnight::OandaFinancing => "oanda_financing",
+            Overnight::None => "none",
+        },
+        "spread_bps": costs.spread_bps,
+        "commission_bps": costs.commission_bps,
+        "shorts_skipped": shorts_skipped(&config.parameters, &config.instrument, financing),
+    }))
 }
 
 /// How `config`'s strategy sizes its trades, for the account figures.
@@ -315,6 +379,34 @@ pub(crate) fn evaluate_thresholds(
 // DB helpers
 // ---------------------------------------------------------------------------
 
+/// Refuse a test on a market with no broker set (`instruments.test_broker`):
+/// without one there are no costs to grade it on, and OANDA's are not a
+/// stand-in for anyone else's. Checked before a stage writes anything, so
+/// a refused test leaves no result behind.
+pub async fn require_brokers(pool: &PgPool, config: &StrategyConfig) -> AppResult<()> {
+    let markets = match basket::Basket::of(config) {
+        Ok(Some(basket)) => basket.markets,
+        _ => vec![config.instrument.clone()],
+    };
+    let financing = load_financing(pool).await?;
+    let off: Vec<&str> = markets
+        .iter()
+        .filter(|m| financing.costs_for(m).is_none())
+        .map(String::as_str)
+        .collect();
+    if off.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::BadRequest(format!(
+        "{} {} no broker set for {} tests (the Instruments page), so there are no costs to \
+         grade {} on.",
+        off.join(", "),
+        if off.len() == 1 { "has" } else { "have" },
+        if off.len() == 1 { "its" } else { "their" },
+        if off.len() == 1 { "it" } else { "them" }
+    )))
+}
+
 pub async fn load_strategy_config(pool: &PgPool, config_id: Uuid) -> AppResult<StrategyConfig> {
     let row = pipeline_repo::find_strategy_config(pool, config_id)
         .await
@@ -375,9 +467,16 @@ async fn finalize_evaluation(
     stats: &Value,
     failure_reason: Option<&str>,
 ) -> AppResult<()> {
-    pipeline_repo::finalize_evaluation(pool, evaluation_id, status, stats, failure_reason)
-        .await
-        .map_err(AppError::Database)
+    pipeline_repo::finalize_evaluation(
+        pool,
+        evaluation_id,
+        status,
+        stats,
+        failure_reason,
+        RULES_VERSION,
+    )
+    .await
+    .map_err(AppError::Database)
 }
 
 async fn fail_stage(
@@ -463,15 +562,19 @@ enum Part {
     Holdout(DateTime<Utc>),
 }
 
-/// A run's figures: its stats, the returns it's judged on (Monte Carlo
-/// redraws them, the luck check reads their shape) and, for a basket, its
-/// part of the stats for the results page (`basket::stats_json`).
+/// A run's figures: its stats, the returns it's judged on (the luck check
+/// reads their shape), the account's daily returns (Monte Carlo redraws
+/// them) and, for a basket, its part of the stats for the results page
+/// (`basket::stats_json`).
 struct Tested {
     stats: BacktestStats,
     /// Each trade's return (for a together basket, what it did to the
     /// account), or for a ranked basket each calendar month's account
     /// return (`basket::Run::returns`).
     returns: Vec<f64>,
+    /// The account's return each trading day, valued at the day's last
+    /// bar (`Outcome::daily_valued`).
+    daily: Vec<f64>,
     basket: Option<Value>,
 }
 
@@ -573,9 +676,11 @@ impl Subject {
                     }
                     _ => bars,
                 };
+                let (stats, outcome) = backtest_on_account(&trades, counted, sizing);
                 Ok(Tested {
-                    stats: calculate_backtest_stats(&trades, counted, sizing),
+                    stats,
                     returns: trades.iter().map(|t| t.pnl_percent).collect(),
+                    daily: outcome.daily_valued,
                     basket: None,
                 })
             }
@@ -591,6 +696,7 @@ impl Subject {
                 let json = basket::stats_json(basket, config.granularity, &run);
                 Ok(Tested {
                     returns: run.returns(),
+                    daily: run.outcome.daily_valued,
                     stats: run.stats,
                     basket: Some(json),
                 })
@@ -829,6 +935,7 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
     }
 
     let financing = load_financing(pool).await?;
+    let costs = costs_json(config, &financing);
     let job = config.clone();
     let tested = match off_runtime(move || subject.test(&job, &financing, Part::Whole)).await? {
         Ok(tested) => tested,
@@ -838,6 +945,9 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
     let mut stats_json = backtest_stats_to_json(&tested.stats);
     if let Some(extra) = tested.basket {
         stats_json["basket"] = extra;
+    }
+    if let Some(costs) = costs {
+        stats_json["costs"] = costs;
     }
     let result = judge(pool, config, evaluation_id, "backtest", stats_json).await?;
 
@@ -948,7 +1058,7 @@ fn deflated_sharpe_json(
     let n_trials = counted.effective;
     let scores: Vec<(f64, usize)> = own
         .iter()
-        .map(|t| (t.sharpe, usize::try_from(t.num_trades).unwrap_or(0)))
+        .map(|t| (t.sharpe, usize::try_from(t.periods).unwrap_or(0)))
         .collect();
     let spread = deflated_sharpe::z_spread(&scores, min_trades);
     let z0 = deflated_sharpe::expected_max(n_trials, 1.0);
@@ -1096,96 +1206,124 @@ pub async fn run_walk_forward(
 
 const MONTE_CARLO_SIMS: usize = 10_000;
 
-struct SimStats {
+/// Mean length, in trading days, of the stretches Monte Carlo redraws
+/// (about a month): runs of losses and calm or wild spells stay together,
+/// where redrawing single trades or days independently breaks them up and
+/// makes a bad run look shallower than it is.
+const MEAN_BLOCK_DAYS: f64 = 20.0;
+
+/// How Monte Carlo redraws, saved with its results so older results
+/// (trades or months redrawn one at a time, drawdown between trades only)
+/// can be told apart.
+const MC_METHOD: &str = "daily_block_bootstrap";
+
+/// Fill `out` with `len` positions in a series of `n` (n ≥ 1), drawn by the
+/// stationary bootstrap (Politis & Romano 1994): start anywhere, then each
+/// step either carries on to the next position (wrapping from the end to
+/// the start) or, with chance 1/`mean_block`, jumps to a fresh random
+/// start. Stretches come out `mean_block` long on average (geometric), so
+/// whatever clusters within about that span is kept together.
+fn stationary_bootstrap<R: rand::Rng + ?Sized>(
+    n: usize,
+    len: usize,
+    mean_block: f64,
+    rng: &mut R,
+    out: &mut Vec<usize>,
+) {
+    out.clear();
+    let restart = 1.0 / mean_block;
+    let mut at = rng.random_range(0..n);
+    for i in 0..len {
+        if i > 0 {
+            at = if rng.random::<f64>() < restart {
+                rng.random_range(0..n)
+            } else {
+                (at + 1) % n
+            };
+        }
+        out.push(at);
+    }
+}
+
+/// One redrawn path's figures.
+struct PathStats {
     total_return: f64,
-    max_drawdown: f64, // positive fraction
-    sharpe: f64,
+    /// Worst fall from the high (≥ 0), the start counting as a high.
+    max_drawdown: f64,
+    annual_sharpe: f64,
 }
 
-fn sim_stats_from_pnls(pnls: &[f64]) -> SimStats {
-    let n = pnls.len() as f64;
-    let total_return: f64 = pnls.iter().sum();
-
-    let mean = total_return / n;
-    let variance = pnls.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
-    let sharpe = if variance < f64::EPSILON {
-        0.0
-    } else {
-        mean / variance.sqrt()
-    };
-
-    let mut cumulative = 0.0_f64;
-    let mut peak = 0.0_f64;
-    let mut max_drawdown = 0.0_f64;
-    for &pnl in pnls {
-        cumulative += pnl;
-        if cumulative > peak {
-            peak = cumulative;
-        }
-        // From the start too: a run that opens with losses is a drawdown
-        // (the same measure as the backtest's, `stats.rs`).
-        let dd = (peak - cumulative) / (1.0 + peak);
-        if dd > max_drawdown {
-            max_drawdown = dd;
-        }
+/// Compound `daily` (the account's returns, in the order drawn).
+fn path_stats(daily: impl Iterator<Item = f64>) -> PathStats {
+    let (mut nav, mut peak, mut max_drawdown) = (1.0_f64, 1.0_f64, 0.0_f64);
+    let (mut n, mut sum, mut sum_sq) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for r in daily {
+        nav = (nav * (1.0 + r)).max(0.0);
+        peak = peak.max(nav);
+        max_drawdown = max_drawdown.max(1.0 - nav / peak);
+        n += 1.0;
+        sum += r;
+        sum_sq += r * r;
     }
-
-    SimStats {
-        total_return,
+    let mean = sum / n;
+    let sd = (sum_sq / n - mean * mean).max(0.0).sqrt();
+    PathStats {
+        total_return: nav - 1.0,
         max_drawdown,
-        sharpe,
+        annual_sharpe: if sd > f64::EPSILON {
+            mean / sd * 252f64.sqrt()
+        } else {
+            0.0
+        },
     }
 }
 
-/// Redraw `returns` (each trade's, or a ranked basket's months) with
-/// replacement, `MONTE_CARLO_SIMS` times. Its drawdown is the redrawn
-/// returns added up, measured between them: a trade's dip while open
-/// can't be seen here (the backtest's drawdown values every bar).
-fn run_monte_carlo_sims(returns: &[f64]) -> Value {
-    let pool = returns;
-    let n = pool.len();
-    let mut sample = Vec::with_capacity(n);
-    let mut rng = rand::rng();
+/// The value `pct`% of the way up `sorted` (index n·pct/100, the 95th of
+/// 10,000 being the 9,500th).
+fn percentile(sorted: &[f64], pct: usize) -> f64 {
+    sorted[(sorted.len() * pct / 100).min(sorted.len() - 1)]
+}
 
-    let mut profitable_count: usize = 0;
-    let mut all_sharpes: Vec<f64> = Vec::with_capacity(MONTE_CARLO_SIMS);
-    let mut all_drawdowns: Vec<f64> = Vec::with_capacity(MONTE_CARLO_SIMS);
-
+/// Redraw the account's daily returns (`Outcome::daily_valued`: valued at
+/// each day's last bar, open trades included, sized as live sizes them)
+/// `MONTE_CARLO_SIMS` times by the stationary block bootstrap, each path as
+/// long as the original, and read every figure off the redrawn paths: the
+/// share that made money, and the drawdown and return percentiles, all on
+/// the backtest's `account_*` basis. A trade's dip while open counts, and
+/// so do runs of bad days.
+fn run_monte_carlo_sims<R: rand::Rng + ?Sized>(daily: &[f64], rng: &mut R) -> Value {
+    let n = daily.len();
+    let mut picks = Vec::with_capacity(n);
+    let mut profitable = 0_usize;
+    let mut returns = Vec::with_capacity(MONTE_CARLO_SIMS);
+    let mut drawdowns = Vec::with_capacity(MONTE_CARLO_SIMS);
+    let mut sharpes = Vec::with_capacity(MONTE_CARLO_SIMS);
     for _ in 0..MONTE_CARLO_SIMS {
-        sample.clear();
-
-        for _ in 0..n {
-            let idx = rng.random_range(0..n);
-            sample.push(pool[idx]);
-        }
-
-        let sim = sim_stats_from_pnls(&sample);
-
-        if sim.total_return > 0.0 {
-            profitable_count += 1;
-        }
-        all_sharpes.push(sim.sharpe);
-        all_drawdowns.push(sim.max_drawdown);
+        stationary_bootstrap(n, n, MEAN_BLOCK_DAYS, rng, &mut picks);
+        let path = path_stats(picks.iter().map(|&i| daily[i]));
+        profitable += usize::from(path.total_return > 0.0);
+        returns.push(path.total_return);
+        drawdowns.push(path.max_drawdown);
+        sharpes.push(path.annual_sharpe);
     }
-
-    let profitable_pct = profitable_count as f64 / MONTE_CARLO_SIMS as f64;
-
-    all_sharpes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median_sharpe =
-        (all_sharpes[MONTE_CARLO_SIMS / 2 - 1] + all_sharpes[MONTE_CARLO_SIMS / 2]) / 2.0;
-
-    all_drawdowns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let p95_idx = MONTE_CARLO_SIMS * 95 / 100; // index 9500 → 95th percentile
-    let p95_drawdown = all_drawdowns[p95_idx];
+    for v in [&mut returns, &mut drawdowns, &mut sharpes] {
+        v.sort_by(f64::total_cmp);
+    }
 
     serde_json::json!({
         // Evaluated against thresholds
-        "profitable_pct": profitable_pct,
-        "median_sharpe":  median_sharpe,
-        "p95_drawdown":   p95_drawdown,
+        "profitable_pct": profitable as f64 / MONTE_CARLO_SIMS as f64,
+        "p95_drawdown": percentile(&drawdowns, 95),
         // Context only
-        "num_trades":     n,
-        "num_sims":       MONTE_CARLO_SIMS,
+        "median_drawdown": percentile(&drawdowns, 50),
+        "p5_return": percentile(&returns, 5),
+        "median_return": percentile(&returns, 50),
+        "p95_return": percentile(&returns, 95),
+        "median_annual_sharpe": percentile(&sharpes, 50),
+        "num_days": n,
+        "num_sims": MONTE_CARLO_SIMS,
+        "mean_block_days": MEAN_BLOCK_DAYS,
+        "mc_method": MC_METHOD,
     })
 }
 
@@ -1206,29 +1344,17 @@ pub async fn run_monte_carlo(
         Ok(tested) => tested,
         Err(failure) => return fail_stage(pool, evaluation_id, failure).await,
     };
-    let by_months = tested.stats.num_months.is_some();
-    let returns = tested.returns;
-    let unit = if by_months { "months" } else { "trades" };
-
-    if returns.len() < 2 {
-        let failure = format!(
-            "too few {unit} for Monte Carlo: {} (need >= 2)",
-            returns.len()
-        );
+    let daily = tested.daily;
+    // Days the account moved: a strategy that never traded has none to
+    // redraw.
+    let moved = daily.iter().filter(|r| **r != 0.0).count();
+    if moved < 2 {
+        let failure = format!("too few days with results for Monte Carlo: {moved} (need >= 2)");
         return fail_stage(pool, evaluation_id, failure).await;
     }
 
-    let num_trades = returns.len();
-    let mut stats_json = off_runtime(move || run_monte_carlo_sims(&returns)).await?;
-    // A ranked basket redraws its months, not its trades.
-    if by_months {
-        if let Some(stats) = stats_json.as_object_mut() {
-            if let Some(n) = stats.remove("num_trades") {
-                stats.insert("num_months".into(), n);
-            }
-            stats.insert("judged_on".into(), "months".into());
-        }
-    }
+    let num_days = daily.len();
+    let stats_json = off_runtime(move || run_monte_carlo_sims(&daily, &mut rand::rng())).await?;
     let result = judge(pool, config, evaluation_id, "monte_carlo", stats_json).await?;
 
     tracing::info!(
@@ -1238,7 +1364,7 @@ pub async fn run_monte_carlo(
         strategy_type = %config.strategy_type,
         stage = "monte_carlo",
         status = %result.status,
-        num_trades = num_trades,
+        num_days = num_days,
         sims = MONTE_CARLO_SIMS,
         "pipeline stage complete"
     );
@@ -1508,6 +1634,17 @@ pub async fn run_parameter_stability(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn long_only_drops_the_short_entry_and_keeps_the_rest() {
+        let parameters = serde_json::json!({
+            "entry": {"long": "r.oversold", "short": "r.overbought"},
+            "exit": {"long": "r.overbought", "short": "r.oversold"}
+        });
+        let long = long_only(&parameters);
+        assert_eq!(long["entry"], serde_json::json!({"long": "r.oversold"}));
+        assert_eq!(long["exit"], parameters["exit"]);
+    }
     use super::*;
 
     const SIZING: AccountSizing = AccountSizing {
@@ -1517,8 +1654,9 @@ mod tests {
 
     #[test]
     fn monte_carlo_drawdown_counts_losses_before_the_first_gain() {
-        let sim = sim_stats_from_pnls(&[-0.3, 0.1, 0.1]);
-        assert!((sim.max_drawdown - 0.3).abs() < 1e-12);
+        let path = path_stats([-0.3, 0.1, 0.1].into_iter());
+        assert!((path.max_drawdown - 0.3).abs() < 1e-12);
+        assert!((path.total_return - (0.7 * 1.1 * 1.1 - 1.0)).abs() < 1e-12);
     }
     use chrono::Utc;
 
@@ -1700,7 +1838,7 @@ mod tests {
                 instrument: instrument.to_string(),
                 granularity: granularity.to_string(),
                 sharpe,
-                num_trades,
+                periods: num_trades,
             }
         };
         let tries = vec![
@@ -1755,7 +1893,7 @@ mod tests {
             instrument: "SPX500_USD".to_string(),
             granularity: "D".to_string(),
             sharpe: 0.1,
-            num_trades: 100,
+            periods: 100,
         };
         // RSI 2 to 5 on SPX, RSI 2 retested under another name: 4 settings.
         let tries: Vec<_> = [(2, "a"), (3, "b"), (4, "c"), (5, "d"), (2, "again")]
@@ -1873,102 +2011,173 @@ mod tests {
         assert!(backtest_stats_to_json(&stats)["t_stat"].as_f64().is_some());
     }
 
-    #[test]
-    fn monte_carlo_profitable_pct_varies_with_pool() {
-        let trades = vec![
-            trade_with_pnl(1.0),
-            trade_with_pnl(1.0),
-            trade_with_pnl(1.0),
-            trade_with_pnl(-2.0),
-        ];
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
-        let stats = run_monte_carlo_sims(&pnls(&trades));
-        let profitable_pct = stats
-            .get("profitable_pct")
-            .and_then(|v| v.as_f64())
-            .expect("profitable_pct should be present");
+    fn mc(daily: &[f64], seed: u64) -> Value {
+        run_monte_carlo_sims(daily, &mut StdRng::seed_from_u64(seed))
+    }
 
-        assert!(profitable_pct > 0.0, "expected profitable_pct > 0.0");
-        assert!(profitable_pct < 1.0, "expected profitable_pct < 1.0");
+    fn figure(stats: &Value, key: &str) -> f64 {
+        stats[key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{key} missing"))
+    }
+
+    /// A noisy daily series with a small edge: about ±1% a day around a
+    /// +0.03% mean.
+    fn noisy_days(n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|i| 0.01 * (i as f64 * 1.7).sin() + 0.0003)
+            .collect()
     }
 
     #[test]
-    fn monte_carlo_results_vary_between_runs() {
-        // Two independent MC runs on the same pool should produce different
-        // median_sharpe values. Under the prior permutation implementation,
-        // median_sharpe was permutation-invariant (computed from the same
-        // multiset) and identical across every run regardless of RNG state —
-        // this assertion would have failed. Under bootstrap-with-replacement,
-        // each run samples a different multiset and the medians diverge.
-        //
-        // Pool needs enough distinct magnitudes that the per-sim sharpe
-        // distribution is approximately continuous; a tiny pool with few
-        // distinct values gives a discrete sharpe distribution whose median
-        // can land on the same atom in both runs. Even this pool's medians
-        // occasionally coincide (seen in CI Oct 29), so take five runs and
-        // require at least two distinct medians.
-        let trades = vec![
-            trade_with_pnl(3.0),
-            trade_with_pnl(2.0),
-            trade_with_pnl(1.5),
-            trade_with_pnl(1.0),
-            trade_with_pnl(0.5),
-            trade_with_pnl(-0.5),
-            trade_with_pnl(-1.0),
-            trade_with_pnl(-1.5),
-            trade_with_pnl(-2.0),
-            trade_with_pnl(-2.5),
-        ];
-
-        let medians: Vec<f64> = (0..5)
-            .map(|_| {
-                run_monte_carlo_sims(&pnls(&trades))
-                    .get("median_sharpe")
-                    .and_then(|v| v.as_f64())
-                    .expect("median_sharpe should be present")
-            })
-            .collect();
-
+    fn the_bootstrap_redraws_stretches_of_consecutive_days() {
+        let n = 50;
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut picks = Vec::new();
+        let len = 200_000;
+        stationary_bootstrap(n, len, MEAN_BLOCK_DAYS, &mut rng, &mut picks);
+        assert_eq!(picks.len(), len);
+        assert!(picks.iter().all(|&i| i < n));
+        // A new stretch starts wherever a pick isn't the one after the last
+        // (a fresh start can land there by chance, 1 in n, so slightly
+        // fewer are seen than drawn).
+        let breaks = picks.windows(2).filter(|w| w[1] != (w[0] + 1) % n).count();
+        let mean_block = len as f64 / (breaks + 1) as f64;
+        let expected = MEAN_BLOCK_DAYS / (1.0 - 1.0 / n as f64);
         assert!(
-            medians.iter().any(|m| (m - medians[0]).abs() > 1e-9),
-            "expected median_sharpe to differ between MC runs, got {:?}",
-            medians
+            (mean_block - expected).abs() < 0.1 * expected,
+            "mean stretch {mean_block}, expected about {expected}"
+        );
+        // Stretches vary in length (geometric), not one fixed block size.
+        let mut lengths = Vec::new();
+        let mut run = 1;
+        for w in picks.windows(2) {
+            if w[1] == (w[0] + 1) % n {
+                run += 1;
+            } else {
+                lengths.push(run);
+                run = 1;
+            }
+        }
+        assert!(lengths.iter().any(|&l| l <= 3));
+        assert!(lengths.iter().any(|&l| l >= 60));
+    }
+
+    #[test]
+    fn the_bootstrap_is_the_same_under_the_same_seed() {
+        let draw = |seed| {
+            let mut picks = Vec::new();
+            stationary_bootstrap(
+                30,
+                500,
+                MEAN_BLOCK_DAYS,
+                &mut StdRng::seed_from_u64(seed),
+                &mut picks,
+            );
+            picks
+        };
+        assert_eq!(draw(1), draw(1));
+        assert_ne!(draw(1), draw(2));
+        let days = noisy_days(300);
+        assert_eq!(mc(&days, 3), mc(&days, 3));
+        assert_ne!(
+            figure(&mc(&days, 3), "median_annual_sharpe"),
+            figure(&mc(&days, 4), "median_annual_sharpe")
         );
     }
 
     #[test]
-    fn monte_carlo_all_winners_gives_profitable_pct_1() {
-        let trades = vec![
-            trade_with_pnl(0.5),
-            trade_with_pnl(1.0),
-            trade_with_pnl(2.0),
-            trade_with_pnl(3.0),
-        ];
-
-        let stats = run_monte_carlo_sims(&pnls(&trades));
-        let profitable_pct = stats
-            .get("profitable_pct")
-            .and_then(|v| v.as_f64())
-            .expect("profitable_pct should be present");
-
-        assert!((profitable_pct - 1.0).abs() < f64::EPSILON);
+    fn monte_carlo_says_how_it_redrew() {
+        let stats = mc(&noisy_days(300), 1);
+        assert_eq!(stats["mc_method"], "daily_block_bootstrap");
+        assert_eq!(stats["num_days"], 300);
+        assert_eq!(stats["num_sims"], MONTE_CARLO_SIMS);
+        assert_eq!(figure(&stats, "mean_block_days"), MEAN_BLOCK_DAYS);
+        let made = figure(&stats, "profitable_pct");
+        assert!(made > 0.0 && made < 1.0, "{made}");
+        assert!(figure(&stats, "p5_return") < figure(&stats, "median_return"));
+        assert!(figure(&stats, "median_return") < figure(&stats, "p95_return"));
+        assert!(figure(&stats, "median_drawdown") <= figure(&stats, "p95_drawdown"));
     }
 
     #[test]
-    fn monte_carlo_all_losers_gives_profitable_pct_0() {
-        let trades = vec![
-            trade_with_pnl(-0.5),
-            trade_with_pnl(-1.0),
-            trade_with_pnl(-2.0),
-            trade_with_pnl(-3.0),
-        ];
+    fn monte_carlo_all_gains_or_all_losses() {
+        let gains = [0.001, 0.0, 0.002, 0.0, 0.003];
+        assert_eq!(figure(&mc(&gains, 1), "profitable_pct"), 1.0);
+        assert_eq!(figure(&mc(&gains, 1), "p95_drawdown"), 0.0);
+        let losses: Vec<f64> = gains.iter().map(|r| -r).collect();
+        assert_eq!(figure(&mc(&losses, 1), "profitable_pct"), 0.0);
+    }
 
-        let stats = run_monte_carlo_sims(&pnls(&trades));
-        let profitable_pct = stats
-            .get("profitable_pct")
-            .and_then(|v| v.as_f64())
-            .expect("profitable_pct should be present");
+    #[test]
+    fn monte_carlo_sees_a_long_hold_dip_while_open() {
+        // One long trade held eight days: down 10% midway, closed flat. At a
+        // 10% stop and 10% risk the whole account is in it. Redrawing its
+        // one trade (the old way) saw a 0% drawdown every time; the daily
+        // account curve carries the dip.
+        let closes = [100.0, 97.0, 94.0, 91.0, 90.0, 92.0, 95.0, 98.0, 100.0];
+        let start = DateTime::parse_from_rfc3339("2026-01-05T21:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bars: Vec<Candle> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| Candle {
+                time: start + chrono::Duration::days(i as i64),
+                mid: crate::engine::types::OHLC {
+                    open: c,
+                    high: c,
+                    low: c,
+                    close: c,
+                },
+                volume: 1,
+                bid: None,
+                ask: None,
+            })
+            .collect();
+        let trade = Trade {
+            entry_price: 100.0,
+            exit_price: 100.0,
+            entry_time: bars[0].time,
+            exit_time: bars[8].time,
+            stop_price: 90.0,
+            ..trade_with_pnl(0.0)
+        };
+        let sizing = AccountSizing {
+            risk_pct: 0.10,
+            max_position_pct: 1.0,
+        };
+        let (stats, outcome) = backtest_on_account(&[trade], &bars, sizing);
+        assert!((stats.account_max_drawdown + 0.10).abs() < 1e-12);
 
-        assert!((profitable_pct - 0.0).abs() < f64::EPSILON);
+        let mc = mc(&outcome.daily_valued, 1);
+        // The redrawn paths are stretches of the one dip and recovery: most
+        // keep the whole fall together.
+        let dd = figure(&mc, "p95_drawdown");
+        assert!((0.09..0.2).contains(&dd), "p95 drawdown {dd}");
+        assert!(figure(&mc, "median_drawdown") >= 0.05);
+    }
+
+    /// Opus compiles the rules version from this file, so it judges results
+    /// by the same number the tester stamps them with.
+    #[test]
+    fn rules_version_file_is_current() {
+        const FILE: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../opus/priv/rules_version.json"
+        );
+        let json = format!("{{\"rules_version\": {RULES_VERSION}}}\n");
+        if std::env::var_os("UPDATE_RULES_VERSION").is_some() {
+            std::fs::write(FILE, &json).expect("write the rules version");
+            return;
+        }
+        let committed = std::fs::read_to_string(FILE).unwrap_or_default();
+        assert!(
+            committed == json,
+            "opus/priv/rules_version.json is stale: run `UPDATE_RULES_VERSION=1 cargo test rules_version` in auro_be"
+        );
     }
 }

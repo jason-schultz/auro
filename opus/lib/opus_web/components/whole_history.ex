@@ -113,7 +113,7 @@ defmodule OpusWeb.WholeHistory do
         <%= if @axes == [] do %>
           <p class="m-0 text-[13px] text-muted">Its blocks have no number settings to vary.</p>
         <% else %>
-          <form phx-change="fragility_axes" class="flex flex-wrap gap-2">
+          <form id="fragility-axes" phx-change="fragility_axes" class="flex flex-wrap gap-2">
             <label class="flex min-w-0 flex-col gap-1 text-[12px] text-muted">
               Across
               <select name="x" class="select select-sm">

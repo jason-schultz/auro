@@ -155,4 +155,133 @@ defmodule OpusWeb.StrategyPartsTest do
     html = render_component(&StrategyParts.evidence/1, results: results(backtest))
     assert html =~ "Trades added up: +30.0% over 40 trades, 50% won, worst drop 10.0%"
   end
+
+  test "Monte Carlo says it reshuffled stretches of daily results; older results keep their words" do
+    checks = [
+      %{metric: "p95_drawdown", operator: "lte", required: 0.10, actual: 0.042, passed: true},
+      %{metric: "profitable_pct", operator: "gte", required: 0.95, actual: 0.98, passed: true}
+    ]
+
+    stage = fn stats ->
+      %{
+        results(not_run())
+        | monte_carlo: %{status: :passed, stats: stats, checks: checks, reason: nil, at: nil}
+      }
+    end
+
+    daily = %{
+      "mc_method" => "daily_block_bootstrap",
+      "p95_drawdown" => 0.042,
+      "profitable_pct" => 0.98,
+      "num_sims" => 10_000
+    }
+
+    html = render_component(&StrategyParts.evidence/1, results: stage.(daily))
+
+    assert html =~
+             "stretches of its daily account results reshuffled at random 10000 times: " <>
+               "98.0% of those histories made money, and a bad run (1 in 20) falls 4.2% " <>
+               "at its own sizing, open trades valued each day"
+
+    assert html =~ "Bad-run drop (1 in 20), account at its sizing, valued daily 4.2%"
+    assert html =~ "Reshuffled daily histories that made money 98.0%"
+
+    old = Map.delete(daily, "mc_method")
+    html = render_component(&StrategyParts.evidence/1, results: stage.(old))
+    assert html =~ "its trades redrawn at random 10000 times"
+    assert html =~ "Bad-run drop (1 in 20), trades added up 4.2%"
+  end
+
+  test "a stuck stage says it stopped and offers to resume from it; the holdout asks first" do
+    stuck = fn stage ->
+      %{
+        status: :stuck,
+        stats: nil,
+        at: nil,
+        checks: [],
+        reason:
+          "Stopped part-way (the tester restarted or the job was cleared): nothing is running it.",
+        config_id: "c0ffee00-0000-0000-0000-000000000000",
+        stage: stage,
+        started: true
+      }
+    end
+
+    html = render_component(&StrategyParts.evidence/1, results: results(stuck.(:backtest)))
+    assert html =~ "Stopped part-way (the tester restarted or the job was cleared)"
+    assert html =~ "Resume from backtest"
+    assert html =~ ~s(phx-click="resume_stage")
+    refute html =~ "data-confirm"
+
+    passed = %{status: :passed, stats: %{}, at: nil, checks: [], reason: nil}
+
+    html =
+      render_component(&StrategyParts.evidence/1,
+        results: %{
+          results(passed)
+          | walk_forward: passed,
+            monte_carlo: passed,
+            parameter_stability: passed,
+            holdout: stuck.(:holdout)
+        }
+      )
+
+    assert html =~ "Resume from holdout"
+    assert html =~ "one-time look at the data kept aside"
+    assert html =~ ~s(phx-value-holdout="confirmed")
+
+    assert render_component(&StrategyParts.test_badge/1, results: results(stuck.(:backtest))) =~
+             "stopped at the backtest; resume it"
+  end
+
+  test "a fail judged by older rules reads as old, not as a current fail" do
+    passed = %{status: :passed, stats: %{}, at: nil, checks: [], reason: nil}
+
+    old_fail = %{
+      status: :old_fail,
+      stats: %{},
+      at: nil,
+      checks: [],
+      reason: "Failed the rules in use when it ran and hasn't been re-run since.",
+      old: true
+    }
+
+    results = %{results(passed) | walk_forward: old_fail}
+    html = render_component(&StrategyParts.evidence/1, results: results)
+    assert html =~ "Failed older rules"
+    assert html =~ "hasn&#39;t been re-run since"
+
+    badge = render_component(&StrategyParts.test_badge/1, results: results)
+    assert badge =~ "failed the walk-forward by older rules; re-test it"
+    refute badge =~ "text-error"
+  end
+
+  test "a backtest says whose costs it was charged" do
+    stage = fn costs -> %{stats: %{"costs" => costs}} end
+
+    assert StrategyParts.costs_words(
+             stage.(%{
+               "broker" => "wealthsimple",
+               "overnight" => "none",
+               "spread_bps" => 10.0,
+               "commission_bps" => 0.0,
+               "shorts_skipped" => true
+             })
+           ) ==
+             "Tested with Wealthsimple's costs: no overnight cost (shares owned outright), " <>
+               "a 10 bp spread a trade. Wealthsimple can't short, so its short rules were skipped."
+
+    assert StrategyParts.costs_words(
+             stage.(%{
+               "broker" => "oanda",
+               "overnight" => "oanda_financing",
+               "spread_bps" => nil,
+               "commission_bps" => 0.0,
+               "shorts_skipped" => false
+             })
+           ) ==
+             "Tested with OANDA's costs: overnight financing, the bid/ask spread on each fill."
+
+    assert StrategyParts.costs_words(%{stats: %{}}) == nil
+  end
 end

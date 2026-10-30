@@ -26,7 +26,7 @@ pub async fn save_accounts(
 }
 
 pub async fn refresh_prices(State(state): State<AppState>) -> AppResult<Json<Value>> {
-    let Some(qt) = state.questrade.as_ref() else {
+    let Some(qt) = state.questrade.client() else {
         return Err(AppError::Internal("Questrade not configured".into()));
     };
 

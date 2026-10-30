@@ -4,7 +4,7 @@ defmodule Opus.Trading.StrategiesTest do
   import Ecto.Query
 
   alias Opus.Instruments
-  alias Opus.Pipeline.{StrategyConfig, StrategyEvaluation}
+  alias Opus.Pipeline.{ParameterStabilityWorker, StrategyConfig, StrategyEvaluation}
   alias Opus.Repo
   alias Opus.Trading.{LiveStrategy, LiveTrade, Recipe, Rule, Strategies, Suspension}
 
@@ -253,6 +253,7 @@ defmodule Opus.Trading.StrategiesTest do
           status: status,
           stats: stats,
           failure_reason: reason,
+          rules_version: StrategyEvaluation.rules_version(),
           evaluated_at: now
         })
       end
@@ -282,15 +283,35 @@ defmodule Opus.Trading.StrategiesTest do
       assert held.locked_by == []
     end
 
-    test "a pass from before the Oct 28 rules reads as that, not as passed" do
-      from(e in StrategyEvaluation, where: e.stage == "backtest")
-      |> Repo.update_all(set: [stats: %{"total_return" => 0.43, "num_trades" => 118}])
+    test "a pass judged by earlier rules reads as that, not as passed" do
+      current = Strategies.recipes() |> hd() |> Map.fetch!(:assignments) |> hd()
+      assert %{status: :passed, old: false} = current.results.backtest
+
+      for version <- [nil, StrategyEvaluation.rules_version() - 1] do
+        from(e in StrategyEvaluation, where: e.stage == "backtest")
+        |> Repo.update_all(set: [rules_version: version])
+
+        [dip_buy, _held] = Strategies.recipes()
+        [nas, _spx] = dip_buy.assignments
+
+        assert %{status: :old_pass, old: true, reason: reason} = nas.results.backtest
+        assert reason =~ "Re-test it"
+        # The walk-forward, judged by today's rules, isn't touched.
+        assert %{status: :failed, old: false} = nas.results.walk_forward
+      end
+    end
+
+    test "a fail judged by earlier rules reads as that, not as failed" do
+      from(e in StrategyEvaluation, where: e.stage == "walk_forward")
+      |> Repo.update_all(set: [rules_version: StrategyEvaluation.rules_version() - 1])
 
       [dip_buy, _held] = Strategies.recipes()
       [nas, _spx] = dip_buy.assignments
 
-      assert %{status: :old_pass, reason: reason} = nas.results.backtest
-      assert reason =~ "before Oct 28"
+      assert %{status: :old_fail, old: true, reason: reason} =
+               nas.results.walk_forward
+
+      assert reason =~ "Re-test it"
     end
 
     test "an archived run is marked, and a trading instrument keeps its own results" do
@@ -327,7 +348,8 @@ defmodule Opus.Trading.StrategiesTest do
           strategy_config_id: config_id,
           stage: stage,
           status: "passed",
-          stats: %{"checks" => []}
+          stats: %{"checks" => []},
+          rules_version: StrategyEvaluation.rules_version()
         })
       end
 
@@ -340,9 +362,11 @@ defmodule Opus.Trading.StrategiesTest do
       assert reason =~ "joined the pipeline on Oct 30"
       assert nas.().results.holdout.status == :passed
 
-      # After: a Monte Carlo pass means it's next, and the holdout waits on it.
+      # After: a Monte Carlo pass means it's next (its job queued), and the
+      # holdout waits on it.
       ran_on.(~U[2026-11-02 12:00:00.000000Z])
       from(e in StrategyEvaluation, where: e.stage == "holdout") |> Repo.delete_all()
+      {:ok, _job} = Oban.insert(ParameterStabilityWorker.new(%{config_id: config_id}))
       assert nas.().results.parameter_stability.status == :pending
       assert %{status: :not_run} = nas.().results.holdout
 
@@ -351,6 +375,7 @@ defmodule Opus.Trading.StrategiesTest do
         stage: "parameter_stability",
         status: "failed",
         stats: %{"checks" => []},
+        rules_version: StrategyEvaluation.rules_version(),
         failure_reason: "Moving period (t, MaFilter) from 200 to 201 dropped the Sharpe"
       })
 

@@ -27,6 +27,10 @@ defmodule Opus.Instruments.Instrument do
     field :feed_questrade_bars, :boolean, default: false
     field :feed_massive_daily, :boolean, default: false
     field :feed_options_chain, :boolean, default: false
+    # The broker its tests charge the costs of (`brokers`); none: not tested.
+    field :test_broker, :string
+    # Its own round-trip spread in basis points, over its broker's default.
+    field :spread_bps, :float
 
     timestamps(type: :utc_datetime_usec, inserted_at: :created_at)
   end
@@ -64,7 +68,9 @@ defmodule Opus.Instruments.Instrument do
       :massive_ticker,
       :feed_questrade_bars,
       :feed_massive_daily,
-      :feed_options_chain
+      :feed_options_chain,
+      :test_broker,
+      :spread_bps
     ])
     |> update_change(:symbol, &upcase/1)
     |> update_change(:exchange, &upcase/1)
@@ -77,6 +83,8 @@ defmodule Opus.Instruments.Instrument do
     |> validate_length(:currency, is: 3)
     |> validate_length(:symbol, max: 20)
     |> unique_constraint([:symbol, :exchange], name: :instruments_symbol_exchange_key)
+    |> validate_number(:spread_bps, greater_than_or_equal_to: 0)
+    |> foreign_key_constraint(:test_broker)
     |> unique_constraint(:oanda_symbol, name: :uq_instruments_oanda_symbol)
     |> unique_constraint(:questrade_symbol, name: :uq_instruments_questrade_symbol)
     |> unique_constraint(:massive_ticker, name: :uq_instruments_massive_ticker)

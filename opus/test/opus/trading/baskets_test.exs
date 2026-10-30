@@ -92,6 +92,30 @@ defmodule Opus.Trading.BasketsTest do
     assert Baskets.rank_choices(r.definition) == [{"mo.roc", "Momentum: Change from then (%)"}]
   end
 
+  test "a reversal buys the lowest; the default stays unwritten", %{recipe: r} do
+    rank = %{"by" => "mo.roc", "every_bars" => "5", "long_top" => "1", "short_bottom" => "1"}
+    markets = ~w(SPX500_USD XAU_USD NAS100_USD)
+
+    assert {:ok, [reversal]} =
+             Baskets.submit(r, markets, %{
+               "mode" => "ranked",
+               "rank" => Map.put(rank, "buy", "lowest")
+             })
+
+    assert reversal.parameters["basket"]["rank"]["buy"] == "lowest"
+
+    assert Baskets.mode_words(reversal.parameters["basket"]) =~
+             "buy the bottom 1, sell the top 1"
+
+    assert {:ok, [default]} =
+             Baskets.submit(r, markets, %{
+               "mode" => "ranked",
+               "rank" => Map.put(rank, "buy", "highest")
+             })
+
+    refute Map.has_key?(default.parameters["basket"]["rank"], "buy")
+  end
+
   test "each separately is one ordinary run per market", %{recipe: r} do
     assert {:ok, [_, _]} = Baskets.submit(r, ~w(SPX500_USD XAU_USD), %{"mode" => "separate"})
     assert StrategyResults.for_baskets(r.definition, "D") == []
@@ -140,6 +164,7 @@ defmodule Opus.Trading.BasketsTest do
       stage: "walk_forward",
       status: "passed",
       stats: %{"checks" => []},
+      rules_version: StrategyEvaluation.rules_version(),
       evaluated_at: DateTime.utc_now()
     })
 
@@ -188,5 +213,18 @@ defmodule Opus.Trading.BasketsTest do
   test "only a ranked basket is judged on months" do
     assert Baskets.by_months?(%{basket: %{"mode" => "ranked"}})
     refute Baskets.by_months?(%{basket: %{"mode" => "together"}})
+  end
+
+  test "a ranked basket names what it ranked by the way the form did" do
+    basket = %{
+      "mode" => "ranked",
+      "rank" => %{"by" => "c.carry", "every_bars" => 21, "long_top" => 3, "short_bottom" => 2}
+    }
+
+    assert Baskets.mode_words(basket, [{"c.carry", "Carry: rate gap"}]) ==
+             "Ranked every 21 bars by Carry: rate gap: buy the top 3, sell the bottom 2"
+
+    assert Baskets.mode_words(basket) =~ "by c.carry:"
+    assert Baskets.mode_words(%{"mode" => "together"}) =~ "Together as one account"
   end
 end

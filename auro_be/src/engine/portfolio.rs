@@ -24,11 +24,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
 use serde::Serialize;
 
 use crate::engine::rules::{AccountLimits, Breach};
-use crate::engine::stats::{annual_sharpe_of, daily_returns};
+use crate::engine::stats::annual_sharpe_of;
 use crate::engine::types::{Candle, Direction, Trade};
 
 /// Points a chart gets at most.
@@ -115,6 +115,11 @@ pub struct Outcome {
     pub pause_trips: Vec<DateTime<Utc>>,
     pub breaker_trips: Vec<Trip>,
     pub points: Vec<Point>,
+    /// The account's return each weekday from `from` to `to` (0.01 =
+    /// +1%), open trades valued at each day's last bar, a weekend's moves
+    /// on Monday: the Sharpe and how plays move together are read from it,
+    /// so a trade's ups and downs land on the days they happen, not all on
+    /// the day it closes. Dated, so two plays' days line up.
     #[serde(skip)]
     pub daily: BTreeMap<NaiveDate, f64>,
     /// Every trade taken, in the order they closed.
@@ -130,6 +135,13 @@ pub struct Outcome {
     /// month's last bar. A month it held nothing is a 0.
     #[serde(skip)]
     pub monthly: Vec<f64>,
+    /// The account's return each trading day (0.01 = +1%), from the day of
+    /// its first trade to its last bar, open trades valued at each day's
+    /// last bar: what Monte Carlo redraws (`pipeline::run_monte_carlo`).
+    /// Every weekday counts, a day it held nothing (or had no bar) as a 0;
+    /// a weekend's moves (FX opens Sunday evening) land on Monday.
+    #[serde(skip)]
+    pub daily_valued: Vec<f64>,
 }
 
 /// Share of NAV a trade's position takes: the live sizing rule before unit
@@ -147,7 +159,7 @@ pub fn position_share(risk_pct: f64, max_position_pct: f64, trade: &Trade) -> f6
 /// the price it would close at then (the bid for a long, the ask for a
 /// short, as its exit fills) against its entry, plus the financing it has
 /// run up so far. The backtest charges a trade's financing when it closes
-/// (`apply_financing`), so the part run up is that charge spread evenly
+/// (`apply_costs`), so the part run up is that charge spread evenly
 /// over the trade's life (the daily rate barely moves within one trade).
 ///
 /// This is the standard daily mark-to-market: the bar's close, not its
@@ -216,6 +228,8 @@ struct Replay<'a> {
     first_entry: Option<DateTime<Utc>>,
     /// The valued NAV at the last mark of each (year, month).
     month_ends: BTreeMap<(i32, u32), f64>,
+    /// The valued NAV at the last mark of each UTC day.
+    day_ends: BTreeMap<NaiveDate, f64>,
 }
 
 impl<'a> Replay<'a> {
@@ -295,6 +309,7 @@ impl<'a> Replay<'a> {
             drawdown,
         });
         self.month_ends.insert((at.year(), at.month()), nav);
+        self.day_ends.insert(at.date_naive(), nav);
 
         let Some(limits) = self.limits else { return };
         self.pause_peak = self.pause_peak.max(nav);
@@ -328,6 +343,73 @@ impl<'a> Replay<'a> {
                 (y, 12) => (y + 1, 1),
                 (y, m) => (y, m + 1),
             };
+        }
+        out
+    }
+
+    /// Trading-day returns from the day of the first trade
+    /// (`Outcome::daily_valued`): each weekday's last valued NAV over the
+    /// one before. A weekend's marks roll into Monday, and a run whose last
+    /// mark falls on a weekend ends with that move.
+    fn daily_valued(&self) -> Vec<f64> {
+        let Some(first) = self.first_entry else {
+            return Vec::new();
+        };
+        let Some((&last, &last_nav)) = self.day_ends.last_key_value() else {
+            return Vec::new();
+        };
+        let mut day = first.date_naive();
+        let mut prev = self
+            .day_ends
+            .range(..day)
+            .next_back()
+            .map_or(1.0, |(_, nav)| *nav);
+        let change = |prev: f64, nav: f64| if prev > 0.0 { nav / prev - 1.0 } else { 0.0 };
+        let mut out = Vec::new();
+        while day <= last {
+            if !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
+                let nav = self.day_ends.get(&day).copied().unwrap_or(prev);
+                out.push(change(prev, nav));
+                prev = nav;
+            }
+            day += Duration::days(1);
+        }
+        if last_nav != prev {
+            out.push(change(prev, last_nav));
+        }
+        out
+    }
+
+    /// Each weekday's valued return from `from` to `to` (`Outcome::daily`):
+    /// the NAV at the day's last mark (or the last before it, so a
+    /// weekend's marks land on Monday) over the day before's. Moves marked
+    /// after the last weekday join it.
+    fn daily_dated(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> BTreeMap<NaiveDate, f64> {
+        let nav_by = |day: NaiveDate| {
+            self.day_ends
+                .range(..=day)
+                .next_back()
+                .map_or(1.0, |(_, nav)| *nav)
+        };
+        let change = |prev: f64, nav: f64| if prev > 0.0 { nav / prev - 1.0 } else { 0.0 };
+        let (mut day, last) = (from.date_naive(), to.date_naive());
+        let mut prev = nav_by(day - Duration::days(1));
+        let mut out = BTreeMap::new();
+        while day <= last {
+            if !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
+                let nav = nav_by(day);
+                out.insert(day, change(prev, nav));
+                prev = nav;
+            }
+            day += Duration::days(1);
+        }
+        let end = nav_by(last);
+        if let Some(r) = out
+            .values_mut()
+            .next_back()
+            .filter(|_| end != prev && prev > 0.0)
+        {
+            *r = (1.0 + *r) * (end / prev) - 1.0;
         }
         out
     }
@@ -413,6 +495,7 @@ pub fn simulate<'a>(
         breakers: HashMap::new(),
         first_entry: None,
         month_ends: BTreeMap::new(),
+        day_ends: BTreeMap::new(),
     };
     let mut blocked = Blocked::default();
     let mut taken_by_play: BTreeMap<String, usize> = BTreeMap::new();
@@ -436,16 +519,10 @@ pub fn simulate<'a>(
     }
 
     let nav = replay.nav;
-    let daily = daily_returns(
-        replay
-            .closed
-            .iter()
-            .map(|f| (f.trade.exit_time, f.account_return)),
-        from,
-        to,
-    );
+    let daily = replay.daily_dated(from, to);
     let years = (to - from).num_days().max(1) as f64 / 365.25;
     let monthly = replay.monthly();
+    let daily_valued = replay.daily_valued();
     Outcome {
         total_return: nav - 1.0,
         annual_return: if nav > 0.0 {
@@ -465,6 +542,7 @@ pub fn simulate<'a>(
         fills: replay.closed,
         summed_max_drawdown: replay.summed_max_dd.abs(),
         monthly,
+        daily_valued,
     }
 }
 
@@ -703,6 +781,66 @@ mod tests {
         // 0.96, 0.9216, 0.8847: the third loss is 11.5% below the start.
         assert_eq!(out.pause_trips, vec![at(7, 12)]);
         assert!((out.max_drawdown - (1.0 - 0.96_f64.powi(4))).abs() < 1e-12);
+    }
+
+    #[test]
+    fn daily_returns_are_valued_each_weekday_with_the_weekend_on_monday() {
+        // Mon Jan 5 to Tue Jan 13, a bar a day (weekend included, as FX's
+        // Sunday open), held long the whole way: half the account in it.
+        let bars = daily_bars(
+            5,
+            &[100.0, 96.0, 98.0, 100.0, 100.0, 101.0, 102.0, 104.0, 104.0],
+        );
+        let held = Trade {
+            exit_price: 104.0,
+            ..trade((5, 0), (13, 0), 0.04)
+        };
+        let p = Play {
+            bars: &bars,
+            ..play("a", "SPX500_USD", vec![held])
+        };
+        let out = simulate(&[&p], None, at(5, 0), at(13, 0));
+        let navs = [1.0, 0.98, 0.99, 1.0, 1.0, 1.02, 1.02];
+        let want: Vec<f64> = std::iter::once(0.0)
+            .chain(navs.windows(2).map(|w| w[1] / w[0] - 1.0))
+            .collect();
+        assert_eq!(out.daily_valued.len(), want.len());
+        for (got, want) in out.daily_valued.iter().zip(&want) {
+            assert!((got - want).abs() < 1e-12, "{:?}", out.daily_valued);
+        }
+        let grown = out.daily_valued.iter().fold(1.0, |nav, r| nav * (1.0 + r)) - 1.0;
+        assert!((grown - out.total_return).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_dated_daily_series_shows_dips_on_their_day_and_spans_the_window() {
+        // As above, but the window opens the Friday before the trade.
+        let bars = daily_bars(
+            5,
+            &[100.0, 96.0, 98.0, 100.0, 100.0, 101.0, 102.0, 104.0, 104.0],
+        );
+        let held = Trade {
+            exit_price: 104.0,
+            ..trade((5, 0), (13, 0), 0.04)
+        };
+        let p = Play {
+            bars: &bars,
+            ..play("a", "SPX500_USD", vec![held])
+        };
+        let out = simulate(&[&p], None, at(2, 0), at(13, 0));
+        let day = |d| NaiveDate::from_ymd_opt(2026, 1, d).unwrap();
+        let days: Vec<NaiveDate> = out.daily.keys().copied().collect();
+        assert_eq!(
+            days,
+            [2, 5, 6, 7, 8, 9, 12, 13].map(day).to_vec(),
+            "every weekday of the window"
+        );
+        assert_eq!(out.daily[&day(2)], 0.0);
+        // Tuesday's 4% dip (half the account) is booked on Tuesday, not
+        // folded into the close a week later.
+        assert!((out.daily[&day(6)] - (0.98 - 1.0)).abs() < 1e-12);
+        let grown = out.daily.values().fold(1.0, |nav, r| nav * (1.0 + r)) - 1.0;
+        assert!((grown - out.total_return).abs() < 1e-12);
     }
 
     #[test]

@@ -30,7 +30,7 @@ defmodule Opus.Pipeline.MonteCarloWorker do
         Logger.info(
           "[Pipeline] Monte Carlo passed for config #{config_id} — " <>
             "profitable_pct=#{get_in(result, ["stats", "profitable_pct"])}, " <>
-            "median_sharpe=#{get_in(result, ["stats", "median_sharpe"])}, " <>
+            "median_annual_sharpe=#{get_in(result, ["stats", "median_annual_sharpe"])}, " <>
             "p95_drawdown=#{get_in(result, ["stats", "p95_drawdown"])}"
         )
 

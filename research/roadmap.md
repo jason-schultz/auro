@@ -4,6 +4,8 @@ What comes next, in order, and the ideas parked along the way. Nothing here is b
 yet unless it says so. The order holds until we change it: the audits come first,
 so everything below builds on a stable, hardened, correct base.
 
+Holes found along the way go to the ranked [`backlog.md`](backlog.md), not fixed on the spot.
+
 ## 1. Finish the audits
 
 Rounds 1 (backtest math, validation stats, the numbers Opus shows) and 2 (live

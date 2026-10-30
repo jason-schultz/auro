@@ -22,16 +22,18 @@
 //! each market's latest close, so the drawdown sees a position's dip even
 //! when it's held for months and recovers. The gates then judge the
 //! account: each trade's figure is what it did to the account
-//! (`Fill::account_return`), so "trades added up", the per-trade Sharpe,
-//! Monte Carlo and the luck check read the one curve, and both drawdowns
-//! are the account's valued one.
+//! (`Fill::account_return`), so "trades added up", the per-trade Sharpe
+//! and the luck check read the one curve, and both drawdowns are the
+//! account's valued one. Monte Carlo redraws the account's daily returns
+//! (`Outcome::daily_valued`), as on one market.
 //!
 //! A ranked basket holds positions across rebalances, so a position kept
 //! for years is one "trade": a trade count and a per-trade Sharpe say
 //! little about it. It's judged as the papers judge such books, on the
 //! account's calendar-month returns (`Outcome::monthly`): the Sharpe, the
-//! luck test, Monte Carlo and the luck check read the months, and a months
-//! minimum replaces the trades minimum (`pipeline::months_rules`).
+//! luck test and the luck check read the months, and a months minimum
+//! replaces the trades minimum (`pipeline::months_rules`). Monte Carlo
+//! still redraws its days: it needs the path, not the count.
 //!
 //! Markets join the account when their history starts, so a basket spans
 //! from its earliest bar to its latest.
@@ -45,7 +47,7 @@ use sqlx::PgPool;
 
 use super::{account_sizing, parse_strategy, run_strategy, StrategyConfig};
 use crate::db::repositories::candles::load_candles;
-use crate::engine::financing::{apply_financing, FinancingModel};
+use crate::engine::financing::{apply_costs, FinancingModel};
 use crate::engine::parallel;
 use crate::engine::portfolio::{simulate, Outcome, Play};
 use crate::engine::rank::{self, RankRule};
@@ -502,7 +504,7 @@ fn ranked_trades(
         }
     }
     for ((market, _), t) in bars.iter().zip(&mut trades) {
-        apply_financing(t, market, financing);
+        apply_costs(t, market, financing);
     }
     Ok(trades)
 }
@@ -814,5 +816,50 @@ mod tests {
         let sd = (months.iter().map(|m| (m - mean).powi(2)).sum::<f64>() / n).sqrt();
         assert!((run.stats.sharpe_ratio - mean / sd).abs() < 1e-12);
         assert!((run.stats.annual_sharpe - mean / sd * 12f64.sqrt()).abs() < 1e-12);
+
+        // Monte Carlo redraws its days, not its months.
+        assert_monte_carlo_reads_the_daily_account(&run);
+    }
+
+    /// The account's daily returns compound to its growth, and Monte Carlo
+    /// redraws them (`pipeline::run_monte_carlo_sims`).
+    fn assert_monte_carlo_reads_the_daily_account(run: &Run) {
+        let days = &run.outcome.daily_valued;
+        assert!(days.len() > 20, "{} days", days.len());
+        let grown = days.iter().fold(1.0, |nav, r| nav * (1.0 + r)) - 1.0;
+        assert!((grown - run.outcome.total_return).abs() < 1e-9);
+        let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(1);
+        let mc = super::super::run_monte_carlo_sims(days, &mut rng);
+        assert_eq!(mc["mc_method"], "daily_block_bootstrap");
+        assert_eq!(mc["num_days"], days.len());
+        let dd = mc["p95_drawdown"].as_f64().unwrap();
+        assert!((0.0..1.0).contains(&dd));
+    }
+
+    #[test]
+    fn a_together_basket_runs_monte_carlo_on_its_daily_account() {
+        let raw = json!({"markets": ["AAA", "BBB"], "mode": "together"});
+        let config = config(raw);
+        let basket = Basket::of(&config).unwrap().unwrap();
+        let wobble = |i: usize| 4.0 * ((i as f64) / 3.0).sin();
+        let a: Vec<f64> = (0..60)
+            .map(|i| 100.0 + i as f64 * 0.5 + wobble(i))
+            .collect();
+        let b: Vec<f64> = (0..60)
+            .map(|i| 100.0 - i as f64 * 0.3 + wobble(i + 2))
+            .collect();
+        let members = members(&[("AAA", a), ("BBB", b)]);
+        let run = run(
+            &members,
+            &basket,
+            &config,
+            &FinancingModel::default(),
+            Window::Whole,
+        )
+        .unwrap();
+        assert!(!run.trades.is_empty());
+        assert_monte_carlo_reads_the_daily_account(&run);
+        // Its dips while positions are open show in the redrawn paths.
+        assert!(run.outcome.daily_valued.iter().any(|r| *r < 0.0));
     }
 }

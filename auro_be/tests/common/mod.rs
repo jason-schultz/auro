@@ -3,6 +3,7 @@ pub mod http;
 use std::sync::Arc;
 
 use auro::brokers::oanda::client::OandaClient;
+use auro::brokers::questrade::link::QuestradeLink;
 use auro::brokers::wealthsimple::client::WealthsimpleClient;
 use auro::config::Config;
 use auro::state::{AppState, LiveState};
@@ -47,7 +48,7 @@ pub fn test_state() -> AppState {
         start_time: chrono::Utc::now(),
         live: Arc::new(LiveState::new()),
         price_tx,
-        questrade: None,
+        questrade: Arc::new(QuestradeLink::default()),
         wealthsimple,
         massive: None,
     }

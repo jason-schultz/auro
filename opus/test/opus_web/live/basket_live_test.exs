@@ -1,10 +1,13 @@
 defmodule OpusWeb.BasketLiveTest do
   use OpusWeb.ConnCase, async: false
 
+  use Oban.Testing, repo: Opus.Repo
+
+  import Ecto.Query
   import Phoenix.LiveViewTest
 
   alias Opus.Instruments
-  alias Opus.Pipeline.{StrategyConfig, StrategyEvaluation}
+  alias Opus.Pipeline.{BacktestWorker, StrategyConfig, StrategyEvaluation}
   alias Opus.Repo
   alias Opus.Trading.{Recipe, Recipes}
 
@@ -98,6 +101,7 @@ defmodule OpusWeb.BasketLiveTest do
       stage: "backtest",
       status: "failed",
       stats: stats,
+      rules_version: StrategyEvaluation.rules_version(),
       failure_reason: "t_stat: 1.1000 is below minimum 2.0000",
       evaluated_at: DateTime.utc_now()
     })
@@ -107,6 +111,49 @@ defmodule OpusWeb.BasketLiveTest do
     assert html =~ "It failed the backtest"
     assert html =~ "XAU_USD added the most (+14.0%)"
     assert html =~ "The account over time"
+    assert html =~ "What to do next:"
+    assert html =~ "border-error/40"
+    assert html =~ "Account growth"
+    assert html =~ "Worst drop"
+  end
+
+  test "a run whose job was cleared says it stopped and resumes from that stage",
+       %{conn: conn, recipe: recipe} do
+    {:ok, [config]} =
+      Opus.Trading.Baskets.submit(recipe, ~w(SPX500_USD XAU_USD), %{"mode" => "together"})
+
+    Repo.update_all(from(j in Oban.Job, where: j.worker == "Opus.Pipeline.BacktestWorker"),
+      set: [state: "cancelled"]
+    )
+
+    {:ok, view, html} = live(conn, ~p"/strategies/recipes/#{recipe.id}/basket")
+    assert html =~ "The backtest stopped part-way and nothing is running it."
+    assert html =~ "Stopped part-way (the tester restarted or the job was cleared)"
+
+    html = view |> element("button", "Resume from backtest") |> render_click()
+    assert html =~ "Resumed from the backtest."
+    assert html =~ "The backtest is running or waiting."
+
+    assert [_cancelled, _resumed] =
+             Repo.all(from(j in Oban.Job, where: j.args["config_id"] == ^config.id))
+
+    assert_enqueued(worker: BacktestWorker, args: %{config_id: config.id})
+  end
+
+  test "the ranking settings show only for a ranked basket, a month in bars beside them",
+       %{conn: conn, recipe: recipe} do
+    {:ok, view, html} = live(conn, ~p"/strategies/recipes/#{recipe.id}/basket")
+    refute html =~ "Rank the markets by"
+    assert html =~ "Pick at least one market."
+
+    html = view |> form("#basket-form", %{"mode" => "ranked"}) |> render_change()
+    assert html =~ "Rank the markets by"
+    assert html =~ "21 is about a month"
+    assert html =~ "Momentum"
+
+    html = view |> form("#basket-form", %{"mode" => "separate"}) |> render_change()
+    refute html =~ "Rank the markets by"
+    assert html =~ "Each result shows on the strategy&#39;s page"
   end
 
   test "a ranked run is told in months of results, its drop valued every day",
@@ -149,6 +196,7 @@ defmodule OpusWeb.BasketLiveTest do
       stage: "backtest",
       status: "failed",
       stats: stats,
+      rules_version: StrategyEvaluation.rules_version(),
       failure_reason: "num_months: 30.0000 is below minimum 36.0000",
       evaluated_at: DateTime.utc_now()
     })
@@ -170,6 +218,7 @@ defmodule OpusWeb.BasketLiveTest do
 
     {:ok, _view, html} = live(conn, ~p"/strategies/recipes/#{hourly.id}/basket")
     assert html =~ "daily or 4-hour bars only"
+    assert html =~ "Copy it as a new strategy on daily bars"
     refute html =~ "basket-form"
   end
 end

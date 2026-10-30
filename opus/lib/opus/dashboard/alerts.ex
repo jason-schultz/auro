@@ -51,6 +51,7 @@ defmodule Opus.Dashboard.Alerts do
   import OpusWeb.Format, only: [day: 1, money: 1, pct: 1, signed_money: 1, signed_pct: 1]
 
   alias Opus.Options.Paper.{Legs, Pick, Wheel}
+  alias OpusWeb.StrategyParts
 
   @type level :: :act | :check | :fyi
   @type alert :: %{
@@ -99,6 +100,7 @@ defmodule Opus.Dashboard.Alerts do
       failed_sections(input),
       hedging(input),
       drift(input),
+      stuck_runs(input),
       offline_brokers(input),
       paper_in_the_money(input),
       paper_deliveries(input),
@@ -208,20 +210,33 @@ defmodule Opus.Dashboard.Alerts do
     |> Enum.map(fn {worker, [latest | _] = failures} ->
       count = if length(failures) > 1, do: " (#{length(failures)} times)", else: ""
 
+      {what_to_do, link} = job_advice(worker)
+
       :act
       |> alert(
         "job_failed:#{worker}",
         "#{worker_name(worker)} failed#{count}",
         error_words(latest.error),
-        "Check the Opus log for the full error. It runs again on its own schedule; " <>
-          "if it fails two runs in a row, it needs fixing. Clear it once you've looked.",
-        nil
+        what_to_do,
+        link
       )
       |> Map.put(:clear_worker, worker)
     end)
   end
 
   defp failed_jobs(_input), do: []
+
+  # A promote that gave up doesn't run again: the strategy waits in Squad.
+  defp job_advice("Opus.Pipeline.PromoteWorker"),
+    do:
+      {"It gave up after its retries and won't run again. The strategy passed every test: " <>
+         "add it to live from Squad (it shows \"ready to add to live\"), then clear this.",
+       "/together"}
+
+  defp job_advice(_worker),
+    do:
+      {"Check the Opus log for the full error. It runs again on its own schedule; " <>
+         "if it fails two runs in a row, it needs fixing. Clear it once you've looked.", nil}
 
   # Oban's error text starts with "** ", which Discord reads as bold.
   defp error_words(nil), do: nil
@@ -306,8 +321,8 @@ defmodule Opus.Dashboard.Alerts do
         "#{b.broker} is offline",
         b.error,
         "Balances on the Accounts page are incomplete until it's back. For Questrade, " <>
-          "an expired token is the usual cause: put a fresh refresh token in " <>
-          "auro_be/.env and restart Rust once.",
+          "an expired token is the usual cause: generate a new token in Questrade's " <>
+          "API centre and paste it on the Accounts page. No restart needed.",
         "/accounts"
       )
     end
@@ -448,6 +463,42 @@ defmodule Opus.Dashboard.Alerts do
   end
 
   defp drift(_input), do: []
+
+  # A pipeline test stopped part-way with nothing running it
+  # (`Opus.Pipeline.Stuck`). It only reports: resuming is a click on the
+  # strategy's page, never automatic, because the holdout is a one-time look.
+  defp stuck_runs(%{stuck_runs: runs}) do
+    for run <- runs do
+      stage = StrategyParts.stage_name(run.stage)
+      what = if run.basket, do: "basket test", else: "test"
+
+      alert(
+        :check,
+        "stuck_run:#{run.config_id}:#{run.stage}",
+        "#{run.name || "A strategy"}'s #{what} stopped at the #{stage}",
+        "#{run.instrument} #{run.granularity}: nothing is running it (the tester restarted " <>
+          "or the job was cleared).",
+        stuck_what_to_do(run, stage),
+        stuck_link(run)
+      )
+    end
+  end
+
+  defp stuck_runs(_input), do: []
+
+  defp stuck_what_to_do(%{stage: :holdout}, _stage),
+    do:
+      "Open its test results and press \"Resume from holdout\" when you're ready: it takes the " <>
+        "one-time look at the data kept aside, so it never runs on its own."
+
+  defp stuck_what_to_do(_run, stage),
+    do:
+      "Open its test results and press \"Resume from #{stage}\". Nothing resumes on its own; " <>
+        "until then it stays stopped."
+
+  defp stuck_link(%{recipe_id: nil}), do: "/strategies"
+  defp stuck_link(%{recipe_id: id, basket: true}), do: "/strategies/recipes/#{id}/basket"
+  defp stuck_link(%{recipe_id: id}), do: "/strategies/recipes/#{id}/edit"
 
   defp paper_near_strike(%{paper: trades}) do
     for t <- trades,

@@ -91,7 +91,8 @@ pub(crate) async fn upsert_evaluation_running(
         INSERT INTO strategy_evaluations (id, strategy_config_id, stage, status, inserted_at, updated_at)
         VALUES (gen_random_uuid(), $1, $2, 'running', NOW(), NOW())
         ON CONFLICT (strategy_config_id, stage)
-        DO UPDATE SET status = 'running', stats = NULL, failure_reason = NULL, evaluated_at = NULL, updated_at = NOW()
+        DO UPDATE SET status = 'running', stats = NULL, failure_reason = NULL, evaluated_at = NULL,
+                      rules_version = NULL, updated_at = NOW()
         RETURNING id
         "#,
     )
@@ -107,17 +108,20 @@ pub(crate) async fn finalize_evaluation(
     status: &str,
     stats: &Value,
     failure_reason: Option<&str>,
+    rules_version: i32,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         UPDATE strategy_evaluations
-        SET status = $1, stats = $2, failure_reason = $3, evaluated_at = NOW(), updated_at = NOW()
-        WHERE id = $4
+        SET status = $1, stats = $2, failure_reason = $3, rules_version = $4,
+            evaluated_at = NOW(), updated_at = NOW()
+        WHERE id = $5
         "#,
     )
     .bind(status)
     .bind(stats)
     .bind(failure_reason)
+    .bind(rules_version)
     .bind(evaluation_id)
     .execute(pool)
     .await?;
@@ -158,17 +162,20 @@ pub(crate) struct BacktestTry {
     pub parameters: Value,
     pub instrument: String,
     pub granularity: String,
-    /// The backtest's per-trade Sharpe.
+    /// The backtest's per-trade Sharpe (a ranked basket's: its months').
     pub sharpe: f64,
-    /// Its trade count, 0 when not recorded.
-    pub num_trades: i64,
+    /// What that Sharpe was measured over: its trade count, or a ranked
+    /// basket's months (`judged_on: months`). 0 when not recorded.
+    pub periods: i64,
 }
 
 pub(crate) async fn list_backtest_tries(pool: &PgPool) -> Result<Vec<BacktestTry>, sqlx::Error> {
     sqlx::query_as(
         "SELECT c.strategy_type, c.parameters, c.instrument, c.granularity, \
                 (e.stats->>'sharpe')::FLOAT8 AS sharpe, \
-                COALESCE((e.stats->>'num_trades')::BIGINT, 0) AS num_trades \
+                COALESCE(CASE WHEN e.stats->>'judged_on' = 'months' \
+                              THEN (e.stats->>'num_months')::BIGINT \
+                              ELSE (e.stats->>'num_trades')::BIGINT END, 0) AS periods \
          FROM strategy_evaluations e \
          JOIN strategy_configs c ON c.id = e.strategy_config_id \
          WHERE e.stage = 'backtest' AND e.status IN ('passed', 'failed') \

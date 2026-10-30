@@ -4,10 +4,23 @@ pub mod oanda;
 pub mod questrade;
 pub mod wealthsimple;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono_tz::America::New_York;
 use serde::Serialize;
 
 use crate::engine::types::Granularity;
+
+/// Midnight New York on the day a US-listed daily bar trades: how daily
+/// stock and ETF bars are stamped in `candles`, whichever vendor sent them
+/// (Massive already does; Questrade sometimes stamps a bar 01:00).
+pub fn stock_day_open(time: DateTime<Utc>) -> DateTime<Utc> {
+    let day = time.with_timezone(&New_York).date_naive();
+    New_York
+        .from_local_datetime(&day.and_hms_opt(0, 0, 0).expect("midnight exists"))
+        .earliest()
+        .expect("New York midnight exists")
+        .with_timezone(&Utc)
+}
 
 /// When a stock bar stops changing. Intraday bars are final one bar after
 /// they open. Massive and Questrade stamp daily bars at midnight New York and
@@ -48,4 +61,24 @@ pub struct BrokerAccount {
     pub market_value: Option<f64>,
     pub total_equity: Option<f64>,
     pub buying_power: Option<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_daily_stock_bar_is_stamped_midnight_new_york() {
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        // Questrade's odd 01:00 bar, summer time: the same day's midnight.
+        assert_eq!(
+            stock_day_open(at("2026-10-26T01:00:00-04:00")),
+            at("2026-10-26T00:00:00-04:00")
+        );
+        // Winter: midnight is 05:00 UTC.
+        assert_eq!(
+            stock_day_open(at("2012-01-03T00:00:00-05:00")),
+            at("2012-01-03T05:00:00Z")
+        );
+    }
 }

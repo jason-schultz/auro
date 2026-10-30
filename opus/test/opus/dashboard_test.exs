@@ -92,4 +92,11 @@ defmodule Opus.DashboardTest do
     assert {%{a: 0}, [:a]} = Dashboard.section({%{}, []}, :a, 0, fn -> raise "boom" end)
     assert {%{a: 0}, [:a]} = Dashboard.section({%{}, []}, :a, 0, fn -> exit(:timeout) end)
   end
+
+  test "a cached overview with a broker offline is never fresh, so the next visit asks again" do
+    now = DateTime.utc_now()
+    assert Dashboard.fresh?({%{offline: []}, now})
+    refute Dashboard.fresh?({%{offline: [%{broker: "Questrade", error: nil}]}, now})
+    refute Dashboard.fresh?({%{offline: []}, DateTime.add(now, -600)})
+  end
 end

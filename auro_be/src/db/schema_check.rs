@@ -5,6 +5,8 @@
 
 use sqlx::PgPool;
 
+use crate::config::Mode;
+
 /// Every table Auro touches, Rust-owned and Opus-owned alike.
 pub const REQUIRED_TABLES: &[&str] = &[
     "account_snapshots",
@@ -32,6 +34,16 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "wealthsimple_positions",
 ];
 
+/// Columns only the tester writes, as `table.column`: it refuses to start
+/// without them, while the live process (which never writes them) is not
+/// held up by a migration it doesn't need.
+pub const TESTER_COLUMNS: &[&str] = &[
+    "strategy_evaluations.rules_version",
+    "brokers.name",
+    "instruments.test_broker",
+    "instruments.spread_bps",
+];
+
 /// Names in `required` that are not present in the public schema.
 pub fn missing<'a>(required: &[&'a str], present: &[String]) -> Vec<&'a str> {
     required
@@ -41,7 +53,7 @@ pub fn missing<'a>(required: &[&'a str], present: &[String]) -> Vec<&'a str> {
         .collect()
 }
 
-pub async fn verify(pool: &PgPool) -> Result<(), String> {
+pub async fn verify(pool: &PgPool, mode: Mode) -> Result<(), String> {
     let present: Vec<String> = sqlx::query_scalar(
         "SELECT table_name::text FROM information_schema.tables WHERE table_schema = 'public'",
     )
@@ -50,13 +62,30 @@ pub async fn verify(pool: &PgPool) -> Result<(), String> {
     .map_err(|e| format!("schema check query failed: {e}"))?;
 
     let gaps = missing(REQUIRED_TABLES, &present);
-    if gaps.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
+    if !gaps.is_empty() {
+        return Err(format!(
             "database is missing tables {gaps:?}; run `mix ecto.migrate` in opus/ (Opus owns all migrations)"
-        ))
+        ));
     }
+
+    if mode == Mode::Tester {
+        let columns: Vec<String> = sqlx::query_scalar(
+            "SELECT table_name::text || '.' || column_name::text \
+             FROM information_schema.columns WHERE table_schema = 'public'",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("schema check query failed: {e}"))?;
+
+        let gaps = missing(TESTER_COLUMNS, &columns);
+        if !gaps.is_empty() {
+            return Err(format!(
+                "database is missing columns {gaps:?}; run `mix ecto.migrate` in opus/ (Opus owns all migrations)"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

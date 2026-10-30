@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 use sqlx::PgPool;
 
-use crate::engine::financing::{FinancingModel, PolicyRates};
+use crate::engine::financing::{BrokerCosts, FinancingModel, Overnight, PolicyRates};
 
 /// Every policy-rate change point, as (currency, effective date, rate).
 async fn policy_rows(pool: &PgPool) -> Result<Vec<(String, NaiveDate, f64)>, sqlx::Error> {
@@ -18,8 +18,51 @@ pub async fn load_policy_rates(pool: &PgPool) -> Result<PolicyRates, sqlx::Error
     Ok(PolicyRates::new(policy_rows(pool).await?))
 }
 
-/// The full financing model: every policy-rate change point and every
-/// recorded OANDA rate. Small (hundreds of rows), loaded once per backtest.
+/// Each market's broker costs (`instruments.test_broker` → `brokers`),
+/// under every name the market is known by (OANDA's, Questrade's,
+/// Massive's), so a test finds it whatever the strategy calls it. A
+/// market's own `spread_bps` stands in for its broker's fixed one; a broker
+/// that fills at the bars' bid/ask (no `spread_bps`) keeps doing so.
+async fn broker_rows(pool: &PgPool) -> Result<Vec<(String, BrokerCosts)>, sqlx::Error> {
+    let rows: Vec<(String, String, String, Option<f64>, f64, bool)> = sqlx::query_as(
+        "SELECT n.name, b.name, b.overnight_cost, \
+                CASE WHEN b.spread_bps IS NULL THEN NULL \
+                     ELSE COALESCE(i.spread_bps, b.spread_bps) END, \
+                b.commission_bps, b.can_short \
+         FROM instruments i \
+         JOIN brokers b ON b.name = i.test_broker \
+         CROSS JOIN LATERAL (VALUES (i.oanda_symbol), (i.questrade_symbol), (i.massive_ticker)) \
+              AS n(name) \
+         WHERE n.name IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(market, broker, overnight, spread_bps, commission_bps, can_short)| {
+                let overnight = match overnight.as_str() {
+                    "oanda_financing" => Overnight::OandaFinancing,
+                    _ => Overnight::None,
+                };
+                (
+                    market,
+                    BrokerCosts {
+                        broker,
+                        overnight,
+                        spread_bps,
+                        commission_bps,
+                        can_short,
+                    },
+                )
+            },
+        )
+        .collect())
+}
+
+/// The full cost model: every policy-rate change point, every recorded
+/// OANDA rate, and each market's broker costs. Small (hundreds of rows),
+/// loaded once per backtest.
 pub async fn load_model(pool: &PgPool) -> Result<FinancingModel, sqlx::Error> {
     let policy = policy_rows(pool).await?;
 
@@ -30,7 +73,7 @@ pub async fn load_model(pool: &PgPool) -> Result<FinancingModel, sqlx::Error> {
     .fetch_all(pool)
     .await?;
 
-    Ok(FinancingModel::new(policy, recorded))
+    Ok(FinancingModel::new(policy, recorded).with_brokers(broker_rows(pool).await?))
 }
 
 /// Record OANDA's (long, short) annual financing rates for `as_of`,

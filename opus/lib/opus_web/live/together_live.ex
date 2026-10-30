@@ -12,6 +12,13 @@ defmodule OpusWeb.TogetherLive do
   3. **Find a teammate**: why one helps, then every other play paired
      with the one you pick, best first, each with an Add to team button.
 
+  Every play says where it stands (on and trading, switched off, ready,
+  failed, still testing, or tested before the current rules) with its one
+  next step towards live: open it to switch it on, add it to live switched
+  off, or re-test it by today's rules. Switching on stays on the strategy's
+  own page. Plays tested before the current rules are hidden until "Show
+  old tests".
+
   "Show the numbers" adds the Sharpe ratios, correlations and the
   with/without-rules table. Both runs backtest in the engine, so they run
   after the click and say so while they do.
@@ -21,6 +28,9 @@ defmodule OpusWeb.TogetherLive do
   import OpusWeb.Format
   import OpusWeb.ResultCharts, only: [account_curve: 1]
   import OpusWeb.SafetyLive, only: [numbers_switch: 1]
+
+  import OpusWeb.StrategyParts,
+    only: [missed_words: 1, resume: 1, resume_button: 1, stage_name: 1]
 
   alias Opus.Auro.Client
   alias Opus.Trading.{AccountLimits, Together}
@@ -32,15 +42,14 @@ defmodule OpusWeb.TogetherLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    choices = Together.choices()
-    selected = choices.yours |> Enum.filter(& &1.enabled) |> Enum.map(& &1.key)
+    socket = load_choices(socket)
+    selected = socket.assigns.choices.yours |> Enum.filter(& &1.enabled) |> Enum.map(& &1.key)
 
     socket =
       assign(socket,
         page_title: "Together",
-        choices: choices,
-        by_key: Map.new(choices.yours ++ choices.tested, &{&1.key, &1}),
         selected: selected,
+        show_old: false,
         picking: false,
         query: "",
         numbers: false,
@@ -57,6 +66,33 @@ defmodule OpusWeb.TogetherLive do
     {:ok, socket}
   end
 
+  # The choices, fresh. A team member whose key changed (promoted to live,
+  # or re-tested as a new run) stays on the team under its new key.
+  defp load_choices(socket) do
+    choices = Together.choices()
+    plays = choices.yours ++ choices.tested
+    by_key = Map.new(plays, &{&1.key, &1})
+    before = socket.assigns[:by_key] || %{}
+
+    selected =
+      (socket.assigns[:selected] || [])
+      |> Enum.flat_map(fn key ->
+        cond do
+          by_key[key] ->
+            [key]
+
+          was = before[key] ->
+            plays |> Enum.filter(&Together.same?(&1, was)) |> Enum.map(& &1.key)
+
+          true ->
+            []
+        end
+      end)
+      |> Enum.uniq()
+
+    assign(socket, choices: choices, by_key: by_key, selected: selected)
+  end
+
   @impl true
   def handle_event("numbers", _params, socket), do: {:noreply, update(socket, :numbers, &(!&1))}
 
@@ -64,6 +100,65 @@ defmodule OpusWeb.TogetherLive do
     do: {:noreply, assign(socket, picking: !socket.assigns.picking, query: "")}
 
   def handle_event("search", %{"q" => q}, socket), do: {:noreply, assign(socket, query: q)}
+
+  def handle_event("old", _params, socket),
+    do: {:noreply, assign(socket, show_old: !socket.assigns.show_old, companions: nil)}
+
+  def handle_event("promote", %{"key" => key}, socket) do
+    name = Together.label(socket.assigns.by_key[key])
+
+    socket =
+      case Together.promote(key) do
+        {:ok, _promoted} ->
+          put_flash(
+            socket,
+            :info,
+            "Added #{name} to live, switched off. Open it from the team to switch it on."
+          )
+
+        {:error, :not_ready} ->
+          put_flash(socket, :error, "#{name} hasn't passed every test, so it can't go live.")
+
+        {:error, reason} ->
+          put_flash(
+            socket,
+            :error,
+            "Couldn't add #{name} to live: #{Client.describe_error(reason)}"
+          )
+      end
+
+    {:noreply, load_choices(socket)}
+  end
+
+  def handle_event("retest", %{"key" => key}, socket) do
+    name = Together.label(socket.assigns.by_key[key])
+
+    socket =
+      case Together.retest(key) do
+        {:ok, _config} ->
+          socket
+          |> put_flash(
+            :info,
+            "Re-testing #{name} with today's rules. Every test runs again; it shows here as still testing until it's done."
+          )
+
+        {:error, :not_old} ->
+          put_flash(socket, :error, "#{name} was already tested by today's rules.")
+
+        {:error, {:no_broker, names}} ->
+          put_flash(socket, :error, Opus.Instruments.without_broker_words(names))
+
+        {:error, _reason} ->
+          put_flash(socket, :error, "Couldn't start the tests for #{name}.")
+      end
+
+    {:noreply, load_choices(socket)}
+  end
+
+  def handle_event("resume_stage", params, socket) do
+    {kind, words} = resume(params)
+    {:noreply, socket |> put_flash(kind, words) |> load_choices()}
+  end
 
   def handle_event("add", %{"key" => key}, socket),
     do: {:noreply, update(socket, :selected, &if(key in &1, do: &1, else: &1 ++ [key]))}
@@ -89,10 +184,12 @@ defmodule OpusWeb.TogetherLive do
     do: {:noreply, assign(socket, base: key, companions: nil)}
 
   def handle_event("find", _params, %{assigns: %{base: base}} = socket) when is_binary(base) do
+    with_old = socket.assigns.show_old
+
     {:noreply,
      socket
      |> assign(finding: true, companion_error: nil)
-     |> start_async(:companions, fn -> Together.companions(base) end)}
+     |> start_async(:companions, fn -> Together.companions(base, with_old) end)}
   end
 
   def handle_event("find", _params, socket), do: {:noreply, socket}
@@ -123,9 +220,10 @@ defmodule OpusWeb.TogetherLive do
         team: Enum.flat_map(assigns.selected, &List.wrap(assigns.by_key[&1])),
         others:
           Enum.reject(
-            assigns.choices.yours ++ assigns.choices.tested,
+            assigns.choices.yours ++ visible(assigns.choices.tested, assigns.show_old),
             &(&1.key in assigns.selected)
           ),
+        old_count: Enum.count(assigns.choices.tested, & &1.old),
         alone: alone_by_key(assigns.result)
       )
 
@@ -168,6 +266,11 @@ defmodule OpusWeb.TogetherLive do
             </h2>
             <span class="text-[14px] text-muted">{team_count(@team)}</span>
           </div>
+          <p class="m-0 max-w-[760px] text-[14px] text-muted">
+            <.t {copy(
+              "Strategies that are switched on already trade as one team on your account. To add a teammate for real: it has to pass every test, then you switch it on."
+            )} />
+          </p>
 
           <div class="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-3">
             <div
@@ -178,7 +281,9 @@ defmodule OpusWeb.TogetherLive do
               <div class="flex items-start justify-between gap-2">
                 <div class="min-w-0">
                   <div class="font-semibold">{p.name}</div>
-                  <div class="text-[13px] text-muted">{p.instrument} · {p.timeframe}</div>
+                  <div class="text-[13px] text-muted">
+                    {p.instrument} · {p.timeframe}<span :if={p[:variant]}> · {p.variant}</span>
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -204,20 +309,10 @@ defmodule OpusWeb.TogetherLive do
                   Sharpe {num(a.annual_sharpe)} · {a.taken} trades alone, {a.together} together
                 </span>
               <% else %>
-                <span
-                  :if={p.enabled}
-                  class="self-start rounded-full bg-primary/15 px-2.5 py-1 text-[13px] font-medium text-primary"
-                >
-                  trading now
-                </span>
-                <span
-                  :if={!p.enabled}
-                  class="self-start rounded-full bg-neutral px-2.5 py-1 text-[13px] font-medium text-muted"
-                >
-                  {if String.starts_with?(p.key, "cfg:"), do: "tested play", else: "switched off"}
-                </span>
                 <span class="text-[13px] text-muted">Run the team to see what it does.</span>
               <% end %>
+              <.play_status play={p} />
+              <.next_step play={p} />
             </div>
 
             <button
@@ -229,12 +324,19 @@ defmodule OpusWeb.TogetherLive do
               <span class="text-[26px] leading-none">{if @picking, do: "−", else: "+"}</span>
               {if @picking, do: "Done adding", else: "Add a strategy"}
               <span class="text-[13px] font-normal text-muted">
-                yours, or one of {length(@choices.tested)} tested plays
+                yours, or one of {length(visible(@choices.tested, @show_old))} tested plays
               </span>
             </button>
           </div>
 
-          <.picker :if={@picking} choices={@choices} selected={@selected} query={@query} />
+          <.picker
+            :if={@picking}
+            choices={@choices}
+            selected={@selected}
+            query={@query}
+            show_old={@show_old}
+            old_count={@old_count}
+          />
 
           <div class="flex flex-wrap items-center gap-3.5">
             <button
@@ -305,7 +407,12 @@ defmodule OpusWeb.TogetherLive do
             </svg>
           </div>
 
-          <form phx-change="base" phx-submit="find" class="flex flex-wrap items-center gap-2.5">
+          <form
+            id="partner-form"
+            phx-change="base"
+            phx-submit="find"
+            class="flex flex-wrap items-center gap-2.5"
+          >
             <label for="mate-base" class="font-semibold">Find a teammate for</label>
             <select
               id="mate-base"
@@ -332,13 +439,17 @@ defmodule OpusWeb.TogetherLive do
               disabled={@finding or @base == nil}
               class="min-h-11 rounded-field bg-primary px-4 text-[15px] font-semibold text-primary-content hover:brightness-110 disabled:opacity-50"
             >
-              {if @finding, do: "Searching…", else: "Search #{map_size(@by_key) - 1} plays"}
+              {if @finding,
+                do: "Searching…",
+                else: "Search #{length(@team) + length(@others) - 1} plays"}
             </button>
             <span class="text-[14px] text-muted">about a minute</span>
           </form>
           <p :if={@companion_error} role="alert" class="m-0 text-[14px] text-warning">
             {@companion_error}
           </p>
+
+          <.old_toggle :if={!@picking} count={@old_count} shown={@show_old} />
 
           <.mates :if={@companions} rows={@companions} selected={@selected} numbers={@numbers} />
 
@@ -377,6 +488,8 @@ defmodule OpusWeb.TogetherLive do
   attr :choices, :map, required: true
   attr :selected, :list, required: true
   attr :query, :string, required: true
+  attr :show_old, :boolean, required: true
+  attr :old_count, :integer, required: true
 
   defp picker(assigns) do
     pick = fn plays ->
@@ -384,11 +497,14 @@ defmodule OpusWeb.TogetherLive do
     end
 
     assigns =
-      assign(assigns, yours: pick.(assigns.choices.yours), tested: pick.(assigns.choices.tested))
+      assign(assigns,
+        yours: pick.(assigns.choices.yours),
+        tested: pick.(visible(assigns.choices.tested, assigns.show_old))
+      )
 
     ~H"""
     <div class="flex flex-col gap-3 rounded-box border border-primary bg-base-200 px-5 py-4">
-      <form phx-change="search" onsubmit="return false">
+      <form id="picker-search" phx-change="search" onsubmit="return false">
         <label class="flex flex-col gap-1 text-[14px]">
           <span class="font-semibold">Add a strategy</span>
           <input
@@ -404,6 +520,7 @@ defmodule OpusWeb.TogetherLive do
       <.picker_group title="Your strategies" plays={@yours} />
       <.picker_group title="Tested plays that passed the walk-forward" plays={@tested} />
       <p :if={@yours == [] and @tested == []} class="m-0 text-[14px] text-muted">Nothing matches.</p>
+      <.old_toggle count={@old_count} shown={@show_old} />
     </div>
     """
   end
@@ -420,10 +537,14 @@ defmodule OpusWeb.TogetherLive do
           :for={p <- @plays}
           class="flex items-center justify-between gap-3 border-t border-neutral py-1.5"
         >
-          <span class="min-w-0 truncate text-[14px]">
-            <span class="font-medium">{p.name}</span>
-            <span class="text-muted"> · {p.instrument} · {p.timeframe}</span>
-            <span :if={p.older_rules} class="text-warning"> · passed older rules</span>
+          <span class="flex min-w-0 flex-col text-[14px]">
+            <span class="truncate">
+              <span class="font-medium">{p.name}</span>
+              <span class="text-muted">
+                · {p.instrument} · {p.timeframe}<span :if={p.variant}> · {p.variant}</span>
+              </span>
+            </span>
+            <span class={["text-[13px]", status_class(p.status)]}>{status_words(p.status)}</span>
           </span>
           <button
             type="button"
@@ -644,6 +765,7 @@ defmodule OpusWeb.TogetherLive do
             </span>
           </div>
           <span class="text-[14px]">{mate_words(r)}</span>
+          <.play_status play={r.play} />
           <span :if={@numbers} class="text-[12px] tabular-nums text-muted">
             Sharpe {num(r.base_sharpe)} → {num(r.pair_sharpe)} · worst drop {pct(r.base_drawdown)} → {pct(
               r.pair_drawdown
@@ -664,12 +786,121 @@ defmodule OpusWeb.TogetherLive do
         >
           {if r.play.key in @selected, do: "On the team ✓", else: "Add to team"}
         </button>
+        <div :if={Together.next_step(r.play)} class="col-span-2 sm:col-span-3">
+          <.next_step play={r.play} />
+        </div>
       </li>
     </ol>
     """
   end
 
+  attr :play, :map, required: true
+
+  defp play_status(assigns) do
+    ~H"""
+    <span class={["text-[13px] font-medium", status_class(@play.status)]}>
+      {status_words(@play.status)}
+    </span>
+    """
+  end
+
+  # The one next step a play offers (`Together.next_step/1`). Switching on
+  # stays on the strategy's page, where the switch is.
+  attr :play, :map, required: true
+
+  defp next_step(assigns) do
+    assigns = assign(assigns, step: Together.next_step(assigns.play))
+
+    ~H"""
+    <.link
+      :if={@step == :open}
+      navigate={~p"/strategies/#{@play.live_id}"}
+      class="inline-flex min-h-11 items-center self-start rounded-field border border-primary px-3 text-[14px] font-semibold text-primary hover:brightness-110"
+    >
+      Open to switch on
+    </.link>
+    <button
+      :if={@step == :promote}
+      type="button"
+      phx-click="promote"
+      phx-value-key={@play.key}
+      class="min-h-11 self-start rounded-field bg-primary px-3 text-[14px] font-semibold text-primary-content hover:brightness-110"
+    >
+      Add to live (switched off)
+    </button>
+    <button
+      :if={@step == :retest}
+      type="button"
+      phx-click="retest"
+      phx-value-key={@play.key}
+      data-confirm={retest_confirm(@play)}
+      class="min-h-11 self-start rounded-field border border-base-300 px-3 text-[14px] font-semibold hover:border-primary"
+    >
+      Re-test with today's rules
+    </button>
+    <.resume_button
+      :if={@step == :resume}
+      config_id={@play.config_id}
+      stage={elem(@play.status, 1)}
+      class="min-h-11 self-start rounded-field border border-base-300 px-3 text-[14px] font-semibold hover:border-primary"
+    />
+    """
+  end
+
+  attr :count, :integer, required: true
+  attr :shown, :boolean, required: true
+
+  defp old_toggle(assigns) do
+    ~H"""
+    <button
+      :if={@count > 0}
+      type="button"
+      phx-click="old"
+      aria-pressed={to_string(@shown)}
+      class="self-start text-[13px] font-medium text-primary hover:brightness-110"
+    >
+      <.t
+        :if={!@shown}
+        {copy("Show old tests (%{count}): tested before the current rules", count: @count)}
+      />
+      <.t :if={@shown} {copy("Hide old tests")} />
+    </button>
+    """
+  end
+
   # --- words -----------------------------------------------------------------
+
+  defp visible(tested, true), do: tested
+  defp visible(tested, false), do: Enum.reject(tested, & &1.old)
+
+  defp status_words(:trading), do: "On, trading"
+  defp status_words(:switched_off), do: "Added, switched off"
+  defp status_words(:ready), do: "Passed every test: ready to add to live"
+  defp status_words(:old), do: "Old test (before the current rules): re-test it first"
+  defp status_words({:testing, stage}), do: "Still testing (#{stage_name(stage)})"
+
+  defp status_words({:stuck, stage}),
+    do:
+      "Stopped part-way at the #{stage_name(stage)} (the tester restarted or the job was cleared): nothing is running it."
+
+  defp status_words({:failed, stage, result}) when stage in [:backtest, :walk_forward],
+    do: "Failed the #{stage_name(stage)}#{because(result)}"
+
+  defp status_words({:failed, stage, result}),
+    do: "Passed walk-forward, failed the #{stage_name(stage)}#{because(result)}"
+
+  defp because(result) do
+    case missed_words(result) do
+      nil -> ""
+      words -> ": #{words}"
+    end
+  end
+
+  defp status_class(:trading), do: "text-primary"
+  defp status_class(:ready), do: "text-success"
+  defp status_class({:failed, _stage, _result}), do: "text-error"
+  defp status_class(status) when status in [:old] or is_tuple(status), do: "text-warning"
+  defp status_class(_switched_off), do: "text-muted"
 
   defp team_count([]), do: "nobody yet"
 
@@ -880,4 +1111,21 @@ defmodule OpusWeb.TogetherLive do
     do: Integer.to_string(trunc(value))
 
   defp trim(value), do: to_string(value)
+
+  # A re-test is one more luck-check try; if any run of it already reached
+  # the holdout, it's also one more look at that sealed data, which is
+  # meant to be looked at once: say so before the click.
+  defp retest_confirm(play) do
+    base =
+      "Re-test #{Together.label(play)} with today's rules? Every test runs again as a new run; " <>
+        "the old one stays as history. It counts as one more try in the luck check, which raises " <>
+        "the bar a little for every version of this idea."
+
+    if play.holdout_seen,
+      do:
+        base <>
+          " It has already been judged on the holdout (the year of data kept aside for one final look). " <>
+          "If it gets that far again, that's a second look at the same data, so a pass there means less.",
+      else: base
+  end
 end

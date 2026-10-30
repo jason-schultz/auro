@@ -170,8 +170,9 @@ defmodule Opus.Auro.Client do
 
   @doc """
   Run the Monte Carlo validation stage for a strategy config.
-  Rust runs the strategy once to get trades, then shuffles the PnL sequence
-  10,000 times and computes: profitable_pct, median_sharpe, p95_drawdown.
+  Rust runs the strategy once, values the account each trading day, then
+  reshuffles stretches of those daily returns (stationary block bootstrap)
+  10,000 times and computes: profitable_pct, p95_drawdown, return percentiles.
   """
   @spec run_pipeline_monte_carlo(String.t()) :: {:ok, map()} | {:error, any()}
   def run_pipeline_monte_carlo(config_id) when is_binary(config_id) do
@@ -525,6 +526,31 @@ defmodule Opus.Auro.Client do
   def list_brokers do
     client()
     |> Req.get(url: "/api/brokers", retry: false)
+    |> handle_response()
+  end
+
+  @doc """
+  Connect Questrade on the live engine without a restart
+  (POST /api/questrade/connect): with `token` (a new refresh token from
+  Questrade's API centre), else the engine's saved token. Answers like the
+  Questrade status (`%{"connected" => true, "accounts" => [...]}`).
+
+  The token is a secret: it goes only in the request body and is never
+  logged (the response logging below logs bodies Rust sends back, which
+  never contain it). No retry: a token works once, and Rust has already
+  spent it on the first try.
+  """
+  @spec connect_questrade(String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def connect_questrade(token \\ nil) do
+    body = if token, do: %{refresh_token: token}, else: %{}
+
+    client()
+    |> Req.post(
+      url: "/api/questrade/connect",
+      json: body,
+      receive_timeout: 60_000,
+      retry: false
+    )
     |> handle_response()
   end
 

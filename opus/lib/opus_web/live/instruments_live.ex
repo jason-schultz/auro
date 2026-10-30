@@ -36,6 +36,7 @@ defmodule OpusWeb.InstrumentsLive do
        add_form: to_form(@add_defaults, as: :listing),
        feeds: @feeds,
        asset_classes: Instrument.asset_classes(),
+       brokers: Instruments.brokers(),
        busy: false
      )
      |> reload()}
@@ -60,6 +61,15 @@ defmodule OpusWeb.InstrumentsLive do
       {:noreply, reload(socket)}
     else
       _ -> {:noreply, put_flash(socket, :error, "Could not update that instrument.")}
+    end
+  end
+
+  def handle_event("broker", %{"instrument" => id, "broker" => broker}, socket) do
+    case id
+         |> Instruments.get!()
+         |> Instruments.set_broker(if(broker == "", do: nil, else: broker)) do
+      {:ok, _} -> {:noreply, reload(socket)}
+      {:error, _} -> {:noreply, put_flash(socket, :error, "Could not update that instrument.")}
     end
   end
 
@@ -241,6 +251,9 @@ defmodule OpusWeb.InstrumentsLive do
                 <th class="border-b border-base-300 py-2.5 font-medium">
                   <.t {copy("Vendor names")} />
                 </th>
+                <th class="border-b border-base-300 py-2.5 font-medium">
+                  <.t {copy("Tested for")} />
+                </th>
                 <th class="border-b border-base-300 py-2.5 text-center font-medium">
                   <.t {copy("Active")} />
                 </th>
@@ -268,6 +281,25 @@ defmodule OpusWeb.InstrumentsLive do
                     Questrade {i.questrade_symbol}<span :if={i.questrade_symbol_id}> · #{i.questrade_symbol_id}</span>
                   </span>
                   <span :if={i.massive_ticker} class="block">Massive {i.massive_ticker}</span>
+                </td>
+                <td class="py-2.5 pr-4">
+                  <form id={"broker-#{i.id}"} phx-change="broker">
+                    <input type="hidden" name="instrument" value={i.id} />
+                    <select
+                      name="broker"
+                      class="select select-sm"
+                      aria-label={"Broker #{i.symbol}'s tests charge the costs of"}
+                    >
+                      <option value="" selected={is_nil(i.test_broker)}>Not tested</option>
+                      <option
+                        :for={{name, label} <- @brokers}
+                        value={name}
+                        selected={i.test_broker == name}
+                      >
+                        {label}
+                      </option>
+                    </select>
+                  </form>
                 </td>
                 <td class="py-2.5 text-center"><.flag_box instrument={i} flag={:active} /></td>
                 <td :for={{flag, _label} <- @feeds} class="py-2.5 text-center">

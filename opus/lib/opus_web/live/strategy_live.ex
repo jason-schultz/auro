@@ -56,6 +56,11 @@ defmodule OpusWeb.StrategyLive do
   @impl true
   def handle_event("refresh", _params, socket), do: {:noreply, load(socket)}
 
+  def handle_event("resume_stage", params, socket) do
+    {kind, words} = resume(params)
+    {:noreply, socket |> put_flash(kind, words) |> load()}
+  end
+
   def handle_event("archive", _params, socket),
     do: {:noreply, update(socket, :show_archive, &(!&1))}
 
@@ -604,21 +609,6 @@ defmodule OpusWeb.StrategyLive do
     <div class="flex min-w-0 flex-col gap-1.5 rounded-box border border-base-300 bg-base-200 px-[18px] py-4">
       <span class="text-xs text-muted"><.t {@label} /></span>
       {render_slot(@inner_block)}
-    </div>
-    """
-  end
-
-  attr :label, :map, required: true, doc: "copy/1"
-  attr :value, :string, required: true
-  attr :large, :boolean, default: false
-
-  defp stat(assigns) do
-    ~H"""
-    <div class="flex flex-col gap-0.5">
-      <dt class="text-xs text-muted"><.t {@label} /></dt>
-      <dd class={["m-0 font-semibold", if(@large, do: "text-[22px]", else: "text-[18px]")]}>
-        {@value}
-      </dd>
     </div>
     """
   end

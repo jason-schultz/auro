@@ -23,6 +23,7 @@ defmodule Opus.Pipeline.Coordinator do
 
   alias Ecto.Multi
   alias Opus.Auro.Client, as: Auro
+  alias Opus.Instruments
   alias Opus.Pipeline.{BacktestWorker, StrategyConfig, StrategyEvaluation}
   alias Opus.Repo
 
@@ -47,10 +48,22 @@ defmodule Opus.Pipeline.Coordinator do
 
   `attrs` must include: instrument, granularity, strategy_type, parameters.
 
-  Returns `{:ok, config}` or `{:error, reason}`.
+  Returns `{:ok, config}` or `{:error, reason}`; `{:error, {:no_broker,
+  names}}` when a market has no broker set for its tests, so no costs to
+  grade it on (the engine refuses those stages too).
   """
   @spec submit_config(map()) :: {:ok, StrategyConfig.t()} | {:error, term()}
   def submit_config(attrs) do
+    case Instruments.without_broker(markets(attrs)) do
+      [] -> insert_and_start(attrs)
+      off -> {:error, {:no_broker, off}}
+    end
+  end
+
+  defp markets(%{parameters: %{"basket" => %{"markets" => [_ | _] = markets}}}), do: markets
+  defp markets(attrs), do: [attrs[:instrument] || attrs["instrument"]]
+
+  defp insert_and_start(attrs) do
     changeset = StrategyConfig.changeset(%StrategyConfig{}, attrs)
 
     multi =

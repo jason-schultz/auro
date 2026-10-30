@@ -1,17 +1,20 @@
 use std::collections::HashMap;
 
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::options::ChainWindow;
 use crate::brokers::questrade::client::QuestradeClient;
 use crate::brokers::questrade::identity;
+use crate::brokers::questrade::link::Connect;
 use crate::brokers::questrade::models::{EquityCandle, OptionQuote, QuoteResult, SymbolDetail};
 use crate::brokers::questrade::options::{select_contracts, SelectedContract};
-use crate::brokers::stock_bar_final_at;
+use crate::brokers::{stock_bar_final_at, stock_day_open};
 use crate::db::repositories::candles as candles_repo;
 use crate::db::repositories::instruments as instruments_repo;
 use crate::db::repositories::options::{
@@ -24,7 +27,7 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 pub async fn status(State(state): State<AppState>) -> AppResult<Json<Value>> {
-    let Some(qt) = state.questrade.as_ref() else {
+    let Some(qt) = state.questrade.client() else {
         return Ok(Json(json!({ "connected": false, "accounts": [] })));
     };
 
@@ -34,6 +37,77 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<Value>> {
         Err(e) => Ok(Json(
             json!({ "connected": false, "accounts": [], "error": e.to_string() }),
         )),
+    }
+}
+
+/// `POST /api/questrade/connect`. No `Debug`: the token is a secret and
+/// must never reach a log line.
+#[derive(Default, Deserialize)]
+pub struct ConnectBody {
+    /// A new refresh token from Questrade's API centre. Without one, the
+    /// saved (DB) token is tried.
+    pub refresh_token: Option<String>,
+}
+
+/// Connect (or reconnect) Questrade without a restart: authenticate with the
+/// pasted token, else the saved one, and swap the new client in. Answers like
+/// `status` on success; on failure the slot is left as it was and the answer
+/// is Questrade's status and short message, never the token.
+pub async fn connect(
+    State(state): State<AppState>,
+    body: Option<Json<ConnectBody>>,
+) -> AppResult<Response> {
+    let token = body
+        .and_then(|Json(b)| b.refresh_token)
+        .map(|t| t.trim().to_string());
+    let from_paste = token.is_some();
+    let link = state.questrade.clone();
+    let result = match token {
+        Some(t) if t.is_empty() => {
+            return Err(AppError::BadRequest(
+                "The token is empty; paste the one Questrade generated.".into(),
+            ))
+        }
+        Some(t) => {
+            link.connect(QuestradeClient::connect_token(&state.db, t))
+                .await
+        }
+        None => {
+            link.connect(QuestradeClient::connect(&state.db, None))
+                .await
+        }
+    };
+
+    match result {
+        Ok(Connect::Connected) => {
+            tracing::info!(
+                "Questrade connected from {}.",
+                if from_paste {
+                    "a pasted token"
+                } else {
+                    "the saved token"
+                }
+            );
+            Ok(status(State(state)).await?.into_response())
+        }
+        Ok(_) => Err(AppError::BadRequest(
+            "There is no saved Questrade token; paste a new one.".into(),
+        )),
+        Err(e @ AppError::Conflict(_)) => Err(e),
+        Err(e) => {
+            // Already free of the token: `authenticate` scrubs Questrade's
+            // answer, and a request error names only the URL.
+            let message = match e {
+                AppError::Internal(message) => message,
+                other => other.to_string(),
+            };
+            tracing::warn!("Questrade connect failed: {message}");
+            Ok((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "connected": false, "error": message })),
+            )
+                .into_response())
+        }
     }
 }
 
@@ -59,7 +133,7 @@ pub async fn get_candles(
     State(state): State<AppState>,
     Query(params): Query<CandlesQuery>,
 ) -> AppResult<Json<CandlesResponse>> {
-    let Some(qt) = state.questrade.as_ref() else {
+    let Some(qt) = state.questrade.client() else {
         return Err(AppError::Internal("Questrade not configured".into()));
     };
 
@@ -181,7 +255,7 @@ pub async fn get_quotes(
     State(state): State<AppState>,
     Query(params): Query<SymbolsQuery>,
 ) -> AppResult<Json<QuotesView>> {
-    let Some(qt) = state.questrade.as_ref() else {
+    let Some(qt) = state.questrade.client() else {
         return Err(AppError::Internal("Questrade not configured".into()));
     };
 
@@ -221,7 +295,7 @@ pub async fn get_symbols(
     State(state): State<AppState>,
     Query(params): Query<SymbolsQuery>,
 ) -> AppResult<Json<SymbolsView>> {
-    let Some(qt) = state.questrade.as_ref() else {
+    let Some(qt) = state.questrade.client() else {
         return Err(AppError::Internal("Questrade not configured".into()));
     };
 
@@ -267,6 +341,17 @@ pub struct PersistCandles {
     /// pull a few days each run and heal any missed day.
     #[serde(default = "default_persist_days")]
     pub days: i64,
+    /// A window instead of `days`, for loading history: `from` to `to`
+    /// (today when left out), at most as long as `days` may be.
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+/// `rows` in time order with one row per time, the first of each kept.
+fn one_per_time(mut rows: Vec<CandleRow>) -> Vec<CandleRow> {
+    rows.sort_by_key(|r| r.candle.time);
+    rows.dedup_by_key(|r| r.candle.time);
+    rows
 }
 
 /// The listing Questrade calls `symbol`, which must be in the master: the
@@ -288,7 +373,7 @@ pub async fn persist_candles(
     State(state): State<AppState>,
     Json(body): Json<PersistCandles>,
 ) -> AppResult<Json<Value>> {
-    let Some(qt) = state.questrade.as_ref() else {
+    let Some(qt) = state.questrade.client() else {
         return Err(AppError::Internal("Questrade not configured".into()));
     };
     let granularity: Granularity = body.granularity.parse().map_err(AppError::BadRequest)?;
@@ -302,10 +387,26 @@ pub async fn persist_candles(
 
     let symbol = body.symbol.trim().to_uppercase();
     let now = Utc::now();
-    let start = (now - Duration::days(body.days))
-        .format("%Y-%m-%d")
-        .to_string();
-    let end = now.format("%Y-%m-%d").to_string();
+    let (start, end) = match body.from {
+        Some(from) => {
+            let to = body.to.unwrap_or_else(|| now.date_naive());
+            let span = (to - from).num_days();
+            if !(0..=max_days).contains(&span) {
+                return Err(AppError::BadRequest(format!(
+                    "from {from} to {to} must be in order and at most {max_days} days apart"
+                )));
+            }
+            (from, to)
+        }
+        None => (
+            (now - Duration::days(body.days)).date_naive(),
+            now.date_naive(),
+        ),
+    };
+    let (start, end) = (
+        start.format("%Y-%m-%d").to_string(),
+        end.format("%Y-%m-%d").to_string(),
+    );
 
     let instrument = require_instrument(&state, &symbol).await?;
     let mut client = qt.lock().await;
@@ -327,6 +428,13 @@ pub async fn persist_candles(
         .map(Candle::try_from)
         .collect::<AppResult<Vec<_>>>()?
         .into_iter()
+        .map(|candle| match granularity {
+            Granularity::D => Candle {
+                time: stock_day_open(candle.time),
+                ..candle
+            },
+            _ => candle,
+        })
         .filter(|c| stock_bar_final_at(c.time, granularity) <= now)
         .map(|candle| CandleRow {
             instrument: symbol.clone(),
@@ -335,6 +443,9 @@ pub async fn persist_candles(
         })
         .collect();
 
+    // Questrade now and then sends a day twice (a midnight bar and a 01:00
+    // copy of it); stamped alike, one write can't take both: keep the first.
+    let rows = one_per_time(rows);
     let stored = candles_repo::upsert_candles(&state.db, &rows)
         .await
         .map_err(AppError::Database)?;
@@ -352,6 +463,8 @@ pub async fn persist_candles(
         "symbol_id": symbol_id,
         "granularity": granularity.as_str(),
         "days": body.days,
+        "from": start,
+        "to": end,
         "candles_stored": stored,
         "first": rows.first().map(|r| r.candle.time),
         "last": rows.last().map(|r| r.candle.time),
@@ -397,7 +510,7 @@ pub async fn snapshot_option_chain(
     State(state): State<AppState>,
     Json(body): Json<SnapshotChain>,
 ) -> AppResult<Json<Value>> {
-    let Some(qt) = state.questrade.as_ref() else {
+    let Some(qt) = state.questrade.client() else {
         return Err(AppError::Internal("Questrade not configured".into()));
     };
     body.window.validate()?;
@@ -478,7 +591,7 @@ pub async fn quote_option_contracts(
     State(state): State<AppState>,
     Json(body): Json<QuoteContracts>,
 ) -> AppResult<Json<Value>> {
-    let Some(qt) = state.questrade.as_ref() else {
+    let Some(qt) = state.questrade.client() else {
         return Err(AppError::Internal("Questrade not configured".into()));
     };
     let underlying = body.underlying.trim().to_uppercase();
@@ -627,9 +740,35 @@ fn count(v: Option<f64>) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::engine::options::OptionKind;
-    use chrono::NaiveDate;
+    use crate::engine::types::OHLC;
+
+    #[test]
+    fn a_day_sent_twice_is_stored_once() {
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let row = |time: DateTime<Utc>, close: f64| CandleRow {
+            instrument: "DIA".into(),
+            granularity: Granularity::D,
+            candle: Candle::from_trade_bar(
+                time,
+                OHLC {
+                    open: close,
+                    high: close,
+                    low: close,
+                    close,
+                },
+                0.0,
+            ),
+        };
+        let day = stock_day_open(at("1999-10-05T00:00:00-04:00"));
+        let copy = stock_day_open(at("1999-10-05T01:00:00-04:00"));
+        let next = stock_day_open(at("1999-10-06T00:00:00-04:00"));
+        let rows = one_per_time(vec![row(day, 104.0), row(copy, 104.0), row(next, 105.0)]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].candle.time, next);
+    }
 
     #[test]
     fn equity_candle_converts_offset_time_to_utc() {

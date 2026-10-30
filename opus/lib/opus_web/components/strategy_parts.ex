@@ -12,6 +12,8 @@ defmodule OpusWeb.StrategyParts do
   import OpusWeb.Copy, only: [t: 1, copy: 1, copy: 2, copy_n: 4, pcopy: 2]
   import OpusWeb.Format
 
+  alias Opus.Pipeline.Stuck
+
   attr :locked_by, :list, required: true, doc: "the assignment rows keeping it locked"
 
   def lock_badge(%{locked_by: []} = assigns) do
@@ -47,6 +49,38 @@ defmodule OpusWeb.StrategyParts do
     |> capitalize_first()
   end
 
+  @doc "A form field: its label above the control, an optional line of help under it."
+  attr :label, :string, required: true
+  attr :help, :string, default: nil
+  slot :inner_block, required: true
+
+  def field(assigns) do
+    ~H"""
+    <label class="flex flex-col gap-1 text-[13px] text-muted">
+      {@label}
+      {render_slot(@inner_block)}
+      <span :if={@help} class="text-[12px] leading-snug">{@help}</span>
+    </label>
+    """
+  end
+
+  @doc "One figure in a `<dl>`: a small muted label over the value."
+  attr :label, :map, required: true, doc: "copy/1"
+  attr :value, :string, required: true
+  attr :large, :boolean, default: false
+  attr :class, :any, default: nil, doc: "extra classes on the value, e.g. its tone"
+
+  def stat(assigns) do
+    ~H"""
+    <div class="flex flex-col gap-0.5">
+      <dt class="text-xs text-muted"><.t {@label} /></dt>
+      <dd class={["m-0 font-semibold", if(@large, do: "text-[22px]", else: "text-[18px]"), @class]}>
+        {@value}
+      </dd>
+    </div>
+    """
+  end
+
   attr :results, :map, required: true
 
   def evidence(assigns) do
@@ -55,6 +89,9 @@ defmodule OpusWeb.StrategyParts do
       <dt class="text-muted"><.t {copy("Backtest")} /></dt>
       <dd class="m-0">
         <.stage stage={@results.backtest} line={backtest_line(@results.backtest)} />
+        <span :if={costs_words(@results.backtest)} class="block text-muted">
+          {costs_words(@results.backtest)}
+        </span>
       </dd>
       <dt class="text-muted">Walk-forward</dt>
       <dd class="m-0">
@@ -102,11 +139,17 @@ defmodule OpusWeb.StrategyParts do
         <span :if={@stage.status == :old_pass} class="font-medium text-warning">
           <.t {copy("Passed older rules")} />
         </span>
+        <span :if={@stage.status == :old_fail} class="font-medium text-warning">
+          <.t {copy("Failed older rules")} />
+        </span>
         <span :if={@stage.status in [:running, :pending]} class="font-medium text-warning">
           {if @stage.status == :running, do: "Running", else: "Waiting to run"}
         </span>
-        <span :if={@stage.status in [:not_run, :old_pass]} class="text-muted">
-          <span :if={@stage.status == :old_pass}>·</span> {@stage.reason}
+        <span :if={@stage.status == :stuck} class="font-medium text-warning">
+          <.t {pcopy("test stage", "Stopped")} />
+        </span>
+        <span :if={@stage.status in [:not_run, :old_pass, :old_fail, :stuck]} class="text-muted">
+          <span :if={@stage.status in [:old_pass, :old_fail]}>·</span> {@stage.reason}
         </span>
         <span :if={@line}>
           ·
@@ -133,8 +176,67 @@ defmodule OpusWeb.StrategyParts do
       >
         {@stage.reason}
       </span>
+      <.resume_button :if={@stage.status == :stuck} config_id={@stage.config_id} stage={@stage.stage} />
     </div>
     """
+  end
+
+  @doc """
+  "Resume from <stage>" for a stuck stage (`Opus.Pipeline.Stuck`): the page
+  handles `"resume_stage"` with `resume/1`. The holdout asks first, and
+  only a confirmed click sends `holdout=confirmed`: running it takes the
+  one-time look at the data kept aside.
+  """
+  attr :config_id, :string, required: true
+  attr :stage, :atom, required: true
+
+  attr :class, :any,
+    default:
+      "min-h-11 self-start rounded-field border border-base-300 px-3 text-[13px] font-medium hover:border-primary"
+
+  def resume_button(assigns) do
+    ~H"""
+    <button
+      type="button"
+      phx-click="resume_stage"
+      phx-value-config={@config_id}
+      phx-value-stage={@stage}
+      phx-value-holdout={if @stage == :holdout, do: "confirmed"}
+      data-confirm={if @stage == :holdout, do: holdout_confirm()}
+      class={@class}
+    >
+      <.t {copy("Resume from %{stage}", stage: stage_name(@stage))} />
+    </button>
+    """
+  end
+
+  @doc """
+  Resume a stuck stage for a page's `"resume_stage"` event
+  (`resume_button/1`): `{flash kind, words}`.
+  """
+  @spec resume(map()) :: {:info | :error, String.t()}
+  def resume(%{"config" => config_id, "stage" => stage} = params) do
+    opts = if params["holdout"] == "confirmed", do: [holdout: :confirmed], else: []
+    name = stage_words(stage)
+
+    case Stuck.resume(config_id, stage, opts) do
+      {:ok, _job} ->
+        {:info, "Resumed from the #{name}. It shows as running or waiting until it's done."}
+
+      {:error, :holdout_needs_confirm} ->
+        {:error,
+         "The holdout is the one-time look at the data kept aside: resume it from its button and confirm."}
+
+      {:error, :archived} ->
+        {:error,
+         "This run is in the archive (tested before the block builder): re-test it instead."}
+
+      {:error, :not_stuck} ->
+        {:error, "Nothing to resume: the #{name} is already running, waiting or finished."}
+
+      {:error, _reason} ->
+        {:error, "Couldn't resume the #{name}."}
+    end
   end
 
   # A luck check this sure is a clean pass; between the pipeline's bar and
@@ -291,6 +393,34 @@ defmodule OpusWeb.StrategyParts do
     holdout: "holdout"
   ]
 
+  @doc "A stage's name as a verdict says it: `:monte_carlo` is \"Monte Carlo\"."
+  @spec stage_name(atom()) :: String.t()
+  def stage_name(stage), do: Keyword.fetch!(@stage_names, stage)
+
+  # A stage's name from its database string, as an event sends it.
+  defp stage_words(stage) do
+    Enum.find_value(@stage_names, "stage", fn {key, name} ->
+      Atom.to_string(key) == stage && name
+    end)
+  end
+
+  defp holdout_confirm,
+    do:
+      "Run the holdout now? It's the one-time look at the data kept aside: whatever it shows " <>
+        "is final, and this strategy can't be judged on that data again."
+
+  @doc """
+  Why a stage failed, short: the first rule it missed in words, or its
+  failure text when it recorded no rules.
+  """
+  @spec missed_words(map()) :: String.t() | nil
+  def missed_words(%{checks: checks, stats: stats, reason: reason}) do
+    case Enum.find(checks, &(!&1.passed)) do
+      nil -> reason
+      check -> check_words(check, stats)
+    end
+  end
+
   defp verdict(results) do
     stages = Enum.map(@stage_names, fn {key, name} -> {name, results[key]} end)
 
@@ -298,11 +428,21 @@ defmodule OpusWeb.StrategyParts do
       failed = Enum.find(stages, fn {_name, s} -> s.status == :failed end) ->
         %{mark: "✗", words: "failed the #{elem(failed, 0)}", class: "text-error"}
 
+      stuck = Enum.find(stages, fn {_name, s} -> s.status == :stuck end) ->
+        %{mark: "!", words: "stopped at the #{elem(stuck, 0)}; resume it", class: "text-warning"}
+
       Enum.any?(stages, fn {_name, s} -> s.status in [:pending, :running] end) ->
         %{mark: "…", words: "testing", class: "text-warning"}
 
       results.backtest.status == :not_run ->
         %{mark: "–", words: "not tested", class: "text-muted"}
+
+      old_fail = Enum.find(stages, fn {_name, s} -> s.status == :old_fail end) ->
+        %{
+          mark: "~",
+          words: "failed the #{elem(old_fail, 0)} by older rules; re-test it",
+          class: "text-warning"
+        }
 
       Enum.any?(stages, fn {_name, s} -> s.status == :old_pass end) ->
         %{mark: "~", words: "passed older rules; re-test it", class: "text-warning"}
@@ -352,6 +492,7 @@ defmodule OpusWeb.StrategyParts do
   # open trades at every close (`drawdown_valued`) say so on their drops.
   defp check_words(%{metric: metric, operator: op, required: required, actual: actual}, stats) do
     {label, kind} = Map.get(@metrics, metric, {metric, :number})
+    label = mc_label(metric, stats) || label
 
     label =
       if valued_every_close?(metric, stats), do: label <> ", valued at every close", else: label
@@ -363,6 +504,16 @@ defmodule OpusWeb.StrategyParts do
     do: metric in ~w(max_drawdown account_max_drawdown)
 
   defp valued_every_close?(_metric, _stats), do: false
+
+  # Monte Carlo's figures since it reshuffles the daily account
+  # (`mc_method`): the drop is the account's at its own sizing.
+  defp mc_label("p95_drawdown", %{"mc_method" => "daily_block_bootstrap"}),
+    do: "Bad-run drop (1 in 20), account at its sizing, valued daily"
+
+  defp mc_label("profitable_pct", %{"mc_method" => "daily_block_bootstrap"}),
+    do: "Reshuffled daily histories that made money"
+
+  defp mc_label(_metric, _stats), do: nil
 
   defp value(nil, _kind), do: "missing"
   defp value(v, :count), do: num(round(v))
@@ -414,6 +565,49 @@ defmodule OpusWeb.StrategyParts do
 
   defp backtest_line(_), do: nil
 
+  @doc """
+  The costs a backtest charged, in words (its `costs`, recorded since the
+  brokers table, Oct 30 2026): whose costs, what holding overnight cost,
+  the spread and commission, and short rules skipped. Nil for older results
+  and baskets.
+  """
+  @spec costs_words(map()) :: String.t() | nil
+  def costs_words(%{stats: %{"costs" => %{"broker" => broker} = c}}) do
+    overnight =
+      case c["overnight"] do
+        "oanda_financing" -> "overnight financing"
+        _ -> "no overnight cost (shares owned outright)"
+      end
+
+    spread =
+      case c["spread_bps"] do
+        nil -> "the bid/ask spread on each fill"
+        bps -> "a #{number(bps)} bp spread a trade"
+      end
+
+    commission =
+      case c["commission_bps"] do
+        bps when is_number(bps) and bps > 0 -> ", #{number(bps)} bp commission each way"
+        _ -> ""
+      end
+
+    shorts =
+      if c["shorts_skipped"],
+        do: " #{broker_name(broker)} can't short, so its short rules were skipped.",
+        else: ""
+
+    "Tested with #{broker_name(broker)}'s costs: #{overnight}, #{spread}#{commission}.#{shorts}"
+  end
+
+  def costs_words(_stage), do: nil
+
+  defp broker_name("oanda"), do: "OANDA"
+  defp broker_name("wealthsimple"), do: "Wealthsimple"
+  defp broker_name(other), do: other
+
+  defp number(n) when is_float(n) and n == trunc(n), do: Integer.to_string(trunc(n))
+  defp number(n), do: to_string(n)
+
   defp walk_forward_line(%{
          stats:
            %{
@@ -462,6 +656,14 @@ defmodule OpusWeb.StrategyParts do
       )
 
   defp walk_forward_line(_), do: nil
+
+  # Since Oct 30 the engine reshuffles stretches of the account's daily
+  # results (`mc_method`); older results redrew trades or months one by one.
+  defp monte_carlo_line(%{stats: %{"mc_method" => "daily_block_bootstrap"} = s}),
+    do:
+      "stretches of its daily account results reshuffled at random #{num(s["num_sims"], 0)} " <>
+        "times: #{pct(s["profitable_pct"])} of those histories made money, and a bad run " <>
+        "(1 in 20) falls #{pct(s["p95_drawdown"])} at its own sizing, open trades valued each day"
 
   defp monte_carlo_line(%{
          stats: %{"judged_on" => "months", "p95_drawdown" => dd, "profitable_pct" => made} = s
