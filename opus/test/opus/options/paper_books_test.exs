@@ -409,6 +409,11 @@ defmodule Opus.Options.PaperBooksTest do
     # The 10:00 New York snapshot, in the viewer's zone.
     assert html =~ "Priced at 08:00 MDT"
     assert html =~ "QQQ"
+    # Each book is its own account: its cash is said to be its own.
+    assert html =~ "This book&#39;s cash"
+    assert html =~ "Each book is its own paper account that started with $100,000.00"
+    assert html =~ ~r/>Open<.{0,120}·\s*1/s
+    refute html =~ ~r/>Closed<.{0,120}·/s
 
     [trade] = Paper.book("put_spread").trades
     {:ok, _view, html} = live(conn, ~p"/options?view=paper&book=put_spread&trade=#{trade.id}")
@@ -417,6 +422,8 @@ defmodule Opus.Options.PaperBooksTest do
     assert html =~ "If it goes wrong"
     assert html =~ "spread at expiry"
     assert html =~ "needs the engine"
+    # The engine is down in tests, so no price now; the snapshot's is said.
+    assert html =~ "valued at $615.00 in the book&#39;s last snapshot"
 
     [leg | _] = trade.legs
 
@@ -428,5 +435,14 @@ defmodule Opus.Options.PaperBooksTest do
     {:ok, _view, html} = live(conn, ~p"/options?view=paper&book=crash_puts")
     assert html =~ "Doomsday insurance"
     assert html =~ "Nothing yet"
+  end
+
+  test "closed trades sit under their own heading, apart from the open ones", %{conn: conn} do
+    {:ok, _} = Paper.run("put_spread", "QQQ")
+    Repo.update_all(Trade, set: [status: "closed", closed_on: ~D[2026-10-24]])
+
+    {:ok, _view, html} = live(conn, ~p"/options?view=paper&book=put_spread")
+    assert html =~ ~r/>Closed<.{0,120}·\s*1/s
+    refute html =~ ~r/>Open<.{0,120}·/s
   end
 end

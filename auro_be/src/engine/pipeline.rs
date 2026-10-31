@@ -47,7 +47,13 @@ mod parameter_stability;
 ///   least holding's) instead of the fixed 10% cap; CFDs unchanged.
 ///   Same day (before any v2 pass): the bad run is read against holding's
 ///   own 1-in-20 bad run, redrawn the same way, not its one actual drop.
-pub const RULES_VERSION: i32 = 2;
+/// - 3: Oct 31 2026: the annual Sharpe (the holdout's bar among others) is
+///   read from the account valued every day, not each trade booked on the
+///   day it closes; Monte Carlo redraws each day with its low, so a dip
+///   inside a day counts in its drawdowns as in the backtest's; a basket's
+///   walk-forward unseen part warms up on the bars before it (a ranking
+///   rebalancing from the split), as the holdout does.
+pub const RULES_VERSION: i32 = 3;
 
 #[derive(Clone)]
 pub struct StrategyConfig {
@@ -643,8 +649,10 @@ struct Tested {
     /// return (`basket::Run::returns`).
     returns: Vec<f64>,
     /// The account's return each trading day, valued at the day's last
-    /// bar (`Outcome::daily_valued`).
+    /// bar (`Outcome::daily_valued`), and its lowest value in the day
+    /// (`Outcome::daily_lows`).
     daily: Vec<f64>,
+    lows: Vec<f64>,
     basket: Option<Value>,
 }
 
@@ -787,6 +795,7 @@ impl Subject {
                     stats,
                     returns: trades.iter().map(|t| t.pnl_percent).collect(),
                     daily: outcome.daily_valued,
+                    lows: outcome.daily_lows,
                     basket: None,
                 })
             }
@@ -795,7 +804,9 @@ impl Subject {
                 let window = match part {
                     Part::Whole => basket::Window::Whole,
                     Part::InSample => basket::Window::Before(split()?),
-                    Part::OutOfSample => basket::Window::From(split()?),
+                    // Warmed on the in-sample bars, as the holdout is, so a
+                    // ranking's long look-back doesn't eat the unseen part.
+                    Part::OutOfSample => basket::Window::Counting(split()?),
                     Part::Holdout(at) => basket::Window::Counting(at),
                 };
                 let run = basket::run(members, basket, config, financing, window)?;
@@ -803,6 +814,7 @@ impl Subject {
                 Ok(Tested {
                     returns: run.returns(),
                     daily: run.outcome.daily_valued,
+                    lows: run.outcome.daily_lows,
                     stats: run.stats,
                     basket: Some(json),
                 })
@@ -1077,9 +1089,9 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
         stats_json["costs"] = costs;
     }
     if let Some(held) = held {
-        // The rule's own account valued every day, as holding is: its
-        // close-day Sharpe above would book a months-long hold all at once.
-        let rule = path_stats(tested.daily.iter().copied());
+        // The rule's own account valued every day, as holding is, on the
+        // same footing as holding's figures beside it.
+        let rule = path_stats(days(&tested.daily, &tested.lows));
         stats_json["buy_and_hold"] = serde_json::json!(held);
         stats_json["buy_and_hold"]["rule"] = serde_json::json!({
             "annual_sharpe": rule.annual_sharpe,
@@ -1391,11 +1403,23 @@ struct PathStats {
     annual_sharpe: f64,
 }
 
-/// Compound `daily` (the account's returns, in the order drawn).
-fn path_stats(daily: impl Iterator<Item = f64>) -> PathStats {
+/// Each day's return beside its low (`Outcome::daily_lows`); with no lows
+/// (a held fund's daily closes) the day's low is its close.
+fn days<'a>(daily: &'a [f64], lows: &'a [f64]) -> impl Iterator<Item = (f64, f64)> + 'a {
+    daily
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| (r, lows.get(i).map_or(r, |low| low.min(r))))
+}
+
+/// Compound `daily` (the account's returns, each with the day's low, in
+/// the order drawn). The drawdown sees the day's low, so a dip inside a
+/// day that recovers by its close still counts, as in the backtest.
+fn path_stats(daily: impl Iterator<Item = (f64, f64)>) -> PathStats {
     let (mut nav, mut peak, mut max_drawdown) = (1.0_f64, 1.0_f64, 0.0_f64);
     let (mut n, mut sum, mut sum_sq) = (0.0_f64, 0.0_f64, 0.0_f64);
-    for r in daily {
+    for (r, low) in daily {
+        max_drawdown = max_drawdown.max(1.0 - (nav * (1.0 + low)).max(0.0) / peak);
         nav = (nav * (1.0 + r)).max(0.0);
         peak = peak.max(nav);
         max_drawdown = max_drawdown.max(1.0 - nav / peak);
@@ -1427,9 +1451,10 @@ fn percentile(sorted: &[f64], pct: usize) -> f64 {
 /// `MONTE_CARLO_SIMS` times by the stationary block bootstrap, each path as
 /// long as the original, and read every figure off the redrawn paths: the
 /// share that made money, and the drawdown and return percentiles, all on
-/// the backtest's `account_*` basis. A trade's dip while open counts, and
-/// so do runs of bad days.
-fn run_monte_carlo_sims<R: rand::Rng + ?Sized>(daily: &[f64], rng: &mut R) -> Value {
+/// the backtest's `account_*` basis. A trade's dip while open counts, its
+/// dip inside a day too (each day is redrawn with its low, `lows`; empty:
+/// none), and so do runs of bad days.
+fn run_monte_carlo_sims<R: rand::Rng + ?Sized>(daily: &[f64], lows: &[f64], rng: &mut R) -> Value {
     let n = daily.len();
     let mut picks = Vec::with_capacity(n);
     let mut profitable = 0_usize;
@@ -1438,7 +1463,10 @@ fn run_monte_carlo_sims<R: rand::Rng + ?Sized>(daily: &[f64], rng: &mut R) -> Va
     let mut sharpes = Vec::with_capacity(MONTE_CARLO_SIMS);
     for _ in 0..MONTE_CARLO_SIMS {
         stationary_bootstrap(n, n, MEAN_BLOCK_DAYS, rng, &mut picks);
-        let path = path_stats(picks.iter().map(|&i| daily[i]));
+        let path = path_stats(picks.iter().map(|&i| {
+            let r = daily[i];
+            (r, lows.get(i).map_or(r, |low| low.min(r)))
+        }));
         profitable += usize::from(path.total_return > 0.0);
         returns.push(path.total_return);
         drawdowns.push(path.max_drawdown);
@@ -1477,10 +1505,11 @@ fn run_monte_carlo_sims<R: rand::Rng + ?Sized>(daily: &[f64], rng: &mut R) -> Va
 fn against_holding<R: rand::Rng + ?Sized>(
     stats: &mut Value,
     daily: &[f64],
+    lows: &[f64],
     held: &Hold,
     rng: &mut R,
 ) {
-    let rule = path_stats(daily.iter().copied());
+    let rule = path_stats(days(daily, lows));
     let n = daily.len() as f64;
     let mean = daily.iter().sum::<f64>() / n;
     let vol = (daily.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n).sqrt() * 252f64.sqrt();
@@ -1490,10 +1519,11 @@ fn against_holding<R: rand::Rng + ?Sized>(
         1.0
     };
     let scaled: Vec<f64> = daily.iter().map(|r| r * scale).collect();
-    let at_hold_risk = run_monte_carlo_sims(&scaled, rng)["p95_drawdown"]
+    let scaled_lows: Vec<f64> = lows.iter().map(|r| r * scale).collect();
+    let at_hold_risk = run_monte_carlo_sims(&scaled, &scaled_lows, rng)["p95_drawdown"]
         .as_f64()
         .unwrap_or(f64::NAN);
-    let hold_p95 = run_monte_carlo_sims(&held.daily, rng)["p95_drawdown"]
+    let hold_p95 = run_monte_carlo_sims(&held.daily, &[], rng)["p95_drawdown"]
         .as_f64()
         .unwrap_or(f64::NAN);
     stats["buy_and_hold"] = serde_json::json!(held);
@@ -1531,7 +1561,7 @@ pub async fn run_monte_carlo(
         Ok(tested) => tested,
         Err(failure) => return fail_stage(pool, evaluation_id, failure).await,
     };
-    let daily = tested.daily;
+    let (daily, lows) = (tested.daily, tested.lows);
     // Days the account moved: a strategy that never traded has none to
     // redraw.
     let moved = daily.iter().filter(|r| **r != 0.0).count();
@@ -1542,9 +1572,9 @@ pub async fn run_monte_carlo(
 
     let num_days = daily.len();
     let stats_json = off_runtime(move || {
-        let mut stats = run_monte_carlo_sims(&daily, &mut rand::rng());
+        let mut stats = run_monte_carlo_sims(&daily, &lows, &mut rand::rng());
         if let Some(held) = held {
-            against_holding(&mut stats, &daily, &held, &mut rand::rng());
+            against_holding(&mut stats, &daily, &lows, &held, &mut rand::rng());
         }
         stats
     })
@@ -1900,7 +1930,7 @@ mod tests {
         };
         let mut stats = serde_json::json!({});
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        against_holding(&mut stats, &daily, &held, &mut rng);
+        against_holding(&mut stats, &daily, &[], &held, &mut rng);
 
         let rule_sharpe = stats["buy_and_hold"]["rule"]["annual_sharpe"]
             .as_f64()
@@ -1947,7 +1977,7 @@ mod tests {
         };
         let mut stats = serde_json::json!({});
         let mut rng = rand::rngs::StdRng::seed_from_u64(11);
-        against_holding(&mut stats, &daily, &held, &mut rng);
+        against_holding(&mut stats, &daily, &[], &held, &mut rng);
         let ratio = stats["p95_drawdown_vs_hold"].as_f64().unwrap();
         assert!((ratio - 1.0).abs() < 0.1, "ratio {ratio}");
     }
@@ -1971,7 +2001,7 @@ mod tests {
 
     #[test]
     fn monte_carlo_drawdown_counts_losses_before_the_first_gain() {
-        let path = path_stats([-0.3, 0.1, 0.1].into_iter());
+        let path = path_stats(days(&[-0.3, 0.1, 0.1], &[]));
         assert!((path.max_drawdown - 0.3).abs() < 1e-12);
         assert!((path.total_return - (0.7 * 1.1 * 1.1 - 1.0)).abs() < 1e-12);
     }
@@ -2002,6 +2032,23 @@ mod tests {
             operator: operator.to_string(),
             value,
         }
+    }
+
+    #[test]
+    fn a_dip_inside_a_day_counts_in_the_redrawn_drawdown() {
+        // Flat closes, but each day dips 8% before recovering.
+        let daily = vec![0.0; 50];
+        let lows = vec![-0.08; 50];
+        assert!((path_stats(days(&daily, &lows)).max_drawdown - 0.08).abs() < 1e-12);
+        assert_eq!(path_stats(days(&daily, &[])).max_drawdown, 0.0);
+
+        let mc = mc_with_lows(&daily, &lows);
+        assert!((mc["p95_drawdown"].as_f64().unwrap() - 0.08).abs() < 1e-12);
+        assert_eq!(mc["profitable_pct"].as_f64().unwrap(), 0.0);
+    }
+
+    fn mc_with_lows(daily: &[f64], lows: &[f64]) -> Value {
+        run_monte_carlo_sims(daily, lows, &mut StdRng::seed_from_u64(1))
     }
 
     #[test]
@@ -2332,7 +2379,7 @@ mod tests {
     use rand::SeedableRng;
 
     fn mc(daily: &[f64], seed: u64) -> Value {
-        run_monte_carlo_sims(daily, &mut StdRng::seed_from_u64(seed))
+        run_monte_carlo_sims(daily, &[], &mut StdRng::seed_from_u64(seed))
     }
 
     fn figure(stats: &Value, key: &str) -> f64 {

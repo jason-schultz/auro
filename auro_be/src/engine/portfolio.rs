@@ -142,6 +142,13 @@ pub struct Outcome {
     /// a weekend's moves (FX opens Sunday evening) land on Monday.
     #[serde(skip)]
     pub daily_valued: Vec<f64>,
+    /// Beside each of `daily_valued`, the day's lowest value over the
+    /// day before's close (≤ the day's return): an intraday strategy's dip
+    /// that recovers by the day's last bar. Monte Carlo redraws the two as
+    /// a pair, so its drawdowns see the dip as the backtest's do. Equal to
+    /// `daily_valued` for daily bars (one mark a day).
+    #[serde(skip)]
+    pub daily_lows: Vec<f64>,
 }
 
 /// Share of NAV a trade's position takes: the live sizing rule before unit
@@ -230,6 +237,8 @@ struct Replay<'a> {
     month_ends: BTreeMap<(i32, u32), f64>,
     /// The valued NAV at the last mark of each UTC day.
     day_ends: BTreeMap<NaiveDate, f64>,
+    /// The lowest valued NAV marked on each UTC day.
+    day_lows: BTreeMap<NaiveDate, f64>,
 }
 
 impl<'a> Replay<'a> {
@@ -310,6 +319,10 @@ impl<'a> Replay<'a> {
         });
         self.month_ends.insert((at.year(), at.month()), nav);
         self.day_ends.insert(at.date_naive(), nav);
+        self.day_lows
+            .entry(at.date_naive())
+            .and_modify(|low| *low = low.min(nav))
+            .or_insert(nav);
 
         let Some(limits) = self.limits else { return };
         self.pause_peak = self.pause_peak.max(nav);
@@ -349,14 +362,15 @@ impl<'a> Replay<'a> {
 
     /// Trading-day returns from the day of the first trade
     /// (`Outcome::daily_valued`): each weekday's last valued NAV over the
-    /// one before. A weekend's marks roll into Monday, and a run whose last
-    /// mark falls on a weekend ends with that move.
-    fn daily_valued(&self) -> Vec<f64> {
+    /// one before, and beside it the lowest valued NAV since then over the
+    /// same (`Outcome::daily_lows`). A weekend's marks roll into Monday,
+    /// and a run whose last mark falls on a weekend ends with that move.
+    fn daily_valued(&self) -> (Vec<f64>, Vec<f64>) {
         let Some(first) = self.first_entry else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let Some((&last, &last_nav)) = self.day_ends.last_key_value() else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let mut day = first.date_naive();
         let mut prev = self
@@ -365,19 +379,26 @@ impl<'a> Replay<'a> {
             .next_back()
             .map_or(1.0, |(_, nav)| *nav);
         let change = |prev: f64, nav: f64| if prev > 0.0 { nav / prev - 1.0 } else { 0.0 };
-        let mut out = Vec::new();
+        let (mut out, mut lows) = (Vec::new(), Vec::new());
+        let mut low = f64::INFINITY;
         while day <= last {
+            if let Some(l) = self.day_lows.get(&day) {
+                low = low.min(*l);
+            }
             if !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
                 let nav = self.day_ends.get(&day).copied().unwrap_or(prev);
                 out.push(change(prev, nav));
+                lows.push(change(prev, low.min(nav)));
                 prev = nav;
+                low = f64::INFINITY;
             }
             day += Duration::days(1);
         }
         if last_nav != prev {
             out.push(change(prev, last_nav));
+            lows.push(change(prev, low.min(last_nav)));
         }
-        out
+        (out, lows)
     }
 
     /// Each weekday's valued return from `from` to `to` (`Outcome::daily`):
@@ -496,6 +517,7 @@ pub fn simulate<'a>(
         first_entry: None,
         month_ends: BTreeMap::new(),
         day_ends: BTreeMap::new(),
+        day_lows: BTreeMap::new(),
     };
     let mut blocked = Blocked::default();
     let mut taken_by_play: BTreeMap<String, usize> = BTreeMap::new();
@@ -522,7 +544,7 @@ pub fn simulate<'a>(
     let daily = replay.daily_dated(from, to);
     let years = (to - from).num_days().max(1) as f64 / 365.25;
     let monthly = replay.monthly();
-    let daily_valued = replay.daily_valued();
+    let (daily_valued, daily_lows) = replay.daily_valued();
     Outcome {
         total_return: nav - 1.0,
         annual_return: if nav > 0.0 {
@@ -543,6 +565,7 @@ pub fn simulate<'a>(
         summed_max_drawdown: replay.summed_max_dd.abs(),
         monthly,
         daily_valued,
+        daily_lows,
     }
 }
 
@@ -810,6 +833,40 @@ mod tests {
         }
         let grown = out.daily_valued.iter().fold(1.0, |nav, r| nav * (1.0 + r)) - 1.0;
         assert!((grown - out.total_return).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_dip_inside_a_day_shows_in_the_days_low_not_its_close() {
+        // Hourly bars on Tue Jan 6: 100, then 90 at noon, back to 100.
+        let bars: Vec<Candle> = [(10, 100.0), (12, 90.0), (14, 100.0), (16, 100.0)]
+            .into_iter()
+            .map(|(hour, c)| Candle {
+                time: at(6, hour),
+                mid: crate::engine::types::OHLC {
+                    open: c,
+                    high: c,
+                    low: c,
+                    close: c,
+                },
+                volume: 1,
+                bid: None,
+                ask: None,
+            })
+            .collect();
+        let p = Play {
+            bars: &bars,
+            ..play("a", "NAS100_USD", vec![trade((6, 9), (6, 16), 0.0)])
+        };
+        let out = simulate(&[&p], None, at(6, 0), at(6, 23));
+        // Half the account in it: −10% at noon is −5% of the account.
+        assert_eq!(out.daily_valued, vec![0.0]);
+        assert_eq!(out.daily_lows.len(), 1);
+        assert!(
+            (out.daily_lows[0] + 0.05).abs() < 1e-12,
+            "{:?}",
+            out.daily_lows
+        );
+        assert!((out.max_drawdown - 0.05).abs() < 1e-12);
     }
 
     #[test]
