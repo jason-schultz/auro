@@ -215,14 +215,15 @@ defmodule OpusWeb.Components.PaperBook do
 
   attr :now, :map, required: true
 
-  # The underlyings' last trades now, beside the snapshot the book was
-  # valued at (its last is 15:45 New York, so after the close they differ).
+  # The underlyings' latest prices (`Opus.Options.Spot`), beside the
+  # snapshot the book was valued at (its last is 15:45 New York, so after
+  # the close they differ).
   defp prices_now(assigns) do
     ~H"""
     <p :if={@now != %{}} class="-mt-2 text-[12px] text-muted">
-      <span class="font-medium text-base-content">Now (Questrade):</span>
-      <span :for={{symbol, %{price: price, at: at}} <- Enum.sort(@now)} class="mr-3">
-        {symbol} {money(price)}<span :if={at}> at {clock(at)} {zone_name(at)}</span>
+      <span class="font-medium text-base-content">Latest:</span>
+      <span :for={{symbol, price} <- Enum.sort(@now)} class="mr-3">
+        {symbol} {spot_words(price)}
       </span>
     </p>
     """
