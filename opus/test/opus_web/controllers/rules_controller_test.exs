@@ -45,7 +45,7 @@ defmodule OpusWeb.RulesControllerTest do
     assert body["strategies"] == []
   end
 
-  test "returns live-only rows with regime_inputs and tactical-first sorting", %{conn: conn} do
+  test "returns live-only rows, trading ones first", %{conn: conn} do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     tactical_on_id = Ecto.UUID.generate()
@@ -93,13 +93,6 @@ defmodule OpusWeb.RulesControllerTest do
         live_strategy_id: tactical_on_id,
         enabled: true,
         reason: "aligned_with_regime",
-        regime_inputs: %{
-          "composite" => "trending",
-          "frames" => [
-            %{"frame" => "H4", "regime" => "trending", "adx" => 35.7},
-            %{"frame" => "H1", "regime" => "trending", "adx" => 28.1}
-          ]
-        },
         computed_at: now,
         inserted_at: now,
         updated_at: now
@@ -108,12 +101,6 @@ defmodule OpusWeb.RulesControllerTest do
         live_strategy_id: tactical_off_id,
         enabled: false,
         reason: "blocked_by_regime",
-        regime_inputs: %{
-          "composite" => "choppy",
-          "frames" => [
-            %{"frame" => "H4", "regime" => "choppy", "adx" => 13.2}
-          ]
-        },
         computed_at: now,
         inserted_at: now,
         updated_at: now
@@ -131,12 +118,6 @@ defmodule OpusWeb.RulesControllerTest do
 
     enabled_row = Enum.find(body["strategies"], &(&1["live_strategy_id"] == tactical_on_id))
     assert enabled_row["rules_enabled"] == true
-    assert enabled_row["composite_regime"] == "trending"
-
-    assert enabled_row["frames"] == [
-             %{"frame" => "H4", "regime" => "trending", "adx" => 35.7},
-             %{"frame" => "H1", "regime" => "trending", "adx" => 28.1}
-           ]
 
     disabled_row = Enum.find(body["strategies"], &(&1["live_strategy_id"] == tactical_off_id))
     assert disabled_row["rules_enabled"] == false

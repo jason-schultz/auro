@@ -65,6 +65,29 @@ defmodule Opus.Trading.ReconcilerTest do
   end
 
   @tag :capture_log
+  test "a closed trade's return has its financing taken off, as a backtest trade's does" do
+    open_trade("44")
+
+    # +1.0% on the price (1.1 → 1.111); financing was a tenth of the price
+    # P&L, so 0.1% of the position.
+    stub_oanda(%{
+      "id" => "44",
+      "state" => "CLOSED",
+      "averageClosePrice" => "1.111",
+      "realizedPL" => "11.0",
+      "financing" => "-1.1"
+    })
+
+    assert {:ok, 1, _pending} = Reconciler.reconcile_once()
+
+    pnl =
+      from(t in "live_trades", where: t.oanda_trade_id == "44", select: t.pnl_percent)
+      |> Repo.one()
+
+    assert_in_delta pnl, 0.009, 1.0e-9
+  end
+
+  @tag :capture_log
   test "a failed engine delete is kept and retried on later ticks" do
     open_trade("43")
 

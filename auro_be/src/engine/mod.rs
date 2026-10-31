@@ -1,6 +1,7 @@
 pub mod adx_filter;
 pub mod bollinger;
 pub mod buy_and_hold;
+pub mod candle_holes;
 pub mod carry;
 pub mod catalog;
 pub mod daily_bars;
@@ -9,7 +10,6 @@ pub mod event_window;
 pub mod financing;
 pub mod indicators;
 pub mod instrument;
-pub mod kfold;
 pub mod live;
 pub mod ma_filter;
 pub mod macd;

@@ -39,6 +39,9 @@ defmodule Opus.Auro.Client do
     do:
       "The tester isn't running, so nothing can be backtested. Start it with `#{@tester_start}`."
 
+  def describe_error(:tester_outdated),
+    do: "The tester is running an older build; rebuild and restart it to see this."
+
   def describe_error(%{reason: :econnrefused}), do: "Auro is not running."
   def describe_error(_), do: "Could not reach Auro."
 
@@ -415,14 +418,15 @@ defmodule Opus.Auro.Client do
   `parameters` is the full strategy JSON. The body has `"signals"` (entries
   and exits with price and why each exit happened) and `"bars"` (each bar's
   OHLC and every rule's true/false on it). Validates the rules too: a
-  strategy the engine can't read answers 400 with the reason.
+  strategy the engine can't read answers 400 with the reason. The bars end
+  before the holdout date unless `through_holdout` is true.
   """
-  @spec signal_preview(map(), pos_integer()) :: {:ok, map()} | {:error, any()}
-  def signal_preview(parameters, count) when is_map(parameters) do
+  @spec signal_preview(map(), pos_integer(), boolean()) :: {:ok, map()} | {:error, any()}
+  def signal_preview(parameters, count, through_holdout) when is_map(parameters) do
     tester_client()
     |> Req.post(
       url: "/api/strategy/signal-preview",
-      json: %{parameters: parameters, count: count},
+      json: %{parameters: parameters, count: count, through_holdout: through_holdout},
       receive_timeout: 30_000,
       retry: false
     )

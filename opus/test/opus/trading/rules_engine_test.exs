@@ -2,19 +2,17 @@ defmodule Opus.Trading.RulesEngineTest do
   use Opus.DataCase, async: false
 
   alias Opus.Repo
-  alias Opus.Trading.{AccountPause, LiveStrategy, RegimeDetector, Rule, RulesEngine, Suspension}
+  alias Opus.Trading.{AccountPause, LiveStrategy, Rule, RulesEngine, Suspension}
 
   setup do
     Repo.delete_all(Suspension)
     Repo.delete_all(AccountPause)
     Repo.delete_all(Rule)
     Repo.delete_all(LiveStrategy)
-    # The regime readout comes from the detector; it starts empty.
-    start_supervised!(RegimeDetector)
     :ok
   end
 
-  test "strategies of every type are clear to trade whatever the regime" do
+  test "strategies of every type are clear to trade when no safety rule holds them" do
     ids = for type <- ~w(composite mean_reversion trend_following), do: insert_strategy(type)
 
     # Persisted before the push to Rust, which has no engine in tests.

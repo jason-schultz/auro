@@ -2,9 +2,11 @@ defmodule OpusWeb.ResultCharts do
   @moduledoc """
   Two views of a strategy's whole test history, kept small:
 
-  - `vs_holding/1`: its running return against just holding the instrument
-    over the same years, and its drawdown, with one sentence that says
-    what the chart shows (`Opus.Trading.Strategies.report/4`).
+  - `vs_holding/1`: its account against just holding the instrument over
+    the same years, measured the same way: holding at the strategy's risk
+    on the chart, each year side by side, and a few sentences on return for
+    the risk and how the two move together
+    (`Opus.Trading.Strategies.report/4`).
   - `fragility_grid/1`: the strategy re-run at nearby settings, coloured by
     whether each passes the backtest standard, with a verdict in words
     (`Opus.Trading.Fragility`).
@@ -20,15 +22,21 @@ defmodule OpusWeb.ResultCharts do
   attr :report, :map, required: true, doc: "Strategies.report/4"
   attr :instrument, :string, required: true
 
+  @doc """
+  The strategy's account against just holding, like for like: holding at
+  the strategy's risk on the chart (holding in full swings so much more
+  that it says little on its own), each year side by side, and a few
+  sentences on return for the risk taken and how the two move together.
+  """
   def vs_holding(assigns) do
     assigns = assign(assigns, layout(assigns.report.points))
 
     ~H"""
     <div class="flex flex-col gap-2">
-      <p class="m-0 text-[14px]">{headline(@report.summary, @instrument)}</p>
+      <p :for={line <- headline(@report.summary, @instrument)} class="m-0 text-[14px]">{line}</p>
       <svg
         role="img"
-        aria-label={"The strategy's running return against just holding #{@instrument}"}
+        aria-label={"The strategy's account against holding #{@instrument} at the same risk"}
         viewBox={"0 0 #{@width} #{@height}"}
         preserveAspectRatio="none"
         class="block h-[150px] w-full"
@@ -42,7 +50,7 @@ defmodule OpusWeb.ResultCharts do
           vector-effect="non-scaling-stroke"
         />
         <polyline
-          points={@hold}
+          points={@matched}
           fill="none"
           stroke="var(--color-neutral-content)"
           stroke-width="1.5"
@@ -68,7 +76,7 @@ defmodule OpusWeb.ResultCharts do
               aria-hidden="true"
               class="inline-block w-4 border-t border-dashed border-neutral-content"
             ></span>
-            Just holding {signed_pct(@report.summary.hold_return, 0)}
+            Holding at the same risk {signed_pct(@report.summary.matched_return, 0)}
           </span>
         </span>
         <span>{date(@report.summary.from)} – {date(@report.summary.to)}</span>
@@ -83,30 +91,74 @@ defmodule OpusWeb.ResultCharts do
         <polygon points={@drawdown} fill="var(--color-error)" fill-opacity="0.45" />
       </svg>
       <p class="m-0 text-[12px] text-muted">
-        Red: how far the strategy was below its best. Worst drop {pct(
+        Red: how far the account was below its best. Worst drop {pct(
           @report.summary.strategy_max_drawdown,
           1
-        )}; holding's was {pct(@report.summary.hold_max_drawdown, 1)}.
-        Both are as if the whole account were in the trade, over the history the backtest uses.
+        )}; holding at the same risk {pct(@report.summary.matched_max_drawdown, 1)}, holding in full {pct(
+          @report.summary.hold_max_drawdown,
+          1
+        )}. The account risks {pct(@report.summary.risk_pct, 1)} a trade, as live sizes it; over the history the backtest uses.
       </p>
+      <table class="mt-1 w-full border-collapse text-[13px] tabular-nums">
+        <caption class="sr-only">Each year: the strategy, holding at the same risk, holding</caption>
+        <thead class="text-[12px] text-muted">
+          <tr>
+            <th scope="col" class="py-1 text-left font-normal">Year</th>
+            <th scope="col" class="py-1 text-right font-normal">Strategy</th>
+            <th scope="col" class="py-1 text-right font-normal">Holding, same risk</th>
+            <th scope="col" class="py-1 text-right font-normal">Holding</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr :for={y <- @report.years}>
+            <th scope="row" class="py-0.5 text-left font-normal">{y.year}</th>
+            <td class={["py-0.5 text-right", tone(y.strategy)]}>{signed_pct(y.strategy, 1)}</td>
+            <td class="py-0.5 text-right text-muted">{signed_pct(y.matched, 1)}</td>
+            <td class="py-0.5 text-right text-muted">{signed_pct(y.hold, 1)}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
     """
   end
 
+  # What the card says, in order: what the account did, what holding did
+  # and at what risk, which did better for the risk, and how they move
+  # together.
   defp headline(s, instrument) do
-    traded =
-      "It made #{signed_pct(s.strategy_return, 1)} over #{s.num_trades} trades, " <>
-        "in a trade #{pct(s.time_in_market, 0)} of the time."
-
-    held = "Just holding #{instrument} made #{signed_pct(s.hold_return, 1)}"
-
-    comparison =
-      if s.strategy_return > s.hold_return,
-        do: "#{held}, so the strategy beat it.",
-        else: "#{held}, so holding did better on return."
-
-    traded <> " " <> comparison
+    [
+      "The account made #{signed_pct(s.strategy_return, 1)} over #{s.num_trades} trades, " <>
+        "in a trade #{pct(s.time_in_market, 0)} of the time. Just holding #{instrument} " <>
+        "made #{signed_pct(s.hold_return, 0)}, but swings far more.",
+      "Kept small enough to swing as much as the strategy (#{pct(s.risk_scale, 0)} of the " <>
+        "money in it), holding made #{signed_pct(s.matched_return, 1)}: " <>
+        verdict(s),
+      together(s.correlation, instrument)
+    ]
   end
+
+  defp verdict(%{strategy_return: mine, matched_return: held} = s) when mine > held,
+    do: "for the risk taken, the strategy did better (Sharpe #{sharpe(s)})."
+
+  defp verdict(s),
+    do: "for the risk taken, holding did as well or better (Sharpe #{sharpe(s)})."
+
+  defp sharpe(s), do: "#{num(s.strategy_annual_sharpe)} against #{num(s.hold_annual_sharpe)}"
+
+  defp together(nil, _instrument), do: "Too few days to say how the two move together."
+
+  defp together(c, instrument) when abs(c) < 0.2,
+    do:
+      "Its days barely follow #{instrument}'s (correlation #{num(c)}), so it adds something " <>
+        "holding doesn't have."
+
+  defp together(c, instrument) when c > 0,
+    do:
+      "Its days tend to follow #{instrument}'s (correlation #{num(c)}): part of what it " <>
+        "makes is the market's rise."
+
+  defp together(c, instrument),
+    do: "Its days tend to go against #{instrument}'s (correlation #{num(c)})."
 
   defp layout([]),
     do: %{
@@ -114,13 +166,13 @@ defmodule OpusWeb.ResultCharts do
       height: @height,
       dd_height: @dd_height,
       zero: 0,
-      hold: "",
+      matched: "",
       strategy: "",
       drawdown: ""
     }
 
   defp layout(points) do
-    values = Enum.flat_map(points, &[&1.strategy, &1.hold]) ++ [0.0]
+    values = Enum.flat_map(points, &[&1.strategy, &1.matched]) ++ [0.0]
     {lo, hi} = Enum.min_max(values)
     span = if hi == lo, do: 1.0, else: hi - lo
     n = max(length(points) - 1, 1)
@@ -142,7 +194,7 @@ defmodule OpusWeb.ResultCharts do
       height: @height,
       dd_height: @dd_height,
       zero: y.(0.0),
-      hold: line.(:hold),
+      matched: line.(:matched),
       strategy: line.(:strategy),
       drawdown:
         "0,0 " <>

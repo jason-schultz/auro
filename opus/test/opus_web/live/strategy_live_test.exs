@@ -42,11 +42,7 @@ defmodule OpusWeb.StrategyLiveTest do
       live_strategy_id: @id,
       enabled: true,
       reason: "composite: no regime gate",
-      computed_at: now,
-      regime_inputs: %{
-        "composite" => "uncertain",
-        "frames" => [%{"frame" => "H1", "regime" => "trending", "adx" => 39.4}]
-      }
+      computed_at: now
     })
 
     Repo.insert!(%LiveTrade{
@@ -71,7 +67,7 @@ defmodule OpusWeb.StrategyLiveTest do
     assert html =~ "Auro is not running."
     assert html =~ "Trading"
     assert html =~ "composite: no regime gate"
-    assert html =~ "H1 ADX 39.4 trending"
+    refute html =~ "Regime"
     assert html =~ "Short"
     assert html =~ "29,206.7"
     assert html =~ "How it trades"

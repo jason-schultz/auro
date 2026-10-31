@@ -388,7 +388,7 @@ defmodule OpusWeb.SafetyLive do
                     {standing_words(b, @overview.limits, @overview.min_trades, @numbers)}
                   </span>
                   <div class="flex items-center justify-end gap-2.5">
-                    <span class={["rounded-full px-2.5 py-1 text-[13px] font-medium", chip_class(b)]}>
+                    <span class={["rounded-full px-2.5 py-1 text-[13px] font-medium", breaker_tone(b)]}>
                       {chip_words(b)}
                     </span>
                     <button
@@ -761,9 +761,9 @@ defmodule OpusWeb.SafetyLive do
   defp chip_words(%{circuit_breaker_exempt: true}), do: "exempt"
   defp chip_words(_b), do: "watched"
 
-  defp chip_class(%{suspension: %{}}), do: "bg-error/15 text-error"
-  defp chip_class(%{circuit_breaker_exempt: true}), do: "bg-warning/15 text-warning"
-  defp chip_class(_b), do: "bg-neutral text-muted"
+  defp breaker_tone(%{suspension: %{}}), do: "bg-error/15 text-error"
+  defp breaker_tone(%{circuit_breaker_exempt: true}), do: "bg-warning/15 text-warning"
+  defp breaker_tone(_b), do: "bg-neutral text-muted"
 
   defp setting_name(:drawdown_pause_pct), do: "Drawdown pause"
   defp setting_name(:risk_budget_pct), do: "Risk budget"

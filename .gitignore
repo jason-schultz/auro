@@ -1,12 +1,6 @@
 # Rust
 auro_be/target/
 
-# Node/Bun
-auro_fe/node_modules/
-auro_fe/dist/
-auro_fe/.vite/
-auro_fe/bun.lockb
-
 # Environment
 .env
 .env.*
@@ -30,3 +24,7 @@ logs/
 # Agents
 .claude/
 **/AGENTS.md
+fable_review/
+research/
+running_local/
+scripts/

@@ -27,13 +27,17 @@
 //! account's valued one. Monte Carlo redraws the account's daily returns
 //! (`Outcome::daily_valued`), as on one market.
 //!
-//! A ranked basket holds positions across rebalances, so a position kept
-//! for years is one "trade": a trade count and a per-trade Sharpe say
-//! little about it. It's judged as the papers judge such books, on the
-//! account's calendar-month returns (`Outcome::monthly`): the Sharpe, the
-//! luck test and the luck check read the months, and a months minimum
-//! replaces the trades minimum (`pipeline::months_rules`). Monte Carlo
-//! still redraws its days: it needs the path, not the count.
+//! Both modes are judged on the account's calendar-month returns
+//! (`Outcome::monthly`): the Sharpe, the luck test and the luck check read
+//! the months, not the trades. A together basket's trades overlap: the same
+//! rule on EUR_USD, GBP_USD and AUD_USD in the same week is one bet, not
+//! three, so a t-stat over its pooled trades would count each bet up to
+//! once per market. Its trade minimums still apply (enough happened). A
+//! ranked basket holds positions across rebalances, so a position kept for
+//! years is one "trade" and a trade count says little: a months minimum
+//! replaces its trades minimum (`pipeline::months_rules`), as the papers
+//! judge such books. Monte Carlo still redraws the days: it needs the
+//! path, not the count.
 //!
 //! Markets join the account when their history starts, so a basket spans
 //! from its earliest bar to its latest.
@@ -45,11 +49,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
-use super::{account_sizing, parse_strategy, run_strategy, StrategyConfig};
+use super::{judged_sizing, parse_strategy, run_strategy, StrategyConfig};
 use crate::db::repositories::candles::load_candles;
 use crate::engine::financing::{apply_costs, FinancingModel};
 use crate::engine::parallel;
-use crate::engine::portfolio::{simulate, Outcome, Play};
+use crate::engine::portfolio::{simulate, yearly, Outcome, Play};
 use crate::engine::rank::{self, RankRule};
 use crate::engine::stats::{stats_with, BacktestStats, Marked};
 use crate::engine::strategy::{bounded_window, compute_stop_price, Strategy};
@@ -208,13 +212,9 @@ fn span<'a>(bars: impl Iterator<Item = &'a [Candle]>) -> Option<(DateTime<Utc>, 
 
 /// A basket's run on one account.
 pub struct Run {
-    /// Judged as one market's are; the account figures are the account's.
-    /// A ranked basket's are judged by months
-    /// (`BacktestStats::judge_by_months`).
+    /// Judged on the account's months (`BacktestStats::judge_by_months`);
+    /// the account figures are the account's.
     pub stats: BacktestStats,
-    /// Every trade taken, in the order it closed, its return being what it
-    /// did to the account.
-    pub trades: Vec<Trade>,
     pub outcome: Outcome,
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
@@ -256,7 +256,7 @@ pub fn run(
         }
     }
 
-    let sizing = account_sizing(config).map_err(|e| e.to_string())?;
+    let sizing = judged_sizing(config).map_err(|e| e.to_string())?;
     let plays: Vec<Play> = bars
         .iter()
         .zip(per_market)
@@ -288,14 +288,12 @@ pub fn run(
         account_return: outcome.total_return,
         account_max_drawdown: -outcome.max_drawdown,
         annual_sharpe: outcome.annual_sharpe,
+        years: yearly(&outcome.daily),
     };
     let mut stats = stats_with(&trades, sizing, marked);
-    if basket.mode == Mode::Ranked {
-        stats.judge_by_months(&outcome.monthly);
-    }
+    stats.judge_by_months(&outcome.monthly);
     Ok(Run {
         stats,
-        trades,
         outcome,
         from,
         to,
@@ -303,13 +301,9 @@ pub fn run(
 }
 
 impl Run {
-    /// The returns its stages judge: each trade's (what it did to the
-    /// account) or, judged by months (ranked), each calendar month's.
+    /// The returns its stages judge: each calendar month's.
     pub fn returns(&self) -> Vec<f64> {
-        match self.stats.num_months {
-            Some(_) => self.outcome.monthly.clone(),
-            None => self.trades.iter().map(|t| t.pnl_percent).collect(),
-        }
+        self.outcome.monthly.clone()
     }
 }
 
@@ -664,23 +658,24 @@ mod tests {
         .unwrap();
 
         // Each market alone: one trade, held to the end, each a winner.
-        assert_eq!(run.trades.len(), 2);
-        assert!(run.trades.iter().all(|t| t.pnl_percent > 0.0));
+        assert_eq!(run.outcome.fills.len(), 2);
+        assert!(run.outcome.fills.iter().all(|f| f.account_return > 0.0));
         // Each trade's figure is what it did to the account: a 10% stop at
         // 1% risk takes a tenth of the account, so far less than the move.
         // (the first to close, on an untouched account).
         let first = &run.outcome.fills[0];
         assert_eq!(first.key, "AAA");
-        assert!((run.trades[0].pnl_percent - 0.1 * first.trade.pnl_percent).abs() < 1e-12);
-        assert!(run.trades[0].pnl_percent < first.trade.pnl_percent);
+        assert!((first.account_return - 0.1 * first.trade.pnl_percent).abs() < 1e-12);
+        assert!(first.account_return < first.trade.pnl_percent);
         assert!((run.stats.account_return - run.outcome.total_return).abs() < 1e-12);
 
         // Both drawdowns are the account's, valued every bar.
         assert_eq!(run.stats.max_drawdown, -run.outcome.max_drawdown);
         assert_eq!(run.stats.account_max_drawdown, -run.outcome.max_drawdown);
-        // Judged on its trades, not months.
-        assert_eq!(run.stats.num_months, None);
-        assert_eq!(run.returns().len(), 2);
+        // Judged on the account's months, not its pooled trades.
+        assert_eq!(run.stats.num_months, Some(run.outcome.monthly.len()));
+        assert_eq!(run.returns(), run.outcome.monthly);
+        assert_eq!(run.stats.num_trades, 2);
 
         let json = stats_json(&basket, Granularity::D, &run);
         assert_eq!(json["key"], "BASKET(AAA,BBB)@D");
@@ -820,7 +815,7 @@ mod tests {
         )
         .unwrap();
         // Both trades opened on day 4, before the holdout.
-        assert!(run.trades.is_empty());
+        assert!(run.outcome.fills.is_empty());
         assert_eq!(run.from, day(10));
         assert!(missing(&members, |c| c.time >= day(25)).is_some());
         assert!(missing(&members, |c| c.time >= day(10)).is_none());
@@ -904,7 +899,7 @@ mod tests {
             Window::Whole,
         )
         .unwrap();
-        assert!(!run.trades.is_empty());
+        assert!(!run.outcome.fills.is_empty());
         assert_monte_carlo_reads_the_daily_account(&run);
         // Its dips while positions are open show in the redrawn paths.
         assert!(run.outcome.daily_valued.iter().any(|r| *r < 0.0));

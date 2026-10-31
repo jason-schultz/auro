@@ -1,7 +1,7 @@
 defmodule Opus.Trading.Strategies do
   @moduledoc """
   The live strategies pages: every deployed strategy with what Opus knows
-  about it (the rules engine's verdict and regime inputs, an open circuit
+  about it (the rules engine's verdict, an open circuit
   breaker suspension, open trades, the last signal) and, for one strategy,
   its trades, its signal log, the candles behind its chart and, when the
   engine is reachable, the statistics and indicator scalars Rust computes.
@@ -203,26 +203,33 @@ defmodule Opus.Trading.Strategies do
   defp same_numbers(other), do: other
 
   @doc """
-  Where the recipe would have bought and sold over the last `count` bars of
+  Where the recipe would have bought and sold over the last 120 bars of
   `instrument`, shaped for a chart (`Opus.Trading.SignalChart`). Needs the
   engine, which also checks the rules: a recipe it can't read comes back
   as `{:error, reason}`.
+
+  `seen` is which bars: `:before_holdout` (the bars end at the holdout
+  date, for a recipe being designed, so it isn't tuned on what its
+  holdout will judge) or `:recent` (for pages watching a built strategy).
   """
-  @spec preview(map(), String.t(), String.t(), map() | nil, pos_integer()) ::
+  @spec preview(map(), String.t(), String.t(), map() | nil, :before_holdout | :recent) ::
           {:ok, map()} | {:error, term()}
-  def preview(definition, instrument, granularity, sizing, count \\ 120) do
+  def preview(definition, instrument, granularity, sizing, seen) do
     params = compose(definition, instrument, granularity, sizing || @default_sizing)
 
-    with {:ok, body} <- Client.signal_preview(params, count) do
+    with {:ok, body} <- Client.signal_preview(params, 120, seen == :recent) do
       {:ok, SignalChart.shape(body, definition, granularity)}
     end
   end
 
   @doc """
   How the strategy did over its whole test history against just holding the
-  instrument (`Opus.Auro.Client.strategy_report/1`): `%{points, summary}`
-  with each point `%{time, strategy, hold, drawdown}` (shares of one) and
-  the summary's returns, worst drops, time in the market and trade count.
+  instrument (`Opus.Auro.Client.strategy_report/1`), measured the same way:
+  the account at the strategy's sizing against holding, both compounded
+  daily, and holding scaled to the strategy's risk (`matched`). `%{points,
+  summary, years}`: each point `%{time, strategy, hold, matched,
+  drawdown}` (shares of one), the summary's returns, worst drops, Sharpes,
+  the risk scale and correlation, and each calendar year of the three.
   `{:ok, nil}` when there's no history to test on.
   """
   @spec report(map(), String.t(), String.t(), map() | nil) ::
@@ -230,12 +237,19 @@ defmodule Opus.Trading.Strategies do
   def report(definition, instrument, granularity, sizing) do
     params = compose(definition, instrument, granularity, sizing || @default_sizing)
 
-    with {:ok, %{"report" => report}} <- Client.strategy_report(params) do
-      {:ok, report && report_view(report)}
+    case Client.strategy_report(params) do
+      {:ok, %{"report" => nil}} -> {:ok, nil}
+      {:ok, %{"report" => %{"years" => _} = report}} -> {:ok, report_view(report)}
+      {:ok, %{"report" => _older}} -> {:error, :tester_outdated}
+      {:error, _} = error -> error
     end
   end
 
-  defp report_view(%{"points" => points, "summary" => s}) do
+  @summary ~w(strategy_return strategy_max_drawdown strategy_annual_sharpe hold_return
+              hold_max_drawdown hold_annual_sharpe matched_return matched_max_drawdown
+              risk_scale correlation time_in_market num_trades risk_pct)
+
+  defp report_view(%{"points" => points, "summary" => s, "years" => years}) do
     %{
       points:
         Enum.map(points, fn p ->
@@ -243,19 +257,18 @@ defmodule Opus.Trading.Strategies do
             time: parse_iso8601!(p["time"]),
             strategy: p["strategy"],
             hold: p["hold"],
+            matched: p["matched"],
             drawdown: p["drawdown"]
           }
         end),
-      summary: %{
-        strategy_return: s["strategy_return"],
-        hold_return: s["hold_return"],
-        strategy_max_drawdown: s["strategy_max_drawdown"],
-        hold_max_drawdown: s["hold_max_drawdown"],
-        time_in_market: s["time_in_market"],
-        num_trades: s["num_trades"],
-        from: parse_iso8601!(s["from"]),
-        to: parse_iso8601!(s["to"])
-      }
+      summary:
+        @summary
+        |> Map.new(&{String.to_existing_atom(&1), s[&1]})
+        |> Map.merge(%{from: parse_iso8601!(s["from"]), to: parse_iso8601!(s["to"])}),
+      years:
+        Enum.map(years, fn y ->
+          %{year: y["year"], strategy: y["strategy"], hold: y["hold"], matched: y["matched"]}
+        end)
     }
   end
 
@@ -420,7 +433,6 @@ defmodule Opus.Trading.Strategies do
       source: s["source"],
       backtest: s["backtest_stats"],
       oos: s["oos_stats"],
-      kfold: s["kfold_stats"],
       live: s["live_stats"]
     }
   end
@@ -474,42 +486,6 @@ defmodule Opus.Trading.Strategies do
     RulesEngine.recompute()
     {:ok, count}
   end
-
-  @doc """
-  The regime inputs a rule was decided on, as `{composite, frames}` where
-  each frame is `%{frame, regime, adx}`. Rows read back from the database
-  carry string keys.
-  """
-  @spec regime_summary(map() | nil) :: {String.t() | nil, [map()]}
-  def regime_summary(nil), do: {nil, []}
-
-  def regime_summary(inputs) when is_map(inputs) do
-    frames =
-      case fetch(inputs, :frames) do
-        list when is_list(list) ->
-          Enum.map(list, fn frame ->
-            %{
-              frame: fetch(frame, :frame),
-              regime: frame |> fetch(:regime) |> regime_name(),
-              adx: fetch(frame, :adx)
-            }
-          end)
-
-        _ ->
-          []
-      end
-
-    {inputs |> fetch(:composite) |> regime_name(), frames}
-  end
-
-  defp fetch(map, key) when is_map(map),
-    do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
-
-  defp fetch(_other, _key), do: nil
-
-  defp regime_name(nil), do: nil
-  defp regime_name(regime) when is_atom(regime), do: Atom.to_string(regime)
-  defp regime_name(regime), do: regime
 
   @doc """
   A strategy's parameters as the page explains them: the named components
@@ -654,16 +630,8 @@ defmodule Opus.Trading.Strategies do
     from(r in Rule, where: r.live_strategy_id in ^ids)
     |> Repo.all()
     |> Map.new(fn rule ->
-      {composite, frames} = regime_summary(rule.regime_inputs)
-
       {rule.live_strategy_id,
-       %{
-         enabled: rule.enabled,
-         reason: rule.reason,
-         computed_at: rule.computed_at,
-         composite: composite,
-         frames: frames
-       }}
+       %{enabled: rule.enabled, reason: rule.reason, computed_at: rule.computed_at}}
     end)
   end
 

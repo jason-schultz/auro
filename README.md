@@ -49,10 +49,8 @@ Two services share one PostgreSQL database:
 | **`opus/`** (Elixir: Phoenix 1.8, LiveView, Ecto, Oban) | The brain and the web app: every page, scheduling, the strategy builder and testing pipeline, account-level safety rules, options paper books, alerts, and every database migration | 4321 |
 
 Opus tells the engine what to do over HTTP; the engine never calls Opus. OANDA is
-the source of truth for trades. `auro_fe/` (Vue 3) is the older frontend and is
-**deprecated** (Oct 29, 2026): frozen, not built in CI, no new features. Opus serves the
-app. Two things still live only there, linking a Wealthsimple account and the pipeline
-status list, and move to Opus before the folder is removed.
+the source of truth for trades. Opus serves the app; the old Vue frontend
+(`auro_fe/`) was removed on Oct 31, 2026.
 
 `AGENTS.md` has the architecture rules; `research/` has the strategy research and
 design plans; `CHANGELOG.md` lists what changed.

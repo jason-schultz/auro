@@ -106,14 +106,29 @@ pub async fn load_recent_candles(
     granularity: Granularity,
     limit: i64,
 ) -> Result<Vec<Candle>, sqlx::Error> {
+    load_candles_before(pool, instrument, granularity, None, limit).await
+}
+
+/// The most recent `limit` complete candles that open before `before`
+/// (all of them when None), oldest first, stubs folded as in
+/// `load_recent_candles`.
+pub async fn load_candles_before(
+    pool: &PgPool,
+    instrument: &str,
+    granularity: Granularity,
+    before: Option<DateTime<Utc>>,
+    limit: i64,
+) -> Result<Vec<Candle>, sqlx::Error> {
     let rows: Vec<CandleDbRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {CANDLE_COLUMNS} FROM candles \
          WHERE instrument = $1 AND granularity = $2 AND complete = true \
+           AND ($4::timestamptz IS NULL OR timestamp < $4) \
          ORDER BY timestamp DESC LIMIT $3"
     )))
     .bind(instrument)
     .bind(granularity.as_str())
     .bind(limit)
+    .bind(before)
     .fetch_all(pool)
     .await?;
 

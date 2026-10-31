@@ -2,7 +2,6 @@
 # Mirrors CI checks for each service that has commits in this push.
 # Rust: fmt --check + clippy + tests
 # Elixir: fmt --check + compile warnings-as-errors + tests
-# Vue: bun test + test:views + build (includes vue-tsc type check)
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -20,11 +19,9 @@ while IFS=' ' read -r _local_ref local_sha _remote_ref remote_sha; do
 
   check_rust=false
   check_elixir=false
-  check_vue=false
 
   echo "$changed" | grep -q '^auro_be/' && check_rust=true || true
   echo "$changed" | grep -q '^opus/'    && check_elixir=true || true
-  echo "$changed" | grep -q '^auro_fe/' && check_vue=true || true
 
   # ── Rust ──────────────────────────────────────────────────────────────────
   if $check_rust; then
@@ -50,20 +47,6 @@ while IFS=' ' read -r _local_ref local_sha _remote_ref remote_sha; do
           mix compile --warnings-as-errors && \
           mix test); then
       echo "[pre-push] Elixir checks FAILED"
-      failed=1
-    fi
-  fi
-
-  # ── Vue ───────────────────────────────────────────────────────────────────
-  if $check_vue; then
-    echo ""
-    echo "=== [pre-push] Vue checks ==="
-    # bun run build includes vue-tsc type checking
-    if ! (cd "$REPO_ROOT/auro_fe" && \
-          bun test && \
-          bun run test:views && \
-          bun run build); then
-      echo "[pre-push] Vue checks FAILED"
       failed=1
     fi
   fi

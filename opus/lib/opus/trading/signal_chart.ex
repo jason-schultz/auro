@@ -1,6 +1,6 @@
 defmodule Opus.Trading.SignalChart do
   @moduledoc """
-  Shapes the engine's signal preview (`Opus.Auro.Client.signal_preview/2`)
+  Shapes the engine's signal preview (`Opus.Auro.Client.signal_preview/3`)
   for a chart: the candles, each trade the rules would have made with its
   buy and sell markers, and one strip per rule showing the bars it was
   true on, so a page can show why each signal fired.

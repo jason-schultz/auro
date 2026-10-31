@@ -207,6 +207,7 @@ defmodule OpusWeb.BasketLiveTest do
         }
       ],
       "basket" => %{
+        "mode" => "ranked",
         "from" => "2016-01-01T21:00:00Z",
         "to" => "2018-07-01T21:00:00Z",
         "annual_return" => 0.11,

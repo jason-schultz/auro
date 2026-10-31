@@ -25,36 +25,72 @@ use super::format_price;
 use super::sizing::{size_entry, SizedEntry};
 use crate::engine::types::CandleBuffer;
 
-fn parse_trade_realized_pl(transaction: &serde_json::Value, trade_id: &str) -> Option<f64> {
+/// What OANDA booked for a closed trade, in the account's currency
+/// (`tradesClosed` on the closing fill): its price P&L and the financing it
+/// ran up while open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Booked {
+    realized_pl: f64,
+    financing: f64,
+}
+
+impl Booked {
+    /// The money it made or lost, financing included.
+    fn net(self) -> f64 {
+        self.realized_pl + self.financing
+    }
+
+    /// `price_return` (the move from entry to fill) with the financing
+    /// taken off, so a live trade's return means what a backtest trade's
+    /// does (`financing::apply_costs`). OANDA's price P&L is the units times
+    /// the move times the quote-to-account rate, so the financing as a share
+    /// of the position is the price return times financing / price P&L. A
+    /// trade that closed exactly at its entry has no price P&L to scale
+    /// by; its return stays the move (0), its financing only in the money.
+    fn net_return(self, price_return: f64) -> f64 {
+        match self.realized_pl != 0.0 {
+            true => price_return * (1.0 + self.financing / self.realized_pl),
+            false => price_return,
+        }
+    }
+}
+
+fn parse_trade_close(transaction: &serde_json::Value, trade_id: &str) -> Option<Booked> {
     let closed = transaction.get("tradesClosed")?.as_array()?;
+    let number = |entry: &serde_json::Value, key: &str| {
+        entry
+            .get(key)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+    };
     closed.iter().find_map(|entry| {
         let id = entry.get("tradeID").and_then(|v| v.as_str())?;
         if id != trade_id {
             return None;
         }
-        entry
-            .get("realizedPL")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<f64>().ok())
+        Some(Booked {
+            realized_pl: number(entry, "realizedPL")?,
+            financing: number(entry, "financing").unwrap_or(0.0),
+        })
     })
 }
 
-async fn extract_realized_pl(
+async fn extract_booked(
     oanda: &OandaClient,
     close_response: &serde_json::Value,
     trade_id: &str,
-) -> Option<f64> {
+) -> Option<Booked> {
     if let Some(fill_tx) = close_response.get("orderFillTransaction") {
-        if let Some(pl) = parse_trade_realized_pl(fill_tx, trade_id) {
-            return Some(pl);
+        if let Some(booked) = parse_trade_close(fill_tx, trade_id) {
+            return Some(booked);
         }
 
         if let Some(tx_id) = fill_tx.get("id").and_then(|v| v.as_str()) {
             match oanda.get_transaction(tx_id).await {
                 Ok(tx_resp) => {
                     let tx = tx_resp.get("transaction").unwrap_or(&tx_resp);
-                    if let Some(pl) = parse_trade_realized_pl(tx, trade_id) {
-                        return Some(pl);
+                    if let Some(booked) = parse_trade_close(tx, trade_id) {
+                        return Some(booked);
                     }
                 }
                 Err(e) => tracing::warn!(
@@ -982,10 +1018,14 @@ async fn evaluate_exit(
         };
 
         let fill_price = exit_fill_price(&state.oanda, &resp, &pos.trade_id).await;
-        let realized_pl = extract_realized_pl(&state.oanda, &resp, &pos.trade_id).await;
-        let pnl = fill_price.map(|fill| match pos.direction {
-            Direction::Long => (fill - pos.entry_price) / pos.entry_price,
-            Direction::Short => (pos.entry_price - fill) / pos.entry_price,
+        let booked = extract_booked(&state.oanda, &resp, &pos.trade_id).await;
+        let realized_pl = booked.map(Booked::net);
+        let pnl = fill_price.map(|fill| {
+            let moved = match pos.direction {
+                Direction::Long => (fill - pos.entry_price) / pos.entry_price,
+                Direction::Short => (pos.entry_price - fill) / pos.entry_price,
+            };
+            booked.map_or(moved, |b| b.net_return(moved))
         });
 
         match (fill_price, pnl) {
@@ -1052,6 +1092,30 @@ async fn evaluate_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_closed_trades_return_and_money_are_net_of_financing() {
+        let tx = serde_json::json!({"tradesClosed": [
+            {"tradeID": "7", "realizedPL": "200.00", "financing": "-10.00"},
+            {"tradeID": "8", "realizedPL": "1.00"},
+        ]});
+        let booked = parse_trade_close(&tx, "7").unwrap();
+        assert_eq!(booked.net(), 190.0);
+        // +2% on the price; financing was 5% of the price P&L, so 0.1% of
+        // the position.
+        assert!((booked.net_return(0.02) - 0.019).abs() < 1e-12);
+        // No financing field: nothing taken off.
+        let plain = parse_trade_close(&tx, "8").unwrap();
+        assert_eq!(plain.net_return(0.01), 0.01);
+        // Closed at its entry: no price P&L to scale by.
+        let flat = Booked {
+            realized_pl: 0.0,
+            financing: -3.0,
+        };
+        assert_eq!(flat.net_return(0.0), 0.0);
+        assert_eq!(flat.net(), -3.0);
+        assert_eq!(parse_trade_close(&tx, "9"), None);
+    }
 
     use axum::extract::State;
     use axum::routing::{get, post, put};

@@ -136,28 +136,39 @@ pub(crate) async fn finalize_evaluation(
     Ok(())
 }
 
-/// How many configs with this instrument and strategy type have had a holdout
-/// evaluation, including any in progress. Every look at the sealed window by
-/// a sibling candidate weakens what a pass there proves. A basket's
-/// siblings are configs on the same `basket_markets` (its `instrument` is
-/// its first market); a one-market config's are other one-market configs.
-pub(crate) async fn count_holdout_looks(
+/// A config that has looked at the sealed window (`holdout_look_configs`).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct HoldoutLook {
+    pub strategy_type: String,
+    pub granularity: String,
+    pub parameters: Value,
+}
+
+/// Every config on this market (`instrument` alone, or a basket's
+/// `basket_markets`; its `instrument` is its first market) that has had a
+/// holdout evaluation on the window starting `holdout_start` (ISO date),
+/// including any in progress (no stats yet). Every look at the sealed
+/// window weakens what a pass there proves (`pipeline::holdout_looks`
+/// counts the distinct ones).
+pub(crate) async fn holdout_look_configs(
     pool: &PgPool,
     instrument: &str,
-    strategy_type: &str,
     basket_markets: Option<&[String]>,
-) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT COUNT(*)::BIGINT \
+    holdout_start: &str,
+) -> Result<Vec<HoldoutLook>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT c.strategy_type, c.granularity, c.parameters \
          FROM strategy_evaluations e \
          JOIN strategy_configs c ON c.id = e.strategy_config_id \
-         WHERE e.stage = 'holdout' AND c.instrument = $1 AND c.strategy_type = $2 \
-           AND c.parameters->'basket'->'markets' IS NOT DISTINCT FROM $3",
+         WHERE e.stage = 'holdout' AND c.instrument = $1 \
+           AND c.parameters->'basket'->'markets' IS NOT DISTINCT FROM $2 \
+           AND (e.stats IS NULL OR e.stats->>'holdout_start' IS NULL \
+                OR e.stats->>'holdout_start' = $3)",
     )
     .bind(instrument)
-    .bind(strategy_type)
     .bind(basket_markets.map(|m| serde_json::json!(m)))
-    .fetch_one(pool)
+    .bind(holdout_start)
+    .fetch_all(pool)
     .await
 }
 

@@ -259,8 +259,9 @@ defmodule Opus.Trading.Reconciler do
       {:error, :zero_exit_price}
     else
       realized_pl = Number.parse_float(close_tx["realized_pl"], 0.0)
+      financing = Number.parse_float(close_tx["financing"], 0.0)
       exit_reason = transaction_reason_to_label(close_tx["reason"])
-      pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl)
+      pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl, financing)
 
       Logger.debug(
         "[Reconciler] Trade #{trade.oanda_trade_id}: recovered close from transactions — " <>
@@ -289,6 +290,7 @@ defmodule Opus.Trading.Reconciler do
   defp extract_close_details(trade, %{"state" => "CLOSED"} = trade_data) do
     exit_price = Number.parse_float(trade_data["averageClosePrice"], 0.0)
     realized_pl = Number.parse_float(trade_data["realizedPL"], 0.0)
+    financing = Number.parse_float(trade_data["financing"], 0.0)
     exit_reason = determine_exit_reason(trade_data)
 
     if exit_price <= 0.0 do
@@ -301,7 +303,7 @@ defmodule Opus.Trading.Reconciler do
 
       {:error, :zero_exit_price}
     else
-      pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl)
+      pnl = compute_pnl(trade.direction, trade.entry_price, exit_price, realized_pl, financing)
       sl_state = infer_stop_loss_state(trade, trade_data)
 
       Logger.debug(
@@ -333,9 +335,20 @@ defmodule Opus.Trading.Reconciler do
   # OANDA's RFC 3339 close time (nanosecond digits), or nil.
   defp close_time(at), do: Opus.Utils.Time.parse_iso8601(at)
 
-  defp compute_pnl("Long", entry, exit_price, _realized), do: (exit_price - entry) / entry
-  defp compute_pnl("Short", entry, exit_price, _realized), do: (entry - exit_price) / entry
-  defp compute_pnl(_, entry, _exit_price, realized), do: Number.safe_divide(realized, entry)
+  # The trade's return net of the financing it ran up, as a backtest trade's
+  # is: the move from entry to exit, less financing as a share of the
+  # position. OANDA's price P&L is units × move × the quote-to-account rate,
+  # so that share is the move × financing / price P&L (the engine does the
+  # same for trades it closes, `evaluator::Booked::net_return`). A trade
+  # closed exactly at its entry has no price P&L to scale by and keeps 0.
+  defp compute_pnl(direction, entry, exit_price, realized, financing) do
+    moved = price_return(direction, entry, exit_price, realized)
+    if realized == 0, do: moved, else: moved * (1 + financing / realized)
+  end
+
+  defp price_return("Long", entry, exit_price, _realized), do: (exit_price - entry) / entry
+  defp price_return("Short", entry, exit_price, _realized), do: (entry - exit_price) / entry
+  defp price_return(_, entry, _exit_price, realized), do: Number.safe_divide(realized, entry)
 
   # Infers the trade-management stop-loss state that was active at the moment
   # OANDA closed the trade. Mirrors the Initial / Breakeven / Trailing /

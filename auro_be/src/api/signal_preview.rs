@@ -10,6 +10,11 @@
 //! bar's OHLC, every component port's value on it (`"r.long": true`), so a
 //! page can show which rule was true on which bar, and every component's
 //! chart values (`"r.rsi": 23.4`, `"t.ma": 5601.2`) to draw the indicators.
+//!
+//! The window ends at the holdout date (`pipeline::load_holdout_start`)
+//! unless the request asks for `through_holdout`: a recipe being designed
+//! must not be tuned on the bars its one holdout look will judge. Pages
+//! watching a built strategy ask for the recent bars.
 
 use std::sync::Arc;
 
@@ -21,6 +26,7 @@ use serde_json::{json, Value};
 
 use crate::db::repositories::candles as candles_repo;
 use crate::db::repositories::financing as financing_repo;
+use crate::engine::pipeline;
 use crate::engine::strategy::{bounded_window, run_backtest, Strategy};
 use crate::engine::types::{Candle, Direction, ExitReason};
 use crate::error::{AppError, AppResult};
@@ -32,6 +38,10 @@ pub struct SignalPreviewRequest {
     pub parameters: Value,
     /// How many recent bars to scan for signals (chart window size).
     pub count: Option<i64>,
+    /// Show bars from the holdout window too. Off by default: the window
+    /// ends before the holdout.
+    #[serde(default)]
+    pub through_holdout: bool,
 }
 
 pub async fn preview_signals(
@@ -52,10 +62,16 @@ pub async fn preview_signals(
     let count = req.count.unwrap_or(300).clamp(10, 1000);
     let warmup = strategy.warmup() as i64;
 
-    let candles = candles_repo::load_recent_candles(
+    let before = match req.through_holdout {
+        true => None,
+        false => Some(pipeline::load_holdout_start(&state.db).await?),
+    };
+
+    let candles = candles_repo::load_candles_before(
         &state.db,
         &strategy.instrument,
         strategy.granularity,
+        before,
         (count + warmup).min(5000),
     )
     .await?;

@@ -45,14 +45,7 @@ defmodule Opus.Trading.StrategiesTest do
       live_strategy_id: @enabled_id,
       enabled: false,
       reason: "uncertain MR disabled (fail-closed) — H4:24.6 H1:39.4",
-      computed_at: now,
-      regime_inputs: %{
-        "composite" => "uncertain",
-        "frames" => [
-          %{"frame" => "H4", "regime" => "uncertain", "adx" => 24.63},
-          %{"frame" => "H1", "regime" => "trending", "adx" => 39.44}
-        ]
-      }
+      computed_at: now
     })
 
     Repo.insert!(%Suspension{
@@ -99,8 +92,6 @@ defmodule Opus.Trading.StrategiesTest do
     assert enabled.id == @enabled_id
     assert enabled.name == "Index RSI(2) dip-buy"
     assert enabled.rule.enabled == false
-    assert enabled.rule.composite == "uncertain"
-    assert [%{frame: "H4", adx: 24.63}, %{frame: "H1", regime: "trending"}] = enabled.rule.frames
     assert enabled.open_trades == 1
     assert enabled.last_signal.action == "entry_rejected"
     assert enabled.suspension == nil
@@ -119,17 +110,6 @@ defmodule Opus.Trading.StrategiesTest do
 
     assert Repo.one(from(s in Suspension, select: s.cleared_by)) == "manual"
     assert [%{suspension: nil}] = Enum.filter(Strategies.list(), &(&1.id == @held_id))
-  end
-
-  test "regime_summary/1 reads string or atom keys and tolerates missing inputs" do
-    assert Strategies.regime_summary(nil) == {nil, []}
-    assert Strategies.regime_summary(%{}) == {nil, []}
-
-    assert {"trending", [%{frame: "H4", regime: "trending", adx: 51.0}]} =
-             Strategies.regime_summary(%{
-               composite: :trending,
-               frames: [%{frame: "H4", regime: :trending, adx: 51.0}]
-             })
   end
 
   test "stats/0 reports the engine as unreachable instead of raising" do

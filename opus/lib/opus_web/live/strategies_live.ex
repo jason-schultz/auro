@@ -117,7 +117,8 @@ defmodule OpusWeb.StrategiesLive do
              recipe.definition,
              first.instrument,
              recipe.granularity,
-             first.sizing_params
+             first.sizing_params,
+             :recent
            )}
         end)
     end
@@ -376,13 +377,7 @@ defmodule OpusWeb.StrategiesLive do
       phx-click="filter"
       phx-value-to={@to}
       aria-pressed={to_string(@filter == @to)}
-      class={[
-        "min-h-11 rounded-full border px-4 text-[14px]",
-        if(@filter == @to,
-          do: "border-primary bg-primary/10 font-medium",
-          else: "border-base-300 text-muted hover:text-base-content"
-        )
-      ]}
+      class={chip_class(@filter == @to)}
     >
       <.t {@label} /> · {@count}
     </button>

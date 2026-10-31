@@ -112,7 +112,9 @@ defmodule OpusWeb.StrategyParts do
         />
       </dd>
       <dt class="text-muted">Holdout</dt>
-      <dd class="m-0"><.stage stage={@results.holdout} /></dd>
+      <dd class="m-0">
+        <.stage stage={@results.holdout} line={holdout_line(@results.holdout)} />
+      </dd>
       <%= if @results[:live] do %>
         <dt class="text-muted"><.t {copy("Live (forward)")} /></dt>
         <dd class="m-0">{live_words(@results.live)}</dd>
@@ -120,7 +122,7 @@ defmodule OpusWeb.StrategyParts do
     </dl>
     <p class="m-0 text-[12px] text-muted">
       <.t {copy(
-        "Account figures size each trade the way it would trade live, at the risk shown, and compound them. \"Trades added up\" is each trade's price move summed as if every trade used the whole account: the pass marks were set on it, so it stays, named for what it is. The Together page shows several strategies on one account."
+        "Account figures size each trade the way it would trade live, at the risk shown, and compound them; the tests use at least 1% a trade, so a smaller setting can't make the drops look smaller. \"Trades added up\" is each trade's price move summed as if every trade used the whole account: the return and luck marks read it, so it stays, named for what it is. The Together page shows several strategies on one account."
       )} />
     </p>
     """
@@ -466,6 +468,8 @@ defmodule OpusWeb.StrategyParts do
     "num_months" => {"Months of results", :count},
     "t_stat" => {"Luck test (t)", :number},
     "max_drawdown" => {"Worst drop, trades added up", :share},
+    "annual_sharpe_after_looks" =>
+      {"Sharpe (a year), less the luck allowance for other looks at the holdout", :number},
     "total_return" => {"Trades added up (whole account each)", :share},
     "account_return" => {"Account growth", :share},
     "account_max_drawdown" => {"Account's worst drop", :share},
@@ -490,7 +494,8 @@ defmodule OpusWeb.StrategyParts do
     "median_sharpe" => {"Median Sharpe per trade", :number},
     "deflated_sharpe" => {"Chance it isn't luck from trying many versions", :share},
     "worst_sharpe_retention" => {"Sharpe kept at the worst nearby setting", :share},
-    "worst_total_return" => {"Trades added up at the worst nearby setting", :share}
+    "worst_total_return" => {"Trades added up at the worst nearby setting", :share},
+    "profitable_years" => {"Years it made money in, of the years it traded", :share}
   }
 
   @operators %{"gte" => "at least", "gt" => "more than", "lte" => "at most", "lt" => "less than"}
@@ -513,9 +518,10 @@ defmodule OpusWeb.StrategyParts do
   defp valued_every_close?(_metric, _stats), do: false
 
   # Monte Carlo's figures since it reshuffles the daily account
-  # (`mc_method`): the drop is the account's at its own sizing.
+  # (`mc_method`): the drop is the account's at its risk a trade (at least
+  # 1% since rules v5).
   defp mc_label("p95_drawdown", %{"mc_method" => "daily_block_bootstrap"}),
-    do: "Bad-run drop (1 in 20), account at its sizing, valued daily"
+    do: "Bad-run drop (1 in 20), account at its risk a trade, valued daily"
 
   defp mc_label("profitable_pct", %{"mc_method" => "daily_block_bootstrap"}),
     do: "Reshuffled daily histories that made money"
@@ -527,17 +533,17 @@ defmodule OpusWeb.StrategyParts do
   defp value(v, :share), do: pct(v)
   defp value(v, :number), do: num(v)
 
-  # A ranked basket is judged on months of results; its few long-held
-  # positions are context. The drop is the account's, valued at every close.
+  # A basket is judged on its account's months of results; its trades are
+  # context. The drop is the account's, valued at every close.
   defp backtest_line(%{
          stats: %{"judged_on" => "months", "account_return" => acc, "num_months" => m} = s
        }),
        do:
          copy(
-           "Account %{account} over %{months} months of results (%{count} positions held across re-ranks); its worst drop, valued at every close, %{account_drop}",
+           "Account %{account} over %{months} months of results (%{held}); its worst drop, valued at every close, %{account_drop}",
            account: signed_pct(acc),
            months: m,
-           count: s["num_trades"],
+           held: held_words(s),
            account_drop: pct(s["account_max_drawdown"])
          )
 
@@ -571,6 +577,37 @@ defmodule OpusWeb.StrategyParts do
       )
 
   defp backtest_line(_), do: nil
+
+  @doc """
+  A basket's trades, beside the months it's judged on: a ranked basket's
+  are positions held across re-ranks.
+  """
+  def held_words(%{"basket" => %{"mode" => "ranked"}, "num_trades" => n}),
+    do: "#{n} positions held across re-ranks"
+
+  def held_words(%{"num_trades" => n}), do: "#{n} trades"
+
+  # The holdout's Sharpe and, when other tries of the idea looked at the
+  # same window, what luck alone would add to the best of them.
+  defp holdout_line(%{
+         stats: %{"annual_sharpe" => sharpe, "holdout_luck_allowance" => allowance} = s
+       })
+       when allowance > 0,
+       do:
+         "Sharpe (a year) #{num(sharpe)} over #{s["num_trades"]} trades from " <>
+           "#{since(s["holdout_start"])}. #{s["holdout_looks"]} versions of this idea have looked at " <>
+           "this stretch, so #{num(allowance)} of that could be luck: " <>
+           "#{num(s["annual_sharpe_after_looks"])} after it"
+
+  defp holdout_line(%{stats: %{"annual_sharpe" => sharpe, "holdout_start" => from} = s}),
+    do:
+      "Sharpe (a year) #{num(sharpe)} over #{s["num_trades"]} trades from #{since(from)}, " <>
+        "the first look at this stretch"
+
+  defp holdout_line(_), do: nil
+
+  # The holdout's ISO start date in words.
+  defp since(iso), do: iso |> Date.from_iso8601!() |> Calendar.strftime("%b %-d, %Y")
 
   @doc """
   The costs a backtest charged, in words (its `costs`, recorded since the
@@ -730,7 +767,7 @@ defmodule OpusWeb.StrategyParts do
     do:
       "stretches of its daily account results reshuffled at random #{num(s["num_sims"], 0)} " <>
         "times: #{pct(s["profitable_pct"])} of those histories made money, and a bad run " <>
-        "(1 in 20) falls #{pct(s["p95_drawdown"])} at its own sizing, open trades valued each day"
+        "(1 in 20) falls #{pct(s["p95_drawdown"])} at its risk a trade, open trades valued each day"
 
   defp monte_carlo_line(%{
          stats: %{"judged_on" => "months", "p95_drawdown" => dd, "profitable_pct" => made} = s

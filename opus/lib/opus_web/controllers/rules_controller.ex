@@ -2,7 +2,7 @@ defmodule OpusWeb.RulesController do
   use OpusWeb, :controller
 
   alias Opus.Repo
-  alias Opus.Trading.{LiveStrategy, Rule, Strategies}
+  alias Opus.Trading.{LiveStrategy, Rule}
 
   import Ecto.Query
 
@@ -26,7 +26,6 @@ defmodule OpusWeb.RulesController do
           rules_enabled: coalesce(r.enabled, false),
           reason: coalesce(r.reason, "no decision yet"),
           computed_at: r.computed_at,
-          regime_inputs: r.regime_inputs,
           max_computed_at: fragment("MAX(?) OVER ()", r.computed_at)
         }
       )
@@ -45,8 +44,6 @@ defmodule OpusWeb.RulesController do
   end
 
   defp to_strategy_row(row) do
-    {composite_regime, frames} = Strategies.regime_summary(row.regime_inputs)
-
     %{
       live_strategy_id: row.live_strategy_id,
       instrument: row.instrument,
@@ -54,9 +51,7 @@ defmodule OpusWeb.RulesController do
       strategy_type: row.strategy_type,
       rules_enabled: row.rules_enabled,
       reason: row.reason,
-      computed_at: row.computed_at,
-      composite_regime: composite_regime,
-      frames: frames
+      computed_at: row.computed_at
     }
   end
 end

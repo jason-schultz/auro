@@ -139,10 +139,12 @@ defmodule OpusWeb.StrategyBuilderLive do
   defp preview(socket) do
     %{instrument: instrument, form: %{"granularity" => granularity}} = socket.assigns
 
+    testable = Recipes.testable(instrument, granularity)
+
     socket =
       assign(socket,
-        untestable: untestable(instrument, granularity),
-        loadable: loadable(instrument, granularity)
+        untestable: untestable(testable, instrument, granularity),
+        loadable: loadable(testable, instrument)
       )
 
     if connected?(socket) do
@@ -154,7 +156,7 @@ defmodule OpusWeb.StrategyBuilderLive do
       |> assign(fragility: :idle)
       |> schedule_report()
       |> start_async(:preview, fn ->
-        Strategies.preview(definition, instrument, granularity, nil)
+        Strategies.preview(definition, instrument, granularity, nil, seen(testable))
       end)
     else
       socket
@@ -176,18 +178,24 @@ defmodule OpusWeb.StrategyBuilderLive do
     assign(socket, report: :loading, report_ref: ref)
   end
 
+  # Which bars the preview shows. A recipe being designed sees only bars from
+  # before the holdout, so it isn't tuned on what its holdout look will judge;
+  # an instrument with no history before the holdout can't be tested on this
+  # window at all, so its recent bars are safe to show.
+  defp seen({:error, {:no_history, _first, _holdout}}), do: :recent
+  defp seen(_testable), do: :before_holdout
+
   # The instrument, when all it lacks to be tested is dividends that can be
   # loaded: the Load dividends button shows.
-  defp loadable(instrument, granularity) do
-    with {:error, {:no_dividends, _}} <- Recipes.testable(instrument, granularity),
-         true <- Opus.Instruments.dividend_source?(instrument),
-         do: instrument,
-         else: (_ -> nil)
+  defp loadable({:error, {:no_dividends, _}}, instrument) do
+    if Opus.Instruments.dividend_source?(instrument), do: instrument
   end
 
+  defp loadable(_testable, _instrument), do: nil
+
   # Why the tests can't run on this instrument, in words, or nil.
-  defp untestable(instrument, granularity) do
-    case Recipes.testable(instrument, granularity) do
+  defp untestable(testable, instrument, granularity) do
+    case testable do
       :ok ->
         nil
 
@@ -502,7 +510,11 @@ defmodule OpusWeb.StrategyBuilderLive do
          |> put_flash(
            :error,
            "Saved as a draft. " <>
-             untestable(socket.assigns.instrument, socket.assigns.form["granularity"])
+             untestable(
+               {:error, untestable},
+               socket.assigns.instrument,
+               socket.assigns.form["granularity"]
+             )
          )
          |> push_navigate(to: ~p"/strategies")}
 
@@ -542,8 +554,8 @@ defmodule OpusWeb.StrategyBuilderLive do
     Enum.join([started_words | refused_words])
   end
 
-  defp refusal({:no_history, _first, _holdout}, instrument, granularity),
-    do: untestable(instrument, granularity)
+  defp refusal({:no_history, _first, _holdout} = why, instrument, granularity),
+    do: untestable({:error, why}, instrument, granularity)
 
   defp refusal({kind, _names} = why, _instrument, _granularity)
        when kind in [:no_broker, :no_dividends],

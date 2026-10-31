@@ -11,6 +11,7 @@ use crate::db::repositories::financing as financing_repo;
 use crate::db::repositories::live_strategies as live_strategies_repo;
 use crate::db::repositories::pipeline as pipeline_repo;
 use crate::engine::buy_and_hold::{self, Hold};
+use crate::engine::candle_holes;
 use crate::engine::financing::{apply_costs, FinancingModel, Overnight};
 use crate::engine::stats::{
     backtest_on_account, calculate_backtest_stats, AccountSizing, BacktestStats,
@@ -53,7 +54,21 @@ mod parameter_stability;
 ///   inside a day counts in its drawdowns as in the backtest's; a basket's
 ///   walk-forward unseen part warms up on the bars before it (a ranking
 ///   rebalancing from the split), as the holdout does.
-pub const RULES_VERSION: i32 = 3;
+/// - 4: Oct 31 2026: the backtest needs the account to have made money in
+///   at least 60% of the calendar years it traded (`profitable_years`), so
+///   one big year can't carry a pass.
+/// - 5: Oct 31 2026 (Fable review): every drawdown judged is the account's
+///   (`account_max_drawdown` replaces the trades-added-up `max_drawdown`
+///   gate, so one market and a basket meet one bar), at the strategy's risk
+///   a trade but never under 1% (`judged_sizing`), so a lower risk setting
+///   can't buy a pass; a together basket is judged on its account's
+///   calendar months, not its pooled trades, which overlap across markets;
+///   the holdout's Sharpe bar is read after a luck allowance for every
+///   other look of the same idea at the window (`annual_sharpe_after_looks`),
+///   and re-testing the same recipe is no longer counted as another look;
+///   a history with more than 6 weekdays in a row missing is refused
+///   (`candle_holes`) until it's backfilled.
+pub const RULES_VERSION: i32 = 5;
 
 #[derive(Clone)]
 pub struct StrategyConfig {
@@ -255,13 +270,30 @@ pub(crate) fn account_sizing(config: &StrategyConfig) -> AppResult<AccountSizing
     Ok(AccountSizing::of(&sizing))
 }
 
+/// The least risk a trade the tests judge a strategy at.
+pub const JUDGED_MIN_RISK_PCT: f64 = 0.01;
+
+/// How the tests size `config`'s trades: its own sizing, but never under
+/// `JUDGED_MIN_RISK_PCT` a trade. Every drawdown a test judges is the
+/// account's at this sizing, and halving the risk halves them all, so a
+/// strategy can't pass the drawdown checks by being set to risk less; one
+/// set to risk more is judged at what it risks. The strategy's own sizing
+/// stays what it trades and what the report shows (`account_sizing`).
+pub(crate) fn judged_sizing(config: &StrategyConfig) -> AppResult<AccountSizing> {
+    let own = account_sizing(config)?;
+    Ok(AccountSizing {
+        risk_pct: own.risk_pct.max(JUDGED_MIN_RISK_PCT),
+        ..own
+    })
+}
+
 pub fn run_backtest_stats(
     candles: &[Candle],
     config: &StrategyConfig,
     active_start_idx: Option<usize>,
     financing: &FinancingModel,
 ) -> AppResult<BacktestStats> {
-    let sizing = account_sizing(config)?;
+    let sizing = judged_sizing(config)?;
     if candles.is_empty() {
         return Ok(calculate_backtest_stats(&[], candles, sizing));
     }
@@ -677,11 +709,11 @@ async fn load_subject(
                 .map_err(AppError::Database)?
         };
         let financing = load_financing(pool).await?;
-        return Ok(Ok(Subject::One(from_known_dividends(
-            candles,
-            &config.instrument,
-            &financing,
-        ))));
+        let candles = from_known_dividends(candles, &config.instrument, &financing);
+        if let Some(words) = candle_holes::refusal(&config.instrument, &candles) {
+            return Ok(Err(words));
+        }
+        return Ok(Ok(Subject::One(candles)));
     };
     let before = match sealed {
         true => Some(load_holdout_start(pool).await?),
@@ -693,6 +725,12 @@ async fn load_subject(
     for member in &mut members {
         let candles = std::mem::take(&mut member.candles);
         member.candles = from_known_dividends(candles, &member.market, &financing);
+    }
+    if let Some(words) = members
+        .iter()
+        .find_map(|m| candle_holes::refusal(&m.market, &m.candles))
+    {
+        return Ok(Err(words));
     }
     if let Some(missing) = basket::missing(&members, |_| true) {
         return Ok(Err(format!(
@@ -711,10 +749,13 @@ async fn load_subject(
 }
 
 impl Subject {
-    /// Just holding the same funds over the same bars
-    /// (`buy_and_hold::hold`), for a result on shares held outright: the
-    /// benchmark a long-only rule there has to beat. None for anything
-    /// else (a CFD held long pays financing, so holding isn't free).
+    /// Just holding the same markets over the same bars
+    /// (`buy_and_hold::hold`). For shares held outright, with their
+    /// dividends: the benchmark a long-only rule there has to beat (its
+    /// Monte Carlo is judged on it). For anything else (a CFD), the price
+    /// alone, as a person would hold the index or metal through a fund
+    /// rather than pay a CFD's overnight cost: shown beside the result,
+    /// never judged.
     fn hold(&self, instrument: &str, financing: &FinancingModel) -> Option<Hold> {
         let funds: Vec<(&str, &[Candle])> = match self {
             Subject::One(candles) => vec![(instrument, candles.as_slice())],
@@ -723,15 +764,16 @@ impl Subject {
                 .map(|m| (m.market.as_str(), m.candles.as_slice()))
                 .collect(),
         };
-        if !funds
-            .iter()
-            .all(|(market, _)| financing.owns_shares(market))
-        {
-            return None;
-        }
         let with_dividends: Vec<buy_and_hold::Fund> = funds
             .iter()
-            .map(|(market, candles)| (*candles, financing.dividends(market)))
+            .map(|(market, candles)| {
+                let paid = if financing.owns_shares(market) {
+                    financing.dividends(market)
+                } else {
+                    &[]
+                };
+                (*candles, paid)
+            })
             .collect();
         buy_and_hold::hold(&with_dividends)
     }
@@ -750,6 +792,17 @@ impl Subject {
         match self {
             Subject::One(candles) => candles,
             Subject::Basket(_, members) => members.first().map_or(&[], |m| &m.candles),
+        }
+    }
+
+    /// When its newest bar opens (a basket's: its latest market's).
+    fn last_bar(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Subject::One(candles) => candles.last().map(|c| c.time),
+            Subject::Basket(_, members) => members
+                .iter()
+                .filter_map(|m| m.candles.last().map(|c| c.time))
+                .max(),
         }
     }
 
@@ -776,7 +829,7 @@ impl Subject {
                     Part::InSample => &candles[..split],
                     Part::OutOfSample => &candles[split..],
                 };
-                let sizing = account_sizing(config).map_err(|e| e.to_string())?;
+                let sizing = judged_sizing(config).map_err(|e| e.to_string())?;
                 let mut trades =
                     run_strategy(bars, config, financing).map_err(|e| e.to_string())?;
                 let counted = match part {
@@ -982,6 +1035,7 @@ pub async fn run_holdout(pool: &PgPool, config: &StrategyConfig) -> AppResult<Ev
         return fail_stage(pool, evaluation_id, failure).await;
     }
     let basket_markets = subject.basket_markets();
+    let last_bar = subject.last_bar();
 
     let financing = load_financing(pool).await?;
     let job = config.clone();
@@ -992,18 +1046,28 @@ pub async fn run_holdout(pool: &PgPool, config: &StrategyConfig) -> AppResult<Ev
             Ok(tested) => tested,
             Err(failure) => return fail_stage(pool, evaluation_id, failure).await,
         };
-    let looks = pipeline_repo::count_holdout_looks(
+    let window = holdout_start.format("%Y-%m-%d").to_string();
+    let looked = pipeline_repo::holdout_look_configs(
         pool,
         &config.instrument,
-        &config.strategy_type,
         basket_markets.as_deref(),
+        &window,
     )
     .await
     .map_err(AppError::Database)?;
+    let looks = holdout_looks(config, &looked);
+    let years = last_bar.map_or(0.0, |last| {
+        (last - holdout_start).num_seconds() as f64 / SECONDS_A_YEAR
+    });
+    let allowance = holdout_luck_allowance(looks.effective, years);
 
     let mut stats_json = backtest_stats_to_json(&tested.stats);
-    stats_json["holdout_start"] = serde_json::json!(holdout_start.format("%Y-%m-%d").to_string());
-    stats_json["holdout_looks"] = serde_json::json!(looks);
+    stats_json["holdout_start"] = serde_json::json!(window);
+    stats_json["holdout_looks"] = serde_json::json!(looks.settings);
+    stats_json["holdout_looks_effective"] = serde_json::json!(looks.effective);
+    stats_json["holdout_luck_allowance"] = serde_json::json!(allowance);
+    stats_json["annual_sharpe_after_looks"] =
+        serde_json::json!(tested.stats.annual_sharpe - allowance);
     if let Some(extra) = tested.basket {
         stats_json["basket"] = extra;
     }
@@ -1014,11 +1078,60 @@ pub async fn run_holdout(pool: &PgPool, config: &StrategyConfig) -> AppResult<Ev
         instrument = %config.instrument,
         granularity = %config.granularity,
         status = %result.status,
-        holdout_looks = looks,
+        holdout_looks = looks.effective,
         "[Pipeline] holdout stage complete"
     );
 
     Ok(result)
+}
+
+/// Seconds in an average year, for a holdout's length in years.
+const SECONDS_A_YEAR: f64 = 365.25 * 86_400.0;
+
+/// The tries that have looked at the sealed window on this market:
+/// `looked`'s configs of `config`'s idea (`deflated_sharpe::family`), plus
+/// `config` itself, counted as the luck check counts tries
+/// (`deflated_sharpe::count_tries`): distinct settings at each timeframe,
+/// k of them on one timeframe counting as √k. The same recipe re-tested is
+/// one look; a tweak re-run through the holdout is another.
+fn holdout_looks(
+    config: &StrategyConfig,
+    looked: &[pipeline_repo::HoldoutLook],
+) -> deflated_sharpe::Tries {
+    let family = deflated_sharpe::family(&config.strategy_type, &config.parameters);
+    let own = (
+        deflated_sharpe::market(
+            &config.instrument,
+            config.granularity.as_str(),
+            &config.parameters,
+        ),
+        deflated_sharpe::settings(&config.parameters),
+    );
+    let others = looked
+        .iter()
+        .filter(|l| deflated_sharpe::family(&l.strategy_type, &l.parameters) == family)
+        .map(|l| {
+            (
+                deflated_sharpe::market(&config.instrument, &l.granularity, &l.parameters),
+                deflated_sharpe::settings(&l.parameters),
+            )
+        });
+    deflated_sharpe::count_tries(others.chain(std::iter::once(own)), &[])
+}
+
+/// How much better than its true Sharpe the best of `looks` tries' holdout
+/// annual Sharpes would look by luck alone, over a holdout `years` long:
+/// the expected best of that many standard normals
+/// (`deflated_sharpe::expected_max`) times an annual Sharpe's standard
+/// error over that span, about 1/√years. 0 for one look; the holdout bar
+/// is then read on `annual_sharpe − allowance`
+/// (`annual_sharpe_after_looks`), so every extra look raises it.
+fn holdout_luck_allowance(looks: usize, years: f64) -> f64 {
+    let z0 = deflated_sharpe::expected_max(looks, 1.0);
+    match years > 0.0 {
+        true => z0 / years.sqrt(),
+        false => z0,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,6 +1163,14 @@ pub(crate) fn backtest_stats_to_json(stats: &BacktestStats) -> Value {
         // saved before this was so lack the key.
         "drawdown_valued":      "every_close",
     });
+    // Made money in most years, not one big one: judged on the account's
+    // calendar years (`BacktestStats::years`), each shown.
+    json["profitable_years"] = serde_json::json!(stats.profitable_years());
+    json["years"] = stats
+        .years
+        .iter()
+        .map(|(year, r)| serde_json::json!({ "year": year, "return": r }))
+        .collect();
     if let Some(months) = stats.num_months {
         json["num_months"] = serde_json::json!(months);
         json["judged_on"] = serde_json::json!("months");
@@ -1493,8 +1614,9 @@ fn run_monte_carlo_sims<R: rand::Rng + ?Sized>(daily: &[f64], lows: &[f64], rng:
     })
 }
 
-/// For shares held outright, Monte Carlo judged against just holding the
-/// same funds (`held`) instead of a fixed drawdown cap: the rule's daily
+/// Monte Carlo against just holding the same markets (`held`); shares held
+/// outright are judged on it instead of a fixed drawdown cap, anything
+/// else only shows it (no thresholds for its class): the rule's daily
 /// account returns scaled to swing as much as holding does, their 95th
 /// percentile bad run beside holding's, redrawn the same way
 /// (`p95_drawdown_vs_hold`, 1 = as bad: like for like, so a rule that just
@@ -2093,6 +2215,57 @@ mod tests {
                 "sizing": {"type": "RiskPct", "params": {"pct": 0.01}},
             }),
         }
+    }
+
+    #[test]
+    fn the_tests_judge_at_no_less_than_one_percent_risk() {
+        let mut config = carry_config("EUR_USD");
+        config.parameters["sizing"]["params"]["pct"] = serde_json::json!(0.005);
+        assert_eq!(account_sizing(&config).unwrap().risk_pct, 0.005);
+        assert_eq!(
+            judged_sizing(&config).unwrap().risk_pct,
+            JUDGED_MIN_RISK_PCT
+        );
+        config.parameters["sizing"]["params"]["pct"] = serde_json::json!(0.02);
+        assert_eq!(judged_sizing(&config).unwrap().risk_pct, 0.02);
+    }
+
+    #[test]
+    fn holdout_looks_count_distinct_settings_of_the_same_idea() {
+        let config = carry_config("EUR_USD");
+        let look = |granularity: &str, parameters: &Value| pipeline_repo::HoldoutLook {
+            strategy_type: "composite".into(),
+            granularity: granularity.into(),
+            parameters: parameters.clone(),
+        };
+        // Alone, or beside the same recipe re-tested (sizing aside): one look.
+        assert_eq!(holdout_looks(&config, &[]).effective, 1);
+        let mut resized = config.parameters.clone();
+        resized["sizing"]["params"]["pct"] = serde_json::json!(0.02);
+        assert_eq!(holdout_looks(&config, &[look("D", &resized)]).effective, 1);
+
+        // A tweak on the same timeframe: 2 settings, √2 rounded up.
+        let mut tweaked = config.parameters.clone();
+        tweaked["stop"]["params"]["pct"] = serde_json::json!(-0.4);
+        let tries = holdout_looks(&config, &[look("D", &tweaked)]);
+        assert_eq!((tries.settings, tries.effective), (2, 2));
+        // Another timeframe is another market.
+        let tries = holdout_looks(&config, &[look("H4", &config.parameters)]);
+        assert_eq!((tries.markets, tries.effective), (2, 2));
+
+        // Another idea's look isn't this one's.
+        let mut other = config.parameters.clone();
+        other["components"]["c"]["type"] = serde_json::json!("Momentum");
+        assert_eq!(holdout_looks(&config, &[look("D", &other)]).effective, 1);
+    }
+
+    #[test]
+    fn every_extra_holdout_look_raises_the_bar_less_over_a_longer_window() {
+        assert_eq!(holdout_luck_allowance(1, 1.0), 0.0);
+        let one_year = holdout_luck_allowance(2, 1.0);
+        assert!(one_year > 0.5 && one_year < 0.6, "{one_year}");
+        assert!(holdout_luck_allowance(5, 1.0) > one_year);
+        assert!((holdout_luck_allowance(2, 4.0) - one_year / 2.0).abs() < 1e-12);
     }
 
     #[test]

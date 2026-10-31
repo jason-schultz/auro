@@ -1703,8 +1703,8 @@ msgstr "Real account %{account} betting %{risk} a play, stacked; worst gut punch
 
 #: lib/opus_web/components/strategy_parts.ex:122
 #, elixir-autogen, elixir-format
-msgid "Account figures size each trade the way it would trade live, at the risk shown, and compound them. \"Trades added up\" is each trade's price move summed as if every trade used the whole account: the pass marks were set on it, so it stays, named for what it is. The Together page shows several strategies on one account."
-msgstr "The account number is what your actual stack does, each play sized like live and stacked. \"Trades added up\" is the all-in fantasy where every play bets the house; the pass marks were set on it, so it stays, labelled as fantasy. The squad page shows the real account."
+msgid "Account figures size each trade the way it would trade live, at the risk shown, and compound them; the tests use at least 1% a trade, so a smaller setting can't make the drops look smaller. \"Trades added up\" is each trade's price move summed as if every trade used the whole account: the return and luck marks read it, so it stays, named for what it is. The Together page shows several strategies on one account."
+msgstr "The account number is what your actual stack does, each play sized like live and stacked; the tests bet at least 1% a play, so going small can't hide the pain. \"Trades added up\" is the all-in fantasy where every play bets the house; the return and luck marks read it, so it stays, labelled as fantasy. The squad page shows the real account."
 
 #: lib/opus_web/components/strategy_parts.ex:565
 #, elixir-autogen, elixir-format
@@ -1794,7 +1794,7 @@ msgstr "Send it again from the %{stage}"
 
 #: lib/opus_web/components/strategy_parts.ex:536
 #, elixir-autogen, elixir-format
-msgid "Account %{account} over %{months} months of results (%{count} positions held across re-ranks); its worst drop, valued at every close, %{account_drop}"
+msgid "Account %{account} over %{months} months of results (%{held}); its worst drop, valued at every close, %{account_drop}"
 msgstr ""
 
 #: lib/opus_web/components/strategy_parts.ex:146

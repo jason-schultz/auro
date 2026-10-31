@@ -598,6 +598,23 @@ impl BreakerState {
     }
 }
 
+/// Each calendar year's compounded return from a daily series (0.1 =
+/// +10%), oldest first, for the years it moved at all: a year with no
+/// trade open has nothing to say about the strategy and is left out.
+pub fn yearly(daily: &BTreeMap<NaiveDate, f64>) -> Vec<(i32, f64)> {
+    let mut years: BTreeMap<i32, (f64, bool)> = BTreeMap::new();
+    for (day, r) in daily {
+        let (growth, moved) = years.entry(day.year()).or_insert((1.0, false));
+        *growth *= 1.0 + r;
+        *moved |= *r != 0.0;
+    }
+    years
+        .into_iter()
+        .filter(|(_, (_, moved))| *moved)
+        .map(|(year, (growth, _))| (year, growth - 1.0))
+        .collect()
+}
+
 /// Pearson correlation of two daily series over the days both have.
 /// None with fewer than 20 shared days or a flat series.
 pub fn correlation(a: &BTreeMap<NaiveDate, f64>, b: &BTreeMap<NaiveDate, f64>) -> Option<f64> {
@@ -638,6 +655,24 @@ mod tests {
     use super::*;
     use crate::engine::types::{Direction, EntryReason, ExitReason};
     use chrono::{Datelike, TimeZone};
+
+    #[test]
+    fn yearly_compounds_each_year_and_leaves_out_years_that_never_moved() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let daily = BTreeMap::from([
+            (d(2024, 3, 1), 0.10),
+            (d(2024, 9, 2), -0.10),
+            (d(2025, 6, 2), 0.0),
+            (d(2026, 1, 5), 0.05),
+        ]);
+        let years = yearly(&daily);
+        assert_eq!(
+            years.iter().map(|y| y.0).collect::<Vec<_>>(),
+            vec![2024, 2026]
+        );
+        assert!((years[0].1 - (1.1 * 0.9 - 1.0)).abs() < 1e-12);
+        assert!((years[1].1 - 0.05).abs() < 1e-12);
+    }
 
     fn at(day: u32, hour: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 1, day, hour, 0, 0).unwrap()

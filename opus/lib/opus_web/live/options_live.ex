@@ -721,13 +721,7 @@ defmodule OpusWeb.OptionsLive do
           phx-click="filter"
           phx-value-filter={filter}
           aria-pressed={to_string(filter == @filter)}
-          class={[
-            "min-h-8 rounded-field border px-3 text-[13px]",
-            if(filter == @filter,
-              do: "border-primary font-medium text-primary",
-              else: "border-base-300 text-muted hover:text-base-content"
-            )
-          ]}
+          class={["text-[13px]", chip_class(filter == @filter)]}
         >
           <.t {label} />
         </button>

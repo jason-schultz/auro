@@ -85,6 +85,7 @@ defmodule Opus.Oanda.Client do
              "trade_id" => trade_id,
              "exit_price" => tx["price"],
              "realized_pl" => close["realizedPL"],
+             "financing" => close["financing"],
              "close_time" => tx["time"],
              "reason" => tx["reason"],
              "instrument" => tx["instrument"]
