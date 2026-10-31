@@ -120,4 +120,21 @@ defmodule OpusWeb.Components.PaperParts do
 
   def moves(now, :up, pnl),
     do: for({label, d} <- @rises, p = now * (1 + d), do: {label, p, pnl.(p)})
+
+  @doc """
+  A latest price (`Opus.Options.Spot`) in words: "$757.10 at 13:05 MDT"
+  in the session, "$755.72 at the close, Oct 30 (after hours $757.12)"
+  after it.
+  """
+  @spec spot_words(map()) :: String.t()
+  def spot_words(%{kind: :close} = p) do
+    "#{money(p.price)} at the close" <>
+      if(p.at, do: ", #{day(p.at)}", else: "") <>
+      if(p.after_hours, do: " (after hours #{money(p.after_hours)})", else: "")
+  end
+
+  def spot_words(%{at: %DateTime{} = at} = p),
+    do: "#{money(p.price)} at #{clock(at)} #{zone_name(at)}"
+
+  def spot_words(p), do: money(p.price)
 end

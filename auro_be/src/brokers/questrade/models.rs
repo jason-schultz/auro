@@ -134,6 +134,11 @@ pub struct QuoteResult {
     pub symbol: String,
     pub symbol_id: i64,
     pub last_trade_price: Option<f64>,
+    /// The last trade in regular hours (09:30–16:00 New York): after the
+    /// close, the day's closing price, where `last_trade_price` has moved on
+    /// with after-hours trades.
+    #[serde(default)]
+    pub last_trade_price_tr_hrs: Option<f64>,
     pub last_trade_time: Option<String>,
     pub bid_price: Option<f64>,
     pub bid_size: Option<f64>,
@@ -288,4 +293,23 @@ pub struct OptionQuote {
 pub struct OptionQuotesResponse {
     #[serde(rename = "optionQuotes")]
     pub option_quotes: Vec<OptionQuote>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quote_reads_the_regular_hours_last_trade() {
+        let q: QuoteResult = serde_json::from_value(serde_json::json!({
+            "symbol": "SPY", "symbolId": 1, "lastTradePrice": 757.12,
+            "lastTradePriceTrHrs": 755.72, "lastTradeTime": "2026-10-30T19:59:58.000000-04:00"
+        }))
+        .unwrap();
+        assert_eq!(q.last_trade_price_tr_hrs, Some(755.72));
+        assert_eq!(
+            serde_json::to_value(&q).unwrap()["last_trade_price_tr_hrs"],
+            755.72
+        );
+    }
 }
