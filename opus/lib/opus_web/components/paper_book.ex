@@ -213,6 +213,21 @@ defmodule OpusWeb.Components.PaperBook do
       "Long enough to compare: a book that trails just holding after this long is paying " <>
         "for its risk without being paid for it. Consider stopping it."
 
+  attr :now, :map, required: true
+
+  # The underlyings' last trades now, beside the snapshot the book was
+  # valued at (its last is 15:45 New York, so after the close they differ).
+  defp prices_now(assigns) do
+    ~H"""
+    <p :if={@now != %{}} class="-mt-2 text-[12px] text-muted">
+      <span class="font-medium text-base-content">Now (Questrade):</span>
+      <span :for={{symbol, %{price: price, at: at}} <- Enum.sort(@now)} class="mr-3">
+        {symbol} {money(price)}<span :if={at}> at {clock(at)} {zone_name(at)}</span>
+      </span>
+    </p>
+    """
+  end
+
   # How fresh the prices are: open legs carry their latest quote.
   attr :at, :any, required: true
 
@@ -233,6 +248,7 @@ defmodule OpusWeb.Components.PaperBook do
   attr :trade, :map, default: nil
   attr :leg, :map, default: nil
   attr :analysis, :map, default: nil
+  attr :now, :map, default: %{}, doc: "underlying → price now (`Opus.Options.Spot.now/1`)"
 
   def paper_book(assigns) do
     assigns = assign(assigns, about: about(assigns.book.strategy))
@@ -246,6 +262,7 @@ defmodule OpusWeb.Components.PaperBook do
 
       <p class="text-[12px] text-muted"><.t {@about} /></p>
       <.priced_at at={@book.priced_at} />
+      <.prices_now now={@now} />
 
       <p :if={@book.started_on == nil} class="text-[13px] text-muted">
         <.t {copy("Nothing yet: the first trades open at the next 10:30 New York check.")} />
@@ -273,11 +290,16 @@ defmodule OpusWeb.Components.PaperBook do
           label={copy("Premium paid")}
           value={money(-@book.premium)}
         />
-        <.stat label={copy("Cash")} value={money(@book.cash)} />
+        <.stat label={copy("This book's cash")} value={money(@book.cash)} />
       </div>
+      <p :if={@book.started_on} class="-mt-2 text-[12px] text-muted">
+        Each book is its own paper account that started with {money(@book.starting_cash)}, so its
+        cash and value are its own, not shared with the other books.
+      </p>
 
       <PaperTrades.body
         :if={@book.strategy != "wheel"}
+        now={@now}
         book={@book}
         trade={@trade}
         leg={@leg}

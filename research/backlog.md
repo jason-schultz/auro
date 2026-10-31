@@ -12,24 +12,20 @@ severity, cheaper first on ties. The bigger plan stays in
 
 | # | Item | Need | Severity | Cost | Found |
 |---|------|------|----------|------|-------|
-| 41 | **Options plays don't show the underlying's price now,** and the payoff chart's price is the last intraday quote (15:45 New York: SPY $753.35 on Oct 30 vs ~$755.72 at the close). Show the current price on each play (and the close after 16:00), said with its time. | 2 | 2 | S | Oct 30 |
 | 42 | **Options alerts with Log trade:** an options play alerted like the share alerts, logged into the options records with the account it's in; options rows say which account (paper book or a real one). | 2 | 1 | M | Oct 30 |
 | 43 | **Share alerts decide at 15:45, the tests at the close.** Record what the close said beside each alert, so the gap is a number, not a guess. | 1 | 2 | S | Oct 30 |
 | 28 | **Adding to positions isn't modelled** (one position per market): averaging down, fixed-weight rebalancing and DCA are strategies of their own, untestable today. | 1 | 1 | L | Oct 30 |
-| 4b | **The holdout's Sharpe bar (≥ 0.3) still books each trade on its close day** (`stats::annual_sharpe`). Fixing it changes a pass rule: bump `RULES_VERSION`, every result reads old again, and past holdouts can't be re-looked at freely. Your call. | 1 | 1 | M | Oct 30 |
-| 6 | **Monte Carlo can't see same-day dips** (values at each day's last bar), so for intraday strategies its drop can read below the backtest's. | 1 | 1 | S | Oct 30 |
-| 7 | **Ranked baskets' walk-forward restarts the warm-up** in the unseen half, so a 12-month ranking needs ~10 years of history. | 1 | 1 | S | Oct 30 |
 | 9 | **Builder: a condition can be used once per side,** so "above the band now and 1 bar ago" can't be built (the engine accepts it). The form keys each condition's timing by the condition, so this means reshaping the form's rule items. | 1 | 1 | M | Oct 30 |
 | 20 | **Baskets store their first market in `instrument`** (the column needs one). Clean fix: a markets column. | 1 | 1 | M | Oct 30 |
-
-Items that change a pass rule (#4b, #6, #7) should land together with one
-`RULES_VERSION` bump and one round of re-tests; that's your call, so they
-wait for a yes.
 
 Already scheduled elsewhere (not ranked here): audit round 4 fixes (weekend
 services move), portfolio/roadmap items in [`roadmap.md`](roadmap.md).
 
 ## Done
+
+- Oct 31: Options books: open and closed trades listed under their own headings; "This book's cash" with a line saying each book is its own paper account that started with $100,000 (the cash differed between books because each is a separate account); the underlyings' prices now from Questrade beside the price the book was last valued at, on the book and on an open trade (the 15:45 New York snapshot is the day's last) (was #41).
+
+- Oct 31: Rules version 3, one bump for three pass-rule fixes: the annual Sharpe (the holdout's ≥ 0.3 bar, the backtest's figure) comes from the account valued every day instead of each trade booked on its close day (was #4b); Monte Carlo redraws each day with its low (`Outcome::daily_lows`), so an intraday strategy's dip that recovers by the day's last bar counts in its drawdowns, as in the backtest (was #6); a basket's walk-forward unseen part warms up on the bars before it and a ranking rebalances from the split, as the holdout does, instead of restarting the look-back (was #7). Every earlier result reads as old until re-tested; needs a tester rebuild.
 
 - Oct 30: Share alerts: a strategy on a market tested as shares held goes live as share alerts (never OANDA trades), $500 a buy by default, changeable on its page. At 15:45 New York the live engine decides each switched-on one on its daily bars plus the day so far, by the backtest's own rules, long only (`engine/share_alerts.rs`, `POST /api/share-alerts/evaluate`, tested to match the backtest's every entry and exit). Buys and sells go to Discord and stay on the Dashboard with Log trade (filled in from the alert; pick the account and when it filled), which updates that account's holdings and cash; "Didn't trade", or no log by the next check, counts as not traded. Logged fills are the only record of what's held. Needs the migration, a live rebuild and an Opus restart (cron).
 
