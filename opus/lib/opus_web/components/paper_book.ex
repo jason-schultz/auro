@@ -16,6 +16,7 @@ defmodule OpusWeb.Components.PaperBook do
   use OpusWeb, :verified_routes
 
   import OpusWeb.Copy
+  import OpusWeb.CoreComponents, only: [chip_class: 1]
   import OpusWeb.Format
   import OpusWeb.PayoffChart
   import OpusWeb.Components.PaperParts
@@ -84,13 +85,7 @@ defmodule OpusWeb.Components.PaperBook do
           if key == "all", do: ~p"/options?view=paper", else: ~p"/options?view=paper&book=#{key}"
         }
         aria-current={if key == @current, do: "page"}
-        class={[
-          "inline-flex items-center gap-1.5 rounded-field border px-3 py-1.5 text-[13px] font-medium",
-          if(key == @current,
-            do: "border-primary text-primary",
-            else: "border-base-300 text-muted hover:text-base-content"
-          )
-        ]}
+        class={["text-[13px]", chip_class(key == @current)]}
       >
         <.t {name} />
         <span :if={@counts[key]} class="rounded-full bg-base-300 px-1.5 text-[11px] text-base-content">

@@ -35,8 +35,6 @@ defmodule OpusWeb.Router do
   scope "/api", OpusWeb do
     pipe_through(:api)
 
-    get("/regimes", RegimeController, :index)
-    get("/regimes/heatmap", RegimeController, :heatmap)
     get("/rules/state", RulesController, :state)
     get("/strategy-suspensions/open", CircuitBreakerController, :open)
     post("/strategy-suspensions/:id/reset", CircuitBreakerController, :reset)

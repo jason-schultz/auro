@@ -277,28 +277,6 @@ pub async fn list_live_strategies(
         }
     }
 
-    // Query 4: latest k-fold validation per strategy (if any). We take the most
-    // recent row per live_strategy_id; older rows are kept as history but the UI
-    // shows the latest.
-    let mut kfold_map: HashMap<Uuid, Value> = HashMap::new();
-    if !strategy_ids.is_empty() {
-        let kfold_rows = live_strategies_repo::fetch_latest_kfold_stats(&state.db, &strategy_ids)
-            .await
-            .map_err(AppError::Database)?;
-
-        for row in kfold_rows {
-            kfold_map.insert(
-                row.live_strategy_id,
-                json!({
-                    "fold_count": row.fold_count,
-                    "pass_count": row.pass_count,
-                    "pass_rate": row.pass_rate,
-                    "median_sharpe": row.median_sharpe,
-                }),
-            );
-        }
-    }
-
     let mut strategies: Vec<Value> = rows
         .iter()
         .map(|row| {
@@ -325,10 +303,6 @@ pub async fn list_live_strategies(
 
             if let Some(live) = live_stats_map.get(&row.id) {
                 obj["live_stats"] = live.clone();
-            }
-
-            if let Some(kfold) = kfold_map.get(&row.id) {
-                obj["kfold_stats"] = kfold.clone();
             }
 
             obj

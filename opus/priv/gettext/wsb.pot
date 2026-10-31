@@ -1703,7 +1703,7 @@ msgstr ""
 
 #: lib/opus_web/components/strategy_parts.ex:122
 #, elixir-autogen, elixir-format
-msgid "Account figures size each trade the way it would trade live, at the risk shown, and compound them. \"Trades added up\" is each trade's price move summed as if every trade used the whole account: the pass marks were set on it, so it stays, named for what it is. The Together page shows several strategies on one account."
+msgid "Account figures size each trade the way it would trade live, at the risk shown, and compound them; the tests use at least 1% a trade, so a smaller setting can't make the drops look smaller. \"Trades added up\" is each trade's price move summed as if every trade used the whole account: the return and luck marks read it, so it stays, named for what it is. The Together page shows several strategies on one account."
 msgstr ""
 
 #: lib/opus_web/components/strategy_parts.ex:565
@@ -1794,7 +1794,7 @@ msgstr ""
 
 #: lib/opus_web/components/strategy_parts.ex:536
 #, elixir-autogen, elixir-format
-msgid "Account %{account} over %{months} months of results (%{count} positions held across re-ranks); its worst drop, valued at every close, %{account_drop}"
+msgid "Account %{account} over %{months} months of results (%{held}); its worst drop, valued at every close, %{account_drop}"
 msgstr ""
 
 #: lib/opus_web/components/strategy_parts.ex:146

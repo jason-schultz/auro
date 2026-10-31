@@ -220,13 +220,7 @@ defmodule OpusWeb.ResearchLive do
       phx-click="filter"
       phx-value-status={@status}
       aria-pressed={to_string(@status == @current)}
-      class={[
-        "inline-flex items-center gap-1.5 rounded-field border px-3 py-1.5 text-[13px] font-medium",
-        if(@status == @current,
-          do: "border-primary text-primary",
-          else: "border-base-300 text-muted hover:text-base-content"
-        )
-      ]}
+      class={["text-[13px]", chip_class(@status == @current)]}
     >
       {render_slot(@inner_block)}
     </button>

@@ -221,13 +221,7 @@ defmodule OpusWeb.InstrumentsLive do
               phx-click="group"
               phx-value-group={group}
               aria-pressed={to_string(group == @group)}
-              class={[
-                "rounded-field border px-3 py-1.5 text-[13px] font-medium",
-                if(group == @group,
-                  do: "border-primary text-primary",
-                  else: "border-base-300 text-muted hover:text-base-content"
-                )
-              ]}
+              class={["text-[13px]", chip_class(group == @group)]}
             >
               {label}
             </button>

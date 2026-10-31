@@ -31,8 +31,7 @@ defmodule OpusWeb.StrategiesLiveTest do
       live_strategy_id: @trading_id,
       enabled: true,
       reason: "composite: no regime gate",
-      computed_at: now,
-      regime_inputs: %{"composite" => "trending", "frames" => []}
+      computed_at: now
     })
 
     Repo.insert!(%LiveStrategy{
@@ -51,8 +50,7 @@ defmodule OpusWeb.StrategiesLiveTest do
       live_strategy_id: @held_id,
       enabled: false,
       reason: "uncertain MR disabled (fail-closed)",
-      computed_at: now,
-      regime_inputs: %{}
+      computed_at: now
     })
 
     Repo.insert!(%LiveStrategy{

@@ -5,7 +5,7 @@ defmodule OpusWeb.HealthController do
 
   alias Opus.Auro.Client, as: Auro
   alias Opus.Repo
-  alias Opus.Trading.{Reconciler, RegimeDetector, RulesEngine}
+  alias Opus.Trading.{Reconciler, RulesEngine}
 
   def system(conn, _params) do
     now = DateTime.utc_now()
@@ -22,7 +22,6 @@ defmodule OpusWeb.HealthController do
       end
 
     reconciler_last_run = Reconciler.last_run()
-    regime_last_poll = RegimeDetector.last_run()
     rules_last_push = RulesEngine.last_run()
 
     {nav, pnl_today, pnl_today_pct} = fetch_nav_and_today_pnl(now)
@@ -35,7 +34,6 @@ defmodule OpusWeb.HealthController do
       opus: %{
         uptime_seconds: opus_uptime_seconds,
         reconciler_last_run_seconds_ago: age_seconds(now, reconciler_last_run),
-        regime_detector_last_poll_seconds_ago: age_seconds(now, regime_last_poll),
         rules_engine_last_push_seconds_ago: age_seconds(now, rules_last_push)
       }
     })

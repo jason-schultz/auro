@@ -4,7 +4,7 @@ use chrono::NaiveDate;
 
 use crate::engine::live::sizing::MAX_POSITION_PCT_OF_NAV;
 use crate::engine::pipeline::span;
-use crate::engine::portfolio::{simulate, Outcome, Play};
+use crate::engine::portfolio::{simulate, yearly, Outcome, Play};
 use crate::engine::strategy::SizingConfig;
 use crate::engine::types::{Candle, Trade};
 
@@ -65,11 +65,15 @@ pub struct BacktestStats {
     /// (`judge_by_months`, a ranked basket): how many months, and then
     /// `sharpe_ratio`/`annual_sharpe` are the months', not the trades'.
     pub num_months: Option<usize>,
+    /// Each calendar year the account moved, its compounded return
+    /// (`portfolio::yearly`), oldest first: whether it made money most
+    /// years or in one big one (`profitable_years`).
+    pub years: Vec<(i32, f64)>,
 }
 
 /// The drawdowns and the account's growth, valued at every bar
 /// (`portfolio::simulate`): what a backtest's trades alone can't tell.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Marked {
     /// `BacktestStats::max_drawdown` (≤ 0).
     pub max_drawdown: f64,
@@ -81,6 +85,8 @@ pub struct Marked {
     /// (`portfolio::Outcome::annual_sharpe`), so a trade's ups and downs
     /// land on the days they happen, not all on the day it closes.
     pub annual_sharpe: f64,
+    /// `BacktestStats::years`, from the account valued every day.
+    pub years: Vec<(i32, f64)>,
 }
 
 /// Calculates the backtest statistics for one market's trades.
@@ -122,6 +128,7 @@ pub fn backtest_on_account(
         account_return: outcome.total_return,
         account_max_drawdown: -outcome.max_drawdown,
         annual_sharpe: outcome.annual_sharpe,
+        years: yearly(&outcome.daily),
     };
     (stats_with(trades, sizing, marked), outcome)
 }
@@ -143,6 +150,7 @@ pub fn stats_with(trades: &[Trade], sizing: AccountSizing, marked: Marked) -> Ba
             annual_sharpe: 0.0,
             num_trades: 0,
             num_months: None,
+            years: marked.years,
         };
     }
 
@@ -186,6 +194,7 @@ pub fn stats_with(trades: &[Trade], sizing: AccountSizing, marked: Marked) -> Ba
         annual_sharpe: marked.annual_sharpe,
         num_trades: trades.len(),
         num_months: None,
+        years: marked.years,
     }
 }
 
@@ -200,6 +209,15 @@ impl BacktestStats {
         self.sharpe_ratio = sharpe_of(monthly);
         self.annual_sharpe = self.sharpe_ratio * MONTHS.sqrt();
         self.num_months = Some(monthly.len());
+    }
+
+    /// Share of `years` the account made money in (0–1); 0 with none.
+    pub fn profitable_years(&self) -> f64 {
+        if self.years.is_empty() {
+            return 0.0;
+        }
+        let up = self.years.iter().filter(|(_, r)| *r > 0.0).count();
+        up as f64 / self.years.len() as f64
     }
 
     /// How many returns the per-period Sharpe is over: months when judged
@@ -253,6 +271,25 @@ mod tests {
         risk_pct: 0.01,
         max_position_pct: 0.15,
     };
+
+    #[test]
+    fn profitable_years_is_the_share_of_traded_years_that_made_money() {
+        let mut stats = stats_with(
+            &[],
+            SIZING,
+            Marked {
+                max_drawdown: 0.0,
+                account_return: 0.0,
+                account_max_drawdown: 0.0,
+                annual_sharpe: 0.0,
+                years: vec![(2023, 0.30), (2024, -0.02), (2025, 0.01), (2026, 0.0)],
+            },
+        );
+        // 2026 broke even: not a year it made money.
+        assert!((stats.profitable_years() - 0.5).abs() < 1e-12);
+        stats.years.clear();
+        assert_eq!(stats.profitable_years(), 0.0);
+    }
 
     fn utc(day: &str) -> chrono::DateTime<Utc> {
         chrono::DateTime::parse_from_rfc3339(&format!("{day}T00:00:00Z"))

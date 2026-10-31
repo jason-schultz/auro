@@ -29,15 +29,6 @@ pub(crate) struct PipelineStrategyStatsRow {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct LatestKfoldStatsRow {
-    pub live_strategy_id: Uuid,
-    pub fold_count: i32,
-    pub pass_count: i32,
-    pub pass_rate: f64,
-    pub median_sharpe: f64,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct LiveStrategyDetailRow {
     pub id: Uuid,
     pub strategy_type: String,
@@ -116,32 +107,6 @@ pub(crate) async fn fetch_pipeline_strategy_stats(
             AND wf.status  = 'passed'
         WHERE ls.id = ANY($1)
         ORDER BY ls.id, sc.score DESC NULLS LAST
-        "#,
-    )
-    .bind(strategy_ids)
-    .fetch_all(pool)
-    .await
-}
-
-pub(crate) async fn fetch_latest_kfold_stats(
-    pool: &PgPool,
-    strategy_ids: &[Uuid],
-) -> Result<Vec<LatestKfoldStatsRow>, sqlx::Error> {
-    if strategy_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    sqlx::query_as(
-        r#"
-        SELECT DISTINCT ON (live_strategy_id)
-            live_strategy_id,
-            fold_count,
-            (pass_rate * fold_count)::int AS pass_count,
-            pass_rate,
-            median_sharpe
-        FROM kfold_validations
-        WHERE live_strategy_id = ANY($1)
-        ORDER BY live_strategy_id, validated_at DESC
         "#,
     )
     .bind(strategy_ids)

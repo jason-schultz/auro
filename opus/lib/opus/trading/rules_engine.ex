@@ -19,9 +19,6 @@ defmodule Opus.Trading.RulesEngine do
   (`Opus.Trading.AccountLimits`), each strategy's risk per trade and each
   instrument's group; the engine checks those when a trade opens, since
   two strategies can fire in the same minute.
-  Each rule row also records the regime around the strategy's instrument at
-  decision time (`regime_inputs`, from `Opus.Trading.RegimeDetector`). That
-  is a readout for screens, not an input to the decision.
 
   Polls every minute, and recomputes at once when a suspension opens or
   clears. The engine refuses entries after a restart until its first push,
@@ -39,8 +36,6 @@ defmodule Opus.Trading.RulesEngine do
     AccountLimits,
     AccountPause,
     LiveStrategy,
-    RegimeClassifier,
-    RegimeDetector,
     Rule,
     Suspension
   }
@@ -67,10 +62,9 @@ defmodule Opus.Trading.RulesEngine do
   @spec compute_and_push() :: {:ok, list(map())} | {:error, term()}
   def compute_and_push do
     strategies = list_live_strategies()
-    regimes = regimes()
     open_suspensions = open_suspensions_by_strategy(strategies)
     pause = AccountPause.check()
-    decisions = Enum.map(strategies, &decide(&1, regimes, open_suspensions, pause))
+    decisions = Enum.map(strategies, &decide(&1, open_suspensions, pause))
 
     case persist_and_push(decisions, limits(strategies)) do
       :ok -> {:ok, decisions}
@@ -80,19 +74,6 @@ defmodule Opus.Trading.RulesEngine do
 
   @spec last_run() :: DateTime.t() | nil
   def last_run, do: GenServer.call(__MODULE__, :last_run)
-
-  # The regime is only a readout recorded with each rule: a detector that
-  # is busy or down mustn't stop the safety push.
-  defp regimes do
-    RegimeDetector.get_all_regimes()
-  catch
-    :exit, reason ->
-      Logger.warning(
-        "[RulesEngine] Regime readout unavailable (#{inspect(reason)}); pushing without it"
-      )
-
-      %{}
-  end
 
   # -- GenServer Callbacks --
 
@@ -154,17 +135,14 @@ defmodule Opus.Trading.RulesEngine do
   end
 
   # One strategy's decision: held back by an account pause or its own open
-  # suspension. The regime around its instrument is recorded for screens.
-  defp decide(strategy, regimes, open_suspensions, pause) do
-    inputs = regime_inputs_for_strategy(strategy, regimes)
-    composite = RegimeClassifier.classify_for_inputs(inputs)
+  # suspension.
+  defp decide(strategy, open_suspensions, pause) do
     {enabled, reason} = safety(pause, Map.get(open_suspensions, strategy.id))
 
     %{
       live_strategy_id: strategy.id,
       enabled: enabled,
       reason: reason,
-      regime_inputs: to_structured_regime_inputs(composite, inputs),
       risk_pct: AccountLimits.risk_pct(strategy.sizing),
       computed_at: DateTime.utc_now()
     }
@@ -199,28 +177,6 @@ defmodule Opus.Trading.RulesEngine do
     end
   end
 
-  defp regime_inputs_for_strategy(strategy, regimes) do
-    strategy.granularity
-    |> Opus.Trading.Granularity.regime_frames_for_entry()
-    |> Enum.map(fn frame ->
-      {frame, Map.get(regimes, {strategy.instrument, frame}, %{regime: :unknown})}
-    end)
-  end
-
-  defp to_structured_regime_inputs(composite, frame_inputs) do
-    %{
-      composite: composite,
-      frames:
-        Enum.map(frame_inputs, fn {frame, frame_data} ->
-          %{
-            frame: frame,
-            regime: Map.get(frame_data, :regime),
-            adx: Map.get(frame_data, :adx)
-          }
-        end)
-    }
-  end
-
   defp open_suspensions_by_strategy([]), do: %{}
 
   defp open_suspensions_by_strategy(strategies) do
@@ -249,7 +205,6 @@ defmodule Opus.Trading.RulesEngine do
           live_strategy_id: d.live_strategy_id,
           enabled: d.enabled,
           reason: d.reason,
-          regime_inputs: d.regime_inputs,
           computed_at: d.computed_at,
           inserted_at: now,
           updated_at: now
@@ -259,7 +214,7 @@ defmodule Opus.Trading.RulesEngine do
     Repo.insert_all(
       Rule,
       rows,
-      on_conflict: {:replace, [:enabled, :reason, :regime_inputs, :computed_at, :updated_at]},
+      on_conflict: {:replace, [:enabled, :reason, :computed_at, :updated_at]},
       conflict_target: :live_strategy_id
     )
 

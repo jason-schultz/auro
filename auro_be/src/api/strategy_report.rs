@@ -4,8 +4,9 @@
 //! the sealed holdout) through the same runner, with financing, so the
 //! numbers line up with the backtest result shown beside them.
 //!
-//! - `POST /api/strategy/report`: the strategy's running return against just
-//!   holding the instrument, and its drawdown (`engine::report::equity`).
+//! - `POST /api/strategy/report`: the strategy's account against just
+//!   holding the instrument, at full size and at the strategy's risk, year
+//!   by year (`engine::report::equity`).
 //! - `POST /api/strategy/trades`: every trade the backtest made.
 //! - `POST /api/strategy/sensitivity`: the strategy re-run at a grid of
 //!   nearby settings (up to 49), each judged by the backtest thresholds the
@@ -68,9 +69,17 @@ pub async fn equity_report(
     let candles = pipeline::load_exploration_candles(&state.db, &config).await?;
     let financing = pipeline::load_financing(&state.db).await?;
 
+    let sizing = pipeline::account_sizing(&config)?;
+
     let report = blocking(move || {
         let trades = run_strategy(&candles, &config, &financing)?;
-        Ok(report::equity(&candles, &trades))
+        // Holding a fund pays its dividends; a CFD's price is held alone.
+        let dividends = if financing.owns_shares(&config.instrument) {
+            financing.dividends(&config.instrument)
+        } else {
+            &[]
+        };
+        Ok(report::equity(&candles, &trades, sizing, dividends))
     })
     .await?;
 
@@ -158,7 +167,7 @@ pub async fn sensitivity(
             };
             match run_strategy(&candles, &cell_config, &financing) {
                 Ok(trades) => {
-                    let sizing = match pipeline::account_sizing(&cell_config) {
+                    let sizing = match pipeline::judged_sizing(&cell_config) {
                         Ok(sizing) => sizing,
                         Err(e) => return json!({ "x": x, "y": y, "error": e.to_string() }),
                     };

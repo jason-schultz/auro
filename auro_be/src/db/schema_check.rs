@@ -14,7 +14,6 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "instrument_financing",
     "instrument_unit_caps",
     "instruments",
-    "kfold_validations",
     "live_strategies",
     "live_trades",
     "option_bars",

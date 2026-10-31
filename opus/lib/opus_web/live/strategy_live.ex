@@ -2,8 +2,8 @@ defmodule OpusWeb.StrategyLive do
   @moduledoc """
   One strategy on one instrument: its switch, whether its
   recipe is locked and the way to edit it (`OpusWeb.StrategyBuilderLive`),
-  the other instruments the recipe runs on, the rules engine's verdict and
-  the regime behind it, a chart of every buy and sell the rules made over
+  the other instruments the recipe runs on, the rules engine's verdict, a
+  chart of every buy and sell the rules made over
   the last bars with the rule strips that say why (the engine's signal
   preview, loaded after the page; the plain candle chart with the open
   position stands in while it loads or when the engine is down), the rules
@@ -175,7 +175,13 @@ defmodule OpusWeb.StrategyLive do
         |> assign(s: s, page_title: s.recipe.name, drift: DriftCheck.latest([s.id])[s.id])
         |> WholeHistory.assign_axes(s.recipe.definition)
         |> start_async(:preview, fn ->
-          Strategies.preview(s.recipe.definition, s.instrument, s.granularity, s.sizing_params)
+          Strategies.preview(
+            s.recipe.definition,
+            s.instrument,
+            s.granularity,
+            s.sizing_params,
+            :recent
+          )
         end)
         |> start_async(:report, fn ->
           Strategies.report(s.recipe.definition, s.instrument, s.granularity, s.sizing_params)
@@ -377,22 +383,6 @@ defmodule OpusWeb.StrategyLive do
           <.card label={copy("Rules engine")}>
             <.verdict s={@s} />
           </.card>
-          <.card label={copy("Regime")}>
-            <%= if @s.rule do %>
-              <span class="text-[18px] font-semibold">{String.capitalize(
-                @s.rule.composite || "unknown"
-              )}</span>
-              <span class="text-[13px] text-muted">
-                {Enum.map_join(
-                  @s.rule.frames,
-                  " · ",
-                  &"#{&1.frame} ADX #{num(&1.adx, 1)} #{&1.regime}"
-                )}
-              </span>
-            <% else %>
-              <span class="text-[18px] font-semibold text-muted">—</span>
-            <% end %>
-          </.card>
           <.card label={copy("Open position")}>
             <%= if @s.open_trade do %>
               <span class="text-[18px] font-semibold">
@@ -506,7 +496,7 @@ defmodule OpusWeb.StrategyLive do
                 />
               </dl>
               <p class="text-[13px] text-muted">
-                The scalars Opus polls for the regime detector. They describe the market, not a distance to the next entry.
+                Where the market stands on a few common measures. They describe the market, not a distance to the next entry.
               </p>
             <% else %>
               <p class="text-[13px] text-muted">

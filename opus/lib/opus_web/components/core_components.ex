@@ -507,4 +507,19 @@ defmodule OpusWeb.CoreComponents do
     </span>
     """
   end
+
+  @doc """
+  A filter or tab pill's classes, chosen or not: every page's pills use
+  this one look. The outline is a ring (a box shadow), which stays smooth
+  round the ends where a 1px border looks jagged on the dark theme.
+  """
+  @spec chip_class(boolean()) :: [String.t()]
+  def chip_class(chosen),
+    do: [
+      "inline-flex items-center gap-1.5 rounded-full px-3 py-1 ring-1 ring-inset transition-colors",
+      chip_tone(chosen)
+    ]
+
+  defp chip_tone(true), do: "bg-primary/10 text-primary ring-primary/70"
+  defp chip_tone(false), do: "bg-base-200 ring-base-content/20 hover:ring-primary/70"
 end

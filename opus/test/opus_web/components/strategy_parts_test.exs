@@ -181,15 +181,55 @@ defmodule OpusWeb.StrategyPartsTest do
     assert html =~
              "stretches of its daily account results reshuffled at random 10000 times: " <>
                "98.0% of those histories made money, and a bad run (1 in 20) falls 4.2% " <>
-               "at its own sizing, open trades valued each day"
+               "at its risk a trade, open trades valued each day"
 
-    assert html =~ "Bad-run drop (1 in 20), account at its sizing, valued daily 4.2%"
+    assert html =~ "Bad-run drop (1 in 20), account at its risk a trade, valued daily 4.2%"
     assert html =~ "Reshuffled daily histories that made money 98.0%"
 
     old = Map.delete(daily, "mc_method")
     html = render_component(&StrategyParts.evidence/1, results: stage.(old))
     assert html =~ "its trades redrawn at random 10000 times"
     assert html =~ "Bad-run drop (1 in 20), trades added up 4.2%"
+  end
+
+  test "the holdout says how many looks it has had and what luck could add" do
+    holdout = fn stats ->
+      %{
+        results(not_run())
+        | holdout: %{status: :passed, stats: stats, checks: [], reason: nil, at: nil}
+      }
+    end
+
+    first = %{
+      "annual_sharpe" => 0.9,
+      "num_trades" => 12,
+      "holdout_start" => "2025-10-17",
+      "holdout_looks" => 1,
+      "holdout_luck_allowance" => 0.0,
+      "annual_sharpe_after_looks" => 0.9
+    }
+
+    html = render_component(&StrategyParts.evidence/1, results: holdout.(first))
+    assert html =~ "Sharpe (a year) 0.90 over 12 trades from Oct 17, 2025, the first look"
+
+    third = %{
+      first
+      | "holdout_looks" => 3,
+        "holdout_luck_allowance" => 0.52,
+        "annual_sharpe_after_looks" => 0.38
+    }
+
+    html = render_component(&StrategyParts.evidence/1, results: holdout.(third))
+    assert html =~ "3 versions of this idea have looked at this stretch, so 0.52 of that"
+    assert html =~ "0.38 after it"
+  end
+
+  test "a basket's trades beside its months: positions when ranked" do
+    assert StrategyParts.held_words(%{"basket" => %{"mode" => "ranked"}, "num_trades" => 4}) ==
+             "4 positions held across re-ranks"
+
+    assert StrategyParts.held_words(%{"basket" => %{"mode" => "together"}, "num_trades" => 90}) ==
+             "90 trades"
   end
 
   test "a stuck stage says it stopped and offers to resume from it; the holdout asks first" do

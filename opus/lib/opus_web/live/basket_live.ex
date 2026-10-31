@@ -661,9 +661,9 @@ defmodule OpusWeb.BasketLive do
       valued_words(stats, every) <> "."
   end
 
-  # A ranked basket is judged on months; its trades are context.
-  defp span_words(%{"num_months" => months, "num_trades" => trades}) when is_integer(months),
-    do: "#{months} months of results (#{trades} positions held across re-ranks)"
+  # A basket is judged on its account's months; its trades are context.
+  defp span_words(%{"num_months" => months} = stats) when is_integer(months),
+    do: "#{months} months of results (#{OpusWeb.StrategyParts.held_words(stats)})"
 
   defp span_words(stats), do: "#{stats["num_trades"]} trades"
 
