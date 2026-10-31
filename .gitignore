@@ -28,3 +28,4 @@ fable_review/
 research/
 running_local/
 scripts/
+**.elixir_ls/**
