@@ -224,9 +224,7 @@ defmodule OpusWeb.Components.PaperTrades do
       </div>
       <p :if={@trade.status == "open"} class="-mt-2 text-[13px] text-muted">
         {@trade.symbol}
-        <span :if={@now}>
-          now {money(@now.price)}<span :if={@now.at}> ({clock(@now.at)} {zone_name(@now.at)})</span>;
-        </span>
+        <span :if={@now}>{spot_words(@now)};</span>
         valued at {money(@trade.spot)} in the book's last snapshot.
       </p>
 

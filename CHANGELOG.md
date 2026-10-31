@@ -7,6 +7,7 @@ Releases start once Auro runs locally as a service; until then everything is in 
 
 ## Version 0.1.0 (TBD)
 
+- Options books show the underlying's close after hours (Questrade's regular-hours last trade, after-hours price beside it) and fall back to the stored 16:00 close when Questrade is down (commit pending)
 - Options books: open and closed trades under their own headings; each book's cash is said to be its own paper account; the underlying's price now (Questrade) beside the price the book was last valued at (`Options.Spot`) (commit pending)
 - Rules version 3: the annual Sharpe is read from the account valued daily; Monte Carlo counts dips inside a day; a basket's walk-forward unseen part warms up on earlier bars (a ranking rebalancing from the split) (commit pending)
 - Share alerts: daily strategies on stocks and ETFs alert a buy or sell at 15:45 New York (Discord and the Dashboard), decided by the live engine on the backtest's rules with no orders; Log trade on the Dashboard records the fill and updates the Wealthsimple account's holdings and cash (`Trading.ShareAlerts`, `engine/share_alerts.rs`) ([c5df805](https://github.com/jason-schultz/auro/commit/c5df80554d931b40bfd2457f8b9aad7c45c2560e))
