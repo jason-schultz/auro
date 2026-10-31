@@ -236,7 +236,7 @@ defmodule Opus.Journal.TradeStory do
 
   defp numbers(t, size) do
     [
-      result_row(t),
+      result_row(t, size),
       move_row(
         "Best point",
         extreme(t[:mfe_pct], t[:pnl_percent]),
@@ -263,9 +263,14 @@ defmodule Opus.Journal.TradeStory do
     |> Enum.reject(&is_nil/1)
   end
 
-  defp result_row(%{status: "open"}), do: nil
+  defp result_row(%{status: "open", now_pct: share, now_at: at}, size) when is_number(share),
+    do:
+      {"Now", "#{signed_pct(share, 2)}#{cad(share, size)}",
+       "at the last minute's close, #{OpusWeb.Format.clock(at)}"}
 
-  defp result_row(t),
+  defp result_row(%{status: "open"}, _size), do: nil
+
+  defp result_row(t, _size),
     do: {"Result", "#{money(t[:pnl])} · #{signed_pct(t[:pnl_percent], 2)}", nil}
 
   # The recorded best/worst move, but never milder than where it closed.
@@ -462,6 +467,19 @@ defmodule Opus.Journal.TradeStory do
   defp side_word(t), do: if(long?(t), do: "long", else: "short")
 
   # Currency pairs read as EUR/USD; index and commodity CFDs by their own name.
+  @doc """
+  An open trade's return if it closed at `last` (a share of its entry:
+  0.01 = +1%), long or short; nil without a price to read.
+  """
+  @spec unrealized(map(), number() | nil) :: float() | nil
+  def unrealized(%{entry_price: entry, direction: direction}, last)
+      when is_number(entry) and entry > 0 and is_number(last) do
+    sign = if String.downcase(direction || "") == "short", do: -1, else: 1
+    sign * (last - entry) / entry
+  end
+
+  def unrealized(_trade, _last), do: nil
+
   @doc "A trade's market as people say it: \"NAS100\", \"AUD/CAD\"."
   @spec market(%{instrument: String.t()}) :: String.t()
   def market(%{instrument: instrument}) do

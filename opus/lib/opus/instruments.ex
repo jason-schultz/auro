@@ -13,6 +13,7 @@ defmodule Opus.Instruments do
 
   alias Opus.Auro.Client
   alias Opus.Instruments.Instrument
+  alias Opus.MarketData.ShareHistoryWorker
   alias Opus.Repo
 
   @type feed :: :questrade_bars | :questrade_daily | :massive_daily | :options_chain
@@ -140,7 +141,13 @@ defmodule Opus.Instruments do
     |> Map.put(:asset_class, asset_class)
     |> then(&Map.put(&1, :test_broker, default_broker(&1)))
     |> create()
+    |> tap(&ready_to_test/1)
   end
+
+  # A market held as shares needs its history and dividends before it can
+  # be tested: queue them (`Opus.MarketData.ShareHistoryWorker`).
+  defp ready_to_test({:ok, instrument}), do: ShareHistoryWorker.enqueue(instrument)
+  defp ready_to_test(_error), do: :ok
 
   @spec create(map()) :: {:ok, Instrument.t()} | {:error, Ecto.Changeset.t()}
   def create(attrs) when is_map(attrs) do
@@ -189,6 +196,109 @@ defmodule Opus.Instruments do
     do:
       "#{Enum.join(names, ", ")} have no broker set for their tests, so there are no costs " <>
         "to grade them on. Pick one on the Instruments page."
+
+  @doc """
+  Why the markets in `names` can't be tested yet, or nil: the first of
+  `{:no_broker, names}` (no costs to grade them on) and `{:no_dividends,
+  names}` (held as shares, so a test pays their dividends, and those were
+  never loaded). The engine refuses both too; this says so before a test
+  is queued.
+  """
+  @spec untestable([String.t()]) :: nil | {:no_broker | :no_dividends, [String.t()]}
+  def untestable(names) do
+    case {without_broker(names), without_dividends(names)} do
+      {[], []} -> nil
+      {[], off} -> {:no_dividends, off}
+      {off, _} -> {:no_broker, off}
+    end
+  end
+
+  @doc "`untestable/1`'s reason in plain words, with what to do."
+  @spec untestable_words({:no_broker | :no_dividends, [String.t()]}) :: String.t()
+  def untestable_words({:no_broker, names}), do: without_broker_words(names)
+
+  def untestable_words({:no_dividends, names}),
+    do:
+      "#{Enum.join(names, ", ")}: tested as shares owned outright, which are paid " <>
+        "dividends, and they haven't been loaded yet, so a test would leave that cash out. " <>
+        "Load them with Load dividends (here or on the Instruments page), then test."
+
+  @doc "Whether dividends can be loaded for the market `name` (a US listing Massive covers)."
+  @spec dividend_source?(String.t()) :: boolean()
+  def dividend_source?(name),
+    do: match?(%Instrument{massive_ticker: t} when is_binary(t), find(name))
+
+  @doc """
+  Load the dividends of the market `name` (in any vendor's spelling) through
+  the live engine: `{:ok, count}`, or `{:error, :no_source}` for a listing
+  Massive doesn't cover, or the engine's error.
+  """
+  @spec load_dividends(String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def load_dividends(name) do
+    case find(name) do
+      %Instrument{massive_ticker: ticker} when is_binary(ticker) ->
+        with {:ok, %{"dividends" => count}} <- Client.persist_dividends(ticker), do: {:ok, count}
+
+      _ ->
+        {:error, :no_source}
+    end
+  end
+
+  @doc "Whether the market `name` (in any vendor's spelling) is in the instruments table."
+  @spec known?(String.t()) :: boolean()
+  def known?(name), do: find(name) != nil
+
+  @doc "The brokers whose tests hold shares outright (no overnight cost), so pay dividends."
+  @spec share_brokers() :: [String.t()]
+  def share_brokers,
+    do: Repo.all(from(b in "brokers", where: b.overnight_cost == "none", select: b.name))
+
+  @doc """
+  Whether the market `name` is tested as shares held (its test broker is a
+  share broker, e.g. Wealthsimple): live, its signals are share alerts you
+  act on by hand, not OANDA trades.
+  """
+  @spec share_market?(String.t()) :: boolean()
+  def share_market?(name) do
+    case find(name) do
+      %Instrument{test_broker: broker} when is_binary(broker) -> broker in share_brokers()
+      _ -> false
+    end
+  end
+
+  defp find(name) do
+    Repo.one(
+      from(i in Instrument,
+        where:
+          i.oanda_symbol == ^name or i.questrade_symbol == ^name or i.massive_ticker == ^name,
+        limit: 1
+      )
+    )
+  end
+
+  # Markets among `names` held as shares (their test broker charges no
+  # overnight cost) whose dividend history can be loaded (Massive covers
+  # them) and never was. One with no history to load (a Canadian listing) is
+  # tested without it, with the dividends recorded since
+  # (`Opus.MarketData.DividendRecordWorker`), and its results say so.
+  defp without_dividends(names) do
+    missing =
+      from(i in "instruments",
+        join: b in "brokers",
+        on: b.name == i.test_broker,
+        where:
+          b.overnight_cost == "none" and is_nil(i.dividends_checked_at) and
+            not is_nil(i.massive_ticker) and
+            (i.oanda_symbol in ^names or i.questrade_symbol in ^names or
+               i.massive_ticker in ^names),
+        select: [i.oanda_symbol, i.questrade_symbol, i.massive_ticker]
+      )
+      |> Repo.all()
+      |> List.flatten()
+      |> MapSet.new()
+
+    Enum.filter(names, &MapSet.member?(missing, &1))
+  end
 
   @doc false
   @spec listing(String.t()) :: map()
@@ -239,13 +349,17 @@ defmodule Opus.Instruments do
     |> Repo.all()
   end
 
-  @doc "Set the broker `instrument`'s tests charge the costs of; nil: not tested."
+  @doc """
+  Set the broker `instrument`'s tests charge the costs of; nil: not tested.
+  A broker that holds shares queues the market's history and dividends.
+  """
   @spec set_broker(Instrument.t(), String.t() | nil) ::
           {:ok, Instrument.t()} | {:error, Ecto.Changeset.t()}
   def set_broker(%Instrument{} = instrument, broker) do
     instrument
     |> Instrument.changeset(%{test_broker: broker})
     |> Repo.update()
+    |> tap(&ready_to_test/1)
   end
 
   @doc """

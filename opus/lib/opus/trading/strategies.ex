@@ -340,15 +340,46 @@ defmodule Opus.Trading.Strategies do
       recipe: recipe_view(strategy.recipe),
       sizing: StrategyWords.sizing(strategy.sizing),
       sizing_params: strategy.sizing,
+      action: strategy.action || %{"type" => "oanda"},
       siblings: siblings,
+      locked_by: Enum.filter(siblings, &(&1.enabled or &1.open_trades > 0))
+    })
+    |> Map.merge(tests(strategy, siblings))
+  end
+
+  @doc """
+  Just the test results of strategy `id` (`runs` and `results`, as `get/1`
+  gives them), and its recipe's definition and timeframe, the key its tests
+  are announced under (`Opus.Pipeline.Events.subscribe/2`). Database only:
+  for refreshing a page when a stage lands.
+  """
+  @spec test_results(String.t()) :: {:ok, map()} | :error
+  def test_results(id) do
+    with {:ok, uuid} <- Ecto.UUID.cast(id),
+         %LiveStrategy{} = strategy <- Repo.get(LiveStrategy, uuid) do
+      strategy = Repo.preload(strategy, :recipe)
+
+      {:ok,
+       strategy
+       |> tests(siblings(strategy))
+       |> Map.merge(%{
+         definition: strategy.recipe.definition,
+         granularity: strategy.recipe.granularity
+       })}
+    else
+      _ -> :error
+    end
+  end
+
+  defp tests(strategy, siblings) do
+    %{
       # Tests on instruments the recipe doesn't run on.
       runs:
         strategy.recipe.definition
         |> StrategyResults.for_recipe(strategy.recipe.granularity)
         |> Enum.reject(fn run -> Enum.any?(siblings, &(&1.instrument == run.instrument)) end),
-      locked_by: Enum.filter(siblings, &(&1.enabled or &1.open_trades > 0)),
       results: StrategyResults.for_ids([strategy.id]) |> Map.fetch!(strategy.id)
-    })
+    }
   end
 
   # Every instrument the same recipe runs on, this one included.
@@ -439,6 +470,7 @@ defmodule Opus.Trading.Strategies do
   defp recompute_if_cleared({0, _}), do: {:error, :none_open}
 
   defp recompute_if_cleared({count, _}) do
+    Opus.Dashboard.Feed.changed()
     RulesEngine.recompute()
     {:ok, count}
   end

@@ -3,6 +3,8 @@ defmodule Opus.Options.PaperTest do
 
   import Phoenix.LiveViewTest
 
+  import Ecto.Query, only: [from: 2]
+
   alias Opus.Instruments
   alias Opus.Options.Paper
   alias Opus.Options.Paper.{Event, Position, Trade}
@@ -145,5 +147,79 @@ defmodule Opus.Options.PaperTest do
     assert [%{mid: _}] = detail.marks
     assert Paper.leg(-1) == nil
     assert html =~ "Net premium sold"
+  end
+
+  describe "closed_trades/1" do
+    defp closed_trade(book, structure, legs, opened_on \\ ~D[2026-10-23]) do
+      id = Repo.one!(from(i in "instruments", where: i.symbol == "SPY", select: i.id))
+
+      trade =
+        Repo.insert!(%Trade{
+          strategy: book,
+          underlying_instrument_id: id,
+          structure: structure,
+          opened_on: opened_on,
+          closed_on: ~D[2026-10-29],
+          status: "closed"
+        })
+
+      for {side, kind, strike, status, events} <- legs do
+        p =
+          Repo.insert!(%Position{
+            trade_id: trade.id,
+            underlying_instrument_id: id,
+            side: side,
+            kind: kind,
+            quantity: 1,
+            strike: strike,
+            expiration: @expiry,
+            open_price: 1.0,
+            opened_on: opened_on,
+            status: status,
+            closed_on: ~D[2026-10-29]
+          })
+
+        for {kind, cash} <- events,
+            do:
+              Repo.insert!(%Event{
+                position_id: p.id,
+                underlying_instrument_id: id,
+                strategy: book,
+                on: ~D[2026-10-29],
+                kind: kind,
+                cash: cash
+              })
+      end
+
+      trade
+    end
+
+    test "each closed trade with how it ended and its P&L, newest first" do
+      # The Oct 29 put spread: 155.80 taken in, 76.20 paid to close.
+      closed_trade(
+        "put_spread",
+        "put_spread",
+        [
+          {"long", "put", 250.0, "closed", [{"open", -108.1}, {"mark", 0.0}, {"close", 48.9}]},
+          {"short", "put", 265.0, "closed", [{"open", 263.9}, {"close", -125.1}]}
+        ],
+        ~D[2026-10-26]
+      )
+
+      # A wheel put assigned: the share purchase isn't the option's result.
+      closed_trade("wheel", "put", [
+        {"short", "put", 260.0, "assigned", [{"open", 316.9}, {"assign", -26_000.0}]}
+      ])
+
+      [assigned, spread] = Paper.closed_trades()
+
+      assert spread.symbol == "SPY"
+      assert spread.ended == :closed
+      assert_in_delta spread.opened_cash, 155.8, 1.0e-9
+      assert_in_delta spread.pnl, 79.6, 1.0e-9
+
+      assert assigned.ended == :assigned
+      assert_in_delta assigned.pnl, 316.9, 1.0e-9
+    end
   end
 end

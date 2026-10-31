@@ -26,10 +26,11 @@ defmodule OpusWeb.StrategyLive do
   import OpusWeb.SignalChart, only: [signal_chart: 1]
   import OpusWeb.StrategyParts
 
+  alias Opus.Pipeline.Events
   alias Opus.Auro.Client
   alias Opus.Journal.TradeStory
   alias Opus.Repo
-  alias Opus.Trading.{DriftCheck, LiveStrategy, Strategies}
+  alias Opus.Trading.{DriftCheck, LiveStrategy, ShareAlerts, Strategies}
   alias OpusWeb.WholeHistory
 
   @impl true
@@ -50,8 +51,33 @@ defmodule OpusWeb.StrategyLive do
       )
       |> WholeHistory.init()
 
-    {:ok, if(connected?(socket), do: load(socket), else: socket)}
+    {:ok, if(connected?(socket), do: socket |> load() |> subscribe_tests(), else: socket)}
   end
+
+  # Stage starts and finishes of this strategy's own tests
+  # (`Opus.Pipeline.Events`).
+  defp subscribe_tests(socket) do
+    with {:ok, %{definition: definition, granularity: granularity}} <-
+           Strategies.test_results(socket.assigns.id),
+         do: Events.subscribe(definition, granularity)
+
+    socket
+  end
+
+  # One of its tests started or finished a stage: refresh the test results
+  # only, not the engine-backed parts or the previews.
+  @impl true
+  def handle_info({:pipeline_stage, _config_id}, %{assigns: %{s: %{} = s}} = socket) do
+    case Strategies.test_results(socket.assigns.id) do
+      {:ok, tests} ->
+        {:noreply, assign(socket, s: Map.merge(s, Map.take(tests, [:runs, :results])))}
+
+      :error ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_info({:pipeline_stage, _config_id}, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("refresh", _params, socket), do: {:noreply, load(socket)}
@@ -107,6 +133,17 @@ defmodule OpusWeb.StrategyLive do
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Could not flip the switch: #{describe(reason)}")}
+    end
+  end
+
+  def handle_event("share_amount", %{"amount" => amount}, socket) do
+    case ShareAlerts.set_amount(socket.assigns.id, amount) do
+      {:ok, amount} ->
+        {:noreply,
+         socket |> put_flash(:info, "Each buy alert is now for #{money(amount)}.") |> load()}
+
+      {:error, words} ->
+        {:noreply, put_flash(socket, :error, words)}
     end
   end
 
@@ -269,6 +306,27 @@ defmodule OpusWeb.StrategyLive do
               </button>
             </div>
           </div>
+          <.form
+            :if={@s.action["type"] == "share_alert"}
+            for={%{}}
+            id="share-amount"
+            phx-submit="share_amount"
+            class="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-box border border-base-300 bg-base-200 px-4 py-3 text-[14px]"
+          >
+            <span>
+              <.t {copy("Share alerts at Wealthsimple")} />: you place each order by hand; it never trades on OANDA. Each buy is for
+            </span>
+            <label class="flex items-center gap-1">
+              <span class="sr-only">Amount per buy</span>
+              $<input
+                name="amount"
+                value={@s.action["amount"]}
+                inputmode="decimal"
+                class="input input-sm w-24"
+              />
+            </label>
+            <button type="submit" class="btn btn-sm">Save</button>
+          </.form>
           <div
             :if={@s.suspension}
             class="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-box border border-error/40 bg-base-200 px-4 py-3 text-sm"
@@ -649,15 +707,7 @@ defmodule OpusWeb.StrategyLive do
   defp last_close([]), do: nil
   defp last_close(candles), do: List.last(candles).close
 
-  defp unrealized(_trade, nil), do: nil
-
-  defp unrealized(%{entry_price: entry, direction: direction}, last)
-       when is_number(entry) and entry > 0 do
-    sign = if String.downcase(direction || "") == "short", do: -1, else: 1
-    sign * (last - entry) / entry
-  end
-
-  defp unrealized(_trade, _last), do: nil
+  defp unrealized(trade, last), do: Opus.Journal.TradeStory.unrealized(trade, last)
 
   defp chart_lines(nil, last), do: [%{price: last, label: "Last", kind: :now}]
 

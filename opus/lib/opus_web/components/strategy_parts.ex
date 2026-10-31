@@ -92,6 +92,9 @@ defmodule OpusWeb.StrategyParts do
         <span :if={costs_words(@results.backtest)} class="block text-muted">
           {costs_words(@results.backtest)}
         </span>
+        <span :if={hold_words(@results.backtest)} class="block">
+          {hold_words(@results.backtest)}
+        </span>
       </dd>
       <dt class="text-muted">Walk-forward</dt>
       <dd class="m-0">
@@ -480,6 +483,10 @@ defmodule OpusWeb.StrategyParts do
     "sharpe_retention" => {"Quality kept on unseen data", :share},
     "profitable_pct" => {"Redrawn histories that made money", :share},
     "p95_drawdown" => {"Bad-run drop (1 in 20), trades added up", :share},
+    "p95_drawdown_vs_hold" =>
+      {"Bad run (1 in 20) at the risk of just holding, as a share of holding's own bad run",
+       :share},
+    "sharpe_vs_hold" => {"Sharpe above just holding's", :number},
     "median_sharpe" => {"Median Sharpe per trade", :number},
     "deflated_sharpe" => {"Chance it isn't luck from trying many versions", :share},
     "worst_sharpe_retention" => {"Sharpe kept at the worst nearby setting", :share},
@@ -591,15 +598,75 @@ defmodule OpusWeb.StrategyParts do
         _ -> ""
       end
 
+    dividends =
+      case {c["dividends_from"], c["dividends_recorded_since"]} do
+        {"none", _} ->
+          " The fund pays no dividends."
+
+        {nil, "none"} ->
+          " Dividends left out: there's no dividend history for this listing (our source " <>
+            "covers US listings only), so results understate it by its yield, and just " <>
+            "holding is compared the same way."
+
+        {nil, since} when is_binary(since) ->
+          " Dividends left out before #{since}: there's no dividend history for this listing, " <>
+            "only the ones recorded since, so earlier results understate it by its yield."
+
+        {nil, nil} ->
+          ""
+
+        {from, _} ->
+          " Dividends paid to longs; tested from #{from}, where its dividend record starts."
+      end
+
     shorts =
       if c["shorts_skipped"],
         do: " #{broker_name(broker)} can't short, so its short rules were skipped.",
         else: ""
 
-    "Tested with #{broker_name(broker)}'s costs: #{overnight}, #{spread}#{commission}.#{shorts}"
+    "Tested with #{broker_name(broker)}'s costs: #{overnight}, #{spread}#{commission}." <>
+      dividends <> shorts
   end
 
   def costs_words(_stage), do: nil
+
+  @doc """
+  The backtest beside just holding the same funds over the same years
+  (equal weights, dividends in, fully invested; recorded for shares held
+  outright since Oct 30 2026): whether the rule beat holding on Sharpe,
+  which compares fairly however much of the account it used. Nil when not
+  recorded.
+  """
+  @spec hold_words(map()) :: String.t() | nil
+  def hold_words(%{stats: %{"buy_and_hold" => %{"annual_sharpe" => hold} = h}})
+      when is_number(hold) do
+    # The rule's account valued every day, as holding is (not its
+    # close-day Sharpe, which books a months-long hold all at once).
+    mine = get_in(h, ["rule", "annual_sharpe"])
+
+    verdict =
+      cond do
+        not is_number(mine) ->
+          ""
+
+        mine >= hold + 0.1 ->
+          " This rule's Sharpe, #{number(mine, 2)}, beats it."
+
+        mine <= hold - 0.1 ->
+          " This rule's Sharpe, #{number(mine, 2)}, is worse: holding did better."
+
+        true ->
+          " This rule's Sharpe, #{number(mine, 2)}, is about the same: it added little."
+      end
+
+    "Just holding the same funds over the same years: #{signed_pct(h["total_return"])} " <>
+      "(#{signed_pct(h["annual_return"])} a year), Sharpe #{number(hold, 2)}, worst drop " <>
+      "#{pct(h["max_drawdown"])}, fully invested." <> verdict
+  end
+
+  def hold_words(_stage), do: nil
+
+  defp number(n, decimals), do: :erlang.float_to_binary(n / 1, decimals: decimals)
 
   defp broker_name("oanda"), do: "OANDA"
   defp broker_name("wealthsimple"), do: "Wealthsimple"

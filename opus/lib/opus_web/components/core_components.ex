@@ -498,4 +498,13 @@ defmodule OpusWeb.CoreComponents do
   def translate_errors(errors, field) when is_list(errors) do
     for {^field, {msg, opts}} <- errors, do: translate_error({msg, opts})
   end
+
+  @doc "Marks practice money (an OANDA practice account, the options books): not real."
+  def paper_tag(assigns) do
+    ~H"""
+    <span class="ml-1 rounded-full px-1.5 text-[11px] font-medium text-warning ring-1 ring-inset ring-warning/60">
+      paper
+    </span>
+    """
+  end
 end

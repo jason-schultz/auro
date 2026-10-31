@@ -1,5 +1,7 @@
 defmodule OpusWeb.InstrumentsLiveTest do
-  use OpusWeb.ConnCase, async: true
+  # Not async: it adds instruments, whose unique keys other files' tests
+  # share; two adding the same ones in parallel can deadlock.
+  use OpusWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
 
@@ -96,5 +98,20 @@ defmodule OpusWeb.InstrumentsLiveTest do
     assert view |> element("button[phx-click=enrich]") |> render_click() =~ "Asking Questrade…"
     assert render_async(view, 5_000) =~ "Auro is not running."
     refute render(view) =~ "Asking Questrade…"
+  end
+
+  test "a market held as shares shows whether its dividends are loaded, and loads them", %{
+    conn: conn
+  } do
+    {:ok, _} = Instruments.add("MSFT", "equity")
+    {:ok, _} = Instruments.add("SDE.TO", "equity")
+
+    {:ok, view, html} = live(conn, ~p"/instruments")
+    assert html =~ "Load dividends (needed to test)"
+    assert html =~ "No dividend history (US listings only): tested without past dividends"
+
+    # The engine is down in tests: the load fails and says so.
+    view |> element("button", "Load dividends (needed to test)") |> render_click()
+    assert render_async(view) =~ "Couldn&#39;t load the dividends"
   end
 end

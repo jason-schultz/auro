@@ -1,3 +1,4 @@
+pub mod adjusted;
 pub mod client;
 pub mod massive;
 pub mod oanda;
@@ -61,6 +62,9 @@ pub struct BrokerAccount {
     pub market_value: Option<f64>,
     pub total_equity: Option<f64>,
     pub buying_power: Option<f64>,
+    /// Practice money, not real: OANDA's practice environment. Opus keeps
+    /// it out of the total and net worth.
+    pub paper: bool,
 }
 
 #[cfg(test)]

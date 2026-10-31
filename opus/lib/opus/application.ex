@@ -8,6 +8,7 @@ defmodule Opus.Application do
   @impl true
   def start(_type, _args) do
     children = base_children() ++ scheduled_workers()
+    Opus.Pipeline.Events.attach()
 
     opts = [strategy: :one_for_one, name: Opus.Supervisor]
     Supervisor.start_link(children, opts)
@@ -37,7 +38,8 @@ defmodule Opus.Application do
         Opus.Trading.RegimeDetector,
         Opus.Trading.RulesEngine,
         Opus.Trading.CircuitBreaker,
-        Opus.Trading.SignalEventListener
+        Opus.Trading.SignalEventListener,
+        Opus.Dashboard.Feed
       ]
     else
       []

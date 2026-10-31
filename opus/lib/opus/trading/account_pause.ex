@@ -45,7 +45,16 @@ defmodule Opus.Trading.AccountPause do
          %{drawdown_pause_pct: limit, since: since} <- AccountLimits.get(),
          %{peak: peak, nav: nav} when is_number(peak) <- nav_since(baseline(since)),
          true <- tripped?(peak, nav, limit) do
-      Repo.insert!(%__MODULE__{triggered_at: now, peak_nav: peak, nav: nav, limit_pct: limit / 1})
+      pause =
+        Repo.insert!(%__MODULE__{
+          triggered_at: now,
+          peak_nav: peak,
+          nav: nav,
+          limit_pct: limit / 1
+        })
+
+      Opus.Dashboard.Feed.changed()
+      pause
     else
       %__MODULE__{} = pause ->
         pause
@@ -98,6 +107,7 @@ defmodule Opus.Trading.AccountPause do
       from(p in __MODULE__, where: is_nil(p.cleared_at))
       |> Repo.update_all(set: [cleared_at: now, cleared_by: by, updated_at: now])
 
+    Opus.Dashboard.Feed.changed()
     count
   end
 

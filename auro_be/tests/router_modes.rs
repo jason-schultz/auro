@@ -52,7 +52,9 @@ const LIVE_ONLY: &[(&str, &str)] = &[
     ("POST", "/api/questrade/candles/persist"),
     ("POST", "/api/questrade/options/snapshot"),
     ("POST", "/api/massive/candles/persist"),
+    ("POST", "/api/massive/dividends/persist"),
     ("POST", "/api/options/scenarios"),
+    ("POST", "/api/share-alerts/evaluate"),
 ];
 
 async fn status(router: Router<auro::state::AppState>, method: &str, uri: &str) -> StatusCode {

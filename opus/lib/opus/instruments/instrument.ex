@@ -31,6 +31,9 @@ defmodule Opus.Instruments.Instrument do
     field :test_broker, :string
     # Its own round-trip spread in basis points, over its broker's default.
     field :spread_bps, :float
+    # When its dividends were last loaded (Massive, through the engine); nil:
+    # never. Written by the engine, read here.
+    field :dividends_checked_at, :naive_datetime
 
     timestamps(type: :utc_datetime_usec, inserted_at: :created_at)
   end

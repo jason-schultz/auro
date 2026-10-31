@@ -240,6 +240,7 @@ defmodule Opus.Trading.CircuitBreaker do
     |> Repo.insert()
     |> case do
       {:ok, _} ->
+        Opus.Dashboard.Feed.changed()
         :inserted
 
       {:error, reason} ->

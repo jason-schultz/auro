@@ -25,11 +25,15 @@ defmodule Opus.Accounts.HoldingsPriceWorker do
     if in_session?(scheduled_at), do: refresh(), else: :ok
   end
 
-  @doc "Whether `utc` falls in a New York trading session, close included."
+  @doc """
+  Whether `utc` falls in a New York trading session, close included. To
+  the second: Oban stamps the 16:00 run a fraction past it (16:00:00.556),
+  which must still count as the close.
+  """
   @spec in_session?(DateTime.t()) :: boolean()
   def in_session?(utc) do
     local = Clock.local(utc)
-    time = DateTime.to_time(local)
+    time = local |> DateTime.to_time() |> Time.truncate(:second)
 
     MarketCalendar.trading_day?(DateTime.to_date(local)) and
       Time.compare(time, @open) != :lt and Time.compare(time, @close) != :gt

@@ -81,6 +81,35 @@ pub struct CreateLiveStrategy {
     pub instrument: String,
     pub granularity: String,
     pub parameters: Value,
+    /// What its signals do; omitted: OANDA trades. A share alert
+    /// (`{"type": "share_alert", "amount": dollars}`) is decided by
+    /// `api::share_alerts` and never reaches the OANDA evaluator.
+    #[serde(default)]
+    pub action: Option<Value>,
+}
+
+/// A share alert is a daily strategy with a dollar amount per buy.
+fn validate_action(payload: &CreateLiveStrategy) -> AppResult<bool> {
+    let Some(action) = &payload.action else {
+        return Ok(false);
+    };
+    match action["type"].as_str() {
+        Some("oanda") => Ok(false),
+        Some("share_alert") => {
+            if payload.granularity != "D" {
+                return Err(AppError::BadRequest(
+                    "share alerts are for daily strategies".into(),
+                ));
+            }
+            match action["amount"].as_f64() {
+                Some(amount) if amount > 0.0 => Ok(true),
+                _ => Err(AppError::BadRequest(
+                    "a share alert needs a dollar amount above 0".into(),
+                )),
+            }
+        }
+        other => Err(AppError::BadRequest(format!("unknown action {other:?}"))),
+    }
 }
 
 /// Largest number a block setting may hold. Periods are bar counts; one far
@@ -325,6 +354,7 @@ pub async fn create_live_strategy(
     Json(payload): Json<CreateLiveStrategy>,
 ) -> AppResult<Json<Value>> {
     validate_parameters(&payload)?;
+    let share_alert = validate_action(&payload)?;
     let id = Uuid::new_v4();
 
     let result = live_strategies_repo::insert_live_strategy(
@@ -339,7 +369,9 @@ pub async fn create_live_strategy(
 
     match result {
         Ok(_) => {
-            if !instrument_buffers_needed(&state.db, &payload.instrument, Some(id)).await? {
+            if let (true, Some(action)) = (share_alert, &payload.action) {
+                live_strategies_repo::set_action(&state.db, id, action).await?;
+            } else if !instrument_buffers_needed(&state.db, &payload.instrument, Some(id)).await? {
                 load_instrument_buffers(&state, &payload.instrument).await?;
             }
 
@@ -358,6 +390,7 @@ pub async fn create_live_strategy(
                 "parameters": payload.parameters,
                 "enabled": false,
                 "curator_mode": "auto",
+                "action": payload.action.clone().unwrap_or_else(|| json!({"type": "oanda"})),
             })))
         }
         Err(e) => {
@@ -704,5 +737,36 @@ mod tests {
         let huge = serde_json::json!({"components": {"m": {"type": "MaFilter", "params": {"period": 1e12}}}});
         let (component, param, _) = super::oversized_setting(&huge).unwrap();
         assert_eq!((component.as_str(), param.as_str()), ("m", "period"));
+    }
+
+    fn payload(granularity: &str, action: Option<serde_json::Value>) -> super::CreateLiveStrategy {
+        super::CreateLiveStrategy {
+            strategy_type: "composite".into(),
+            instrument: "SPY".into(),
+            granularity: granularity.into(),
+            parameters: serde_json::json!({}),
+            action,
+        }
+    }
+
+    #[test]
+    fn a_share_alert_is_daily_with_an_amount() {
+        use serde_json::json;
+        assert!(!super::validate_action(&payload("D", None)).unwrap());
+        assert!(!super::validate_action(&payload("H1", Some(json!({"type": "oanda"})))).unwrap());
+        assert!(super::validate_action(&payload(
+            "D",
+            Some(json!({"type": "share_alert", "amount": 500}))
+        ))
+        .unwrap());
+        assert!(super::validate_action(&payload(
+            "H1",
+            Some(json!({"type": "share_alert", "amount": 500}))
+        ))
+        .is_err());
+        assert!(
+            super::validate_action(&payload("D", Some(json!({"type": "share_alert"})))).is_err()
+        );
+        assert!(super::validate_action(&payload("D", Some(json!({"type": "fax"})))).is_err());
     }
 }

@@ -145,8 +145,8 @@ defmodule OpusWeb.TogetherLive do
         {:error, :not_old} ->
           put_flash(socket, :error, "#{name} was already tested by today's rules.")
 
-        {:error, {:no_broker, names}} ->
-          put_flash(socket, :error, Opus.Instruments.without_broker_words(names))
+        {:error, {kind, _names} = why} when kind in [:no_broker, :no_dividends] ->
+          put_flash(socket, :error, Opus.Instruments.untestable_words(why))
 
         {:error, _reason} ->
           put_flash(socket, :error, "Couldn't start the tests for #{name}.")

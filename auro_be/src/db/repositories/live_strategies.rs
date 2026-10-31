@@ -174,6 +174,17 @@ pub(crate) async fn insert_live_strategy(
     Ok(())
 }
 
+/// What the assignment's signals do (`{"type": "oanda"}` by default, or
+/// `{"type": "share_alert", ...}`).
+pub(crate) async fn set_action(pool: &PgPool, id: Uuid, action: &Value) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE live_strategies SET action = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(action)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub(crate) async fn get_live_strategy_by_id(
     pool: &PgPool,
     id: Uuid,
@@ -269,8 +280,9 @@ pub(crate) async fn upsert_trading_config(
     Ok(())
 }
 
-/// Every live strategy on a key, enabled or not. The evaluator needs the
-/// disabled ones too: their open positions must still be managed to exit.
+/// Every OANDA live strategy on a key, enabled or not. The evaluator needs
+/// the disabled ones too: their open positions must still be managed to
+/// exit. Share-alert assignments are decided by `engine::share_alerts`.
 pub(crate) async fn list_for_instrument_granularity(
     pool: &PgPool,
     instrument: &str,
@@ -279,10 +291,36 @@ pub(crate) async fn list_for_instrument_granularity(
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT ls.id, ls.strategy_type, ls.instrument, ls.granularity, {PARAMETERS_SQL} AS parameters, ls.enabled \
          FROM live_strategies ls JOIN strategies s ON s.id = ls.strategy_id \
-         WHERE ls.instrument = $1 AND ls.granularity = $2"
+         WHERE ls.instrument = $1 AND ls.granularity = $2 AND ls.action->>'type' = 'oanda'"
     )))
     .bind(instrument)
     .bind(granularity)
+    .fetch_all(pool)
+    .await
+}
+
+/// An assignment whose action is a share alert, with what the alert check
+/// needs: its strategy JSON and the market's Questrade ticker.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct ShareAlertAssignment {
+    pub id: Uuid,
+    pub instrument: String,
+    pub parameters: Value,
+    pub questrade_symbol: Option<String>,
+}
+
+/// The share-alert assignments among `ids` (others are left out).
+pub(crate) async fn share_alert_assignments(
+    pool: &PgPool,
+    ids: &[Uuid],
+) -> Result<Vec<ShareAlertAssignment>, sqlx::Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT ls.id, ls.instrument, {PARAMETERS_SQL} AS parameters, i.questrade_symbol \
+         FROM live_strategies ls JOIN strategies s ON s.id = ls.strategy_id \
+         LEFT JOIN instruments i ON i.id = ls.instrument_id \
+         WHERE ls.id = ANY($1) AND ls.action->>'type' = 'share_alert'"
+    )))
+    .bind(ids)
     .fetch_all(pool)
     .await
 }
@@ -368,6 +406,61 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("DELETE FROM strategies WHERE name = 'split test dip-buy'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AURO_TEST_DATABASE_URL (migrated test database)"]
+    async fn share_alerts_are_kept_from_the_oanda_evaluator() {
+        let pool = AppState::for_tests_with_test_db().await.db;
+        let (oanda, share) = (Uuid::new_v4(), Uuid::new_v4());
+        let named = |pct| {
+            let mut p = rsi_dip_buy("SPLIT_SHARE", pct);
+            p["strategy_name"] = json!("share split test");
+            p
+        };
+        insert_live_strategy(&pool, oanda, "composite", "SPLIT_SHARE", "D", &named(0.01))
+            .await
+            .unwrap();
+        insert_live_strategy(&pool, share, "composite", "SPLIT_SHARE", "D", &named(0.02))
+            .await
+            .unwrap();
+        set_action(&pool, share, &json!({"type": "share_alert", "amount": 500}))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE live_strategies SET enabled = true WHERE id = $1")
+            .bind(share)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let evaluated: Vec<Uuid> = list_for_instrument_granularity(&pool, "SPLIT_SHARE", "D")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(evaluated, vec![oanda]);
+        let alerts: Vec<Uuid> = share_alert_assignments(&pool, &[oanda, share])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(alerts, vec![share]);
+        let fed = crate::db::repositories::live_queries::enabled_strategy_keys(&pool)
+            .await
+            .unwrap();
+        assert!(!fed.iter().any(|(i, _)| i == "SPLIT_SHARE"));
+
+        sqlx::query("DELETE FROM live_strategies WHERE id = ANY($1)")
+            .bind(vec![oanda, share])
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM strategies WHERE name = 'share split test'")
             .execute(&pool)
             .await
             .unwrap();

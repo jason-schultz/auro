@@ -187,4 +187,39 @@ defmodule Opus.Accounts.OverviewTest do
   test "handles no brokers at all" do
     assert %{total_cad: +0.0, accounts: [], positions: [], offline: []} = Overview.build([], [])
   end
+
+  test "a hand-entered account moves with its holdings' latest prices, not a typed total" do
+    # The typed holdings value (286) is stale; the holdings re-priced to 300.
+    repriced =
+      put_in(@wealthsimple, [Access.at(1), "positions"], [
+        %{"symbol" => "HODL.CN", "shares" => 100, "avg_cost" => 1.90, "current_price" => 2.0},
+        %{"symbol" => "FLT.TO", "shares" => 200, "avg_cost" => 0.69, "current_price" => 0.5}
+      ])
+
+    by_label = Map.new(Overview.build(@brokers, repriced).accounts, &{&1.label, &1})
+    assert_in_delta by_label["Non-registered"].value, 300.0, 1.0e-9
+  end
+
+  test "a paper account is listed and totalled apart, never in the real total" do
+    paper =
+      Enum.map(@brokers, fn
+        %{"broker" => "oanda"} = b ->
+          update_in(b, ["accounts"], fn accounts ->
+            Enum.map(accounts, &Map.put(&1, "paper", true))
+          end)
+
+        b ->
+          b
+      end)
+
+    real = Overview.build(@brokers, @wealthsimple)
+    split = Overview.build(paper, @wealthsimple)
+    practice = Enum.find(split.accounts, &(&1.label == "Practice"))
+
+    assert practice.paper
+    assert practice.share == nil
+    assert_in_delta split.paper_cad, practice.value, 1.0e-9
+    assert_in_delta split.total_cad, real.total_cad - practice.value, 1.0e-6
+    assert_in_delta split.accounts |> Enum.map(&(&1.share || 0)) |> Enum.sum(), 1.0, 1.0e-9
+  end
 end

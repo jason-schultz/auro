@@ -189,6 +189,13 @@ pub struct SymbolDetail {
     pub industry_subgroup: Option<String>,
     #[serde(default)]
     pub min_ticks: Vec<MinTick>,
+    /// The latest dividend Questrade knows: cash a share, and its ex- and
+    /// pay dates (ISO timestamps). Only the latest: no history.
+    pub dividend: Option<f64>,
+    #[serde(rename(deserialize = "yield"))]
+    pub dividend_yield: Option<f64>,
+    pub ex_date: Option<String>,
+    pub dividend_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -13,6 +13,7 @@ mod portfolio;
 mod positions;
 mod questrade;
 mod rules;
+mod share_alerts;
 mod signal_preview;
 mod strategy_report;
 mod wealthsimple;
@@ -167,6 +168,8 @@ fn live_only() -> Router<AppState> {
         .route("/api/questrade/connect", post(questrade::connect))
         .route("/api/questrade/candles", get(questrade::get_candles))
         .route("/api/questrade/quotes", get(questrade::get_quotes))
+        // What each share-alert assignment says today; no orders
+        .route("/api/share-alerts/evaluate", post(share_alerts::evaluate))
         .route("/api/questrade/symbols", get(questrade::get_symbols))
         .route(
             "/api/questrade/candles/persist",
@@ -184,6 +187,10 @@ fn live_only() -> Router<AppState> {
         .route(
             "/api/massive/candles/persist",
             post(massive::persist_candles),
+        )
+        .route(
+            "/api/massive/dividends/persist",
+            post(massive::persist_dividends),
         )
         .route(
             "/api/massive/options/contracts/sync",

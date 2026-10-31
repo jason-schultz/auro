@@ -12,20 +12,27 @@ pub(crate) async fn is_trading_enabled(pool: &PgPool) -> Result<bool, sqlx::Erro
         .unwrap_or(false))
 }
 
+/// Every market an OANDA assignment trades (share alerts aren't fed by OANDA).
 pub(crate) async fn all_strategy_instruments(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT DISTINCT instrument FROM live_strategies")
-        .fetch_all(pool)
-        .await
+    sqlx::query_scalar(
+        "SELECT DISTINCT instrument FROM live_strategies WHERE action->>'type' = 'oanda'",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 /// Every (instrument, granularity) with at least one enabled live strategy:
-/// the pairs whose bars must reach the evaluator with the least delay.
+/// the pairs whose bars must reach the evaluator with the least delay. OANDA
+/// assignments only: a share alert's bars come from Questrade and Massive.
 pub(crate) async fn enabled_strategy_keys(
     pool: &PgPool,
 ) -> Result<Vec<(String, String)>, sqlx::Error> {
-    sqlx::query_as("SELECT DISTINCT instrument, granularity FROM live_strategies WHERE enabled")
-        .fetch_all(pool)
-        .await
+    sqlx::query_as(
+        "SELECT DISTINCT instrument, granularity FROM live_strategies \
+         WHERE enabled AND action->>'type' = 'oanda'",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 pub(crate) async fn strategy_count_for_instrument_excluding(

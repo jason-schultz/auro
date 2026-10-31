@@ -95,6 +95,30 @@ defmodule Opus.Journal.TradeStoryTest do
     assert jumped =~ "jumped past the stop"
   end
 
+  test "an open trade says where it stands now, long or short" do
+    open = %{
+      session_close_win()
+      | status: "open",
+        exit_price: nil,
+        exit_time: nil,
+        pnl: nil,
+        pnl_percent: nil
+    }
+
+    now = Map.merge(open, %{now_pct: 0.002, now_at: ~U[2026-10-26 16:00:00Z]})
+    numbers = Map.new(TradeStory.tell(now, %{parameters: @params}).numbers, &{elem(&1, 0), &1})
+    assert {"Now", "+0.20%" <> _, "at the last minute's close" <> _} = numbers["Now"]
+
+    refute Enum.any?(
+             TradeStory.tell(open, %{parameters: @params}).numbers,
+             &(elem(&1, 0) == "Now")
+           )
+
+    assert TradeStory.unrealized(open, 29_349.6) > 0
+    assert TradeStory.unrealized(%{open | direction: "Short"}, 29_349.6) < 0
+    assert TradeStory.unrealized(open, nil) == nil
+  end
+
   test "a trade with nothing to note says so" do
     clean = %{session_close_win() | mfe_pct: 0.004, sizing_metadata: nil}
     assert [line] = TradeStory.tell(clean, %{parameters: @params}).takeaways

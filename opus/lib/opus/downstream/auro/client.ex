@@ -132,6 +132,25 @@ defmodule Opus.Auro.Client do
   end
 
   @doc """
+  What each share-alert assignment says today (POST
+  /api/share-alerts/evaluate, live engine): `assignments` are
+  `%{id: uuid, held: nil | %{entry_day: Date, stop_price: float}}`. One
+  decision map per assignment (`"action"`: buy, sell, hold, wait or
+  unready). No orders.
+  """
+  @spec evaluate_share_alerts([map()]) :: {:ok, [map()]} | {:error, any()}
+  def evaluate_share_alerts(assignments) do
+    client()
+    |> Req.post(
+      url: "/api/share-alerts/evaluate",
+      json: %{assignments: assignments},
+      receive_timeout: 60_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  @doc """
   Submit a strategy config to the pipeline backtest stage.
   Rust loads the config, runs the backtest, evaluates thresholds, and writes
   the result to strategy_evaluations.
@@ -281,6 +300,24 @@ defmodule Opus.Auro.Client do
   end
 
   @doc """
+  Like `persist_questrade_candles/3`, for the window `from`..`to` (at most
+  730 days for daily bars): how history older than the nightly window is
+  loaded.
+  """
+  @spec persist_questrade_window(String.t(), String.t(), Date.t(), Date.t()) ::
+          {:ok, map()} | {:error, any()}
+  def persist_questrade_window(symbol, granularity, %Date{} = from, %Date{} = to) do
+    client()
+    |> Req.post(
+      url: "/api/questrade/candles/persist",
+      json: %{symbol: symbol, granularity: granularity, from: from, to: to},
+      receive_timeout: 300_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  @doc """
   Have Rust fetch the last `days` days of a US symbol's bars from Massive and
   upsert the completed ones into `candles`. Same contract as the Questrade
   persist call; `granularity` is ours ("D"). Rust paces the vendor calls, so
@@ -295,6 +332,59 @@ defmodule Opus.Auro.Client do
       url: "/api/massive/candles/persist",
       json: %{symbol: symbol, granularity: granularity, days: days},
       receive_timeout: 300_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  Questrade's reference data for up to 50 tickers (GET
+  /api/questrade/symbols), each with its `requested` ticker: exchange,
+  currency, and the latest dividend it knows (`dividend`, `ex_date`,
+  `dividend_date`), not the history.
+  """
+  @spec get_questrade_symbols([String.t()]) :: {:ok, map()} | {:error, any()}
+  def get_questrade_symbols(symbols) when is_list(symbols) do
+    client()
+    |> Req.get(
+      url: "/api/questrade/symbols",
+      params: [symbols: Enum.join(symbols, ",")],
+      receive_timeout: 30_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  Questrade quotes for up to 50 tickers (GET /api/questrade/quotes): each
+  with its `requested` ticker, bid, ask and `spread_pct`. Listings in the
+  instruments table resolve through their recorded Questrade id.
+  """
+  @spec get_questrade_quotes([String.t()]) :: {:ok, map()} | {:error, any()}
+  def get_questrade_quotes(symbols) when is_list(symbols) do
+    client()
+    |> Req.get(
+      url: "/api/questrade/quotes",
+      params: [symbols: Enum.join(symbols, ",")],
+      receive_timeout: 30_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
+  @doc """
+  Have Rust load every cash dividend Massive knows for the US listing
+  `ticker` (POST /api/massive/dividends/persist), scaled to today's shares,
+  and stamp the instrument as checked. Two paced vendor calls: up to about
+  half a minute.
+  """
+  @spec persist_dividends(String.t()) :: {:ok, map()} | {:error, any()}
+  def persist_dividends(ticker) when is_binary(ticker) do
+    client()
+    |> Req.post(
+      url: "/api/massive/dividends/persist",
+      json: %{symbol: ticker},
+      receive_timeout: 120_000,
       retry: false
     )
     |> handle_response()
@@ -559,6 +649,14 @@ defmodule Opus.Auro.Client do
   def wealthsimple_accounts do
     client()
     |> Req.get(url: "/api/brokers/wealthsimple", retry: false)
+    |> handle_response()
+  end
+
+  @doc "Replace every hand-entered Wealthsimple account and holding (PUT /api/brokers/wealthsimple)."
+  @spec save_wealthsimple_accounts([map()]) :: {:ok, [map()]} | {:error, term()}
+  def save_wealthsimple_accounts(accounts) do
+    client()
+    |> Req.put(url: "/api/brokers/wealthsimple", json: %{accounts: accounts}, retry: false)
     |> handle_response()
   end
 

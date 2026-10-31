@@ -60,6 +60,51 @@ async fn broker_rows(pool: &PgPool) -> Result<Vec<(String, BrokerCosts)>, sqlx::
         .collect())
 }
 
+/// Each market's dividends, `(market, [(ex-date, cash a share)])`.
+type Paid = Vec<(String, Vec<(NaiveDate, f64)>)>;
+
+/// Each market's dividends by every name it's known by: `(history,
+/// recorded)`. History: markets Massive covers (a US listing) whose
+/// dividends were fetched, every payment since its record starts (none
+/// paid: an empty list). Recorded: markets tested as shares held that
+/// Massive doesn't cover, with the payments Opus recorded from Questrade
+/// as they came (`Opus.MarketData.DividendRecordWorker`), often none.
+async fn dividend_rows(pool: &PgPool) -> Result<(Paid, Paid), sqlx::Error> {
+    let rows: Vec<(String, bool, Option<NaiveDate>, Option<f64>)> = sqlx::query_as(
+        "SELECT n.name, i.massive_ticker IS NOT NULL, d.ex_date, d.cash_amount \
+         FROM instruments i \
+         CROSS JOIN LATERAL (VALUES (i.oanda_symbol), (i.questrade_symbol), (i.massive_ticker)) \
+              AS n(name) \
+         LEFT JOIN brokers b ON b.name = i.test_broker \
+         LEFT JOIN dividends d ON d.instrument_id = i.id \
+         WHERE n.name IS NOT NULL AND ( \
+           (i.massive_ticker IS NOT NULL AND i.dividends_checked_at IS NOT NULL) \
+           OR (i.massive_ticker IS NULL AND b.overnight_cost = 'none'))",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut history: std::collections::HashMap<String, Vec<(NaiveDate, f64)>> =
+        std::collections::HashMap::new();
+    let mut recorded: std::collections::HashMap<String, Vec<(NaiveDate, f64)>> =
+        std::collections::HashMap::new();
+    for (market, has_history, ex_date, cash) in rows {
+        let paid = if has_history {
+            &mut history
+        } else {
+            &mut recorded
+        }
+        .entry(market)
+        .or_default();
+        if let (Some(ex_date), Some(cash)) = (ex_date, cash) {
+            paid.push((ex_date, cash));
+        }
+    }
+    Ok((
+        history.into_iter().collect(),
+        recorded.into_iter().collect(),
+    ))
+}
+
 /// The full cost model: every policy-rate change point, every recorded
 /// OANDA rate, and each market's broker costs. Small (hundreds of rows),
 /// loaded once per backtest.
@@ -73,7 +118,11 @@ pub async fn load_model(pool: &PgPool) -> Result<FinancingModel, sqlx::Error> {
     .fetch_all(pool)
     .await?;
 
-    Ok(FinancingModel::new(policy, recorded).with_brokers(broker_rows(pool).await?))
+    let (history, recorded_dividends) = dividend_rows(pool).await?;
+    Ok(FinancingModel::new(policy, recorded)
+        .with_brokers(broker_rows(pool).await?)
+        .with_dividends(history)
+        .with_recorded_dividends(recorded_dividends))
 }
 
 /// Record OANDA's (long, short) annual financing rates for `as_of`,

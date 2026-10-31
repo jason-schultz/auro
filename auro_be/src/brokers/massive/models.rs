@@ -47,6 +47,31 @@ pub type AggregatesResponse = Page<AggBar>;
 /// `GET /v3/reference/options/contracts` response.
 pub type ContractsResponse = Page<OptionContract>;
 
+/// `GET /v3/reference/dividends` response.
+pub type DividendsResponse = Page<Dividend>;
+
+/// One share split (`/v3/reference/splits`): from `split_from` shares to
+/// `split_to` (2:1 is 1 → 2; a 1:8 reverse split is 8 → 1).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Split {
+    pub execution_date: NaiveDate,
+    pub split_from: f64,
+    pub split_to: f64,
+}
+
+/// One cash dividend (`/v3/reference/dividends`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Dividend {
+    pub ex_dividend_date: NaiveDate,
+    #[serde(default)]
+    pub pay_date: Option<NaiveDate>,
+    /// Per share, in the listing's currency.
+    pub cash_amount: f64,
+    /// Payments a year (4 quarterly, 12 monthly); absent on some rows.
+    #[serde(default)]
+    pub frequency: Option<i32>,
+}
+
 /// One aggregate bar. Field names are the vendor's single letters.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct AggBar {
@@ -170,6 +195,24 @@ mod tests {
         let err = AggregatesResponse::parse(reqwest::StatusCode::OK, json).unwrap_err();
         assert!(err.to_string().contains("NOT_AUTHORIZED"));
         assert!(err.to_string().contains("plan"));
+    }
+
+    #[test]
+    fn dividends_page_parses_vendor_record() {
+        let json = r#"{"status":"OK","request_id":"x","results":[{"cash_amount":0.354,
+          "declaration_date":"2003-03-10","dividend_type":"CD","ex_dividend_date":"2003-03-21",
+          "frequency":4,"pay_date":"2003-04-30","record_date":"2003-03-25","ticker":"SPY"},
+          {"cash_amount":0.36,"ex_dividend_date":"2003-06-20","ticker":"SPY"}]}"#;
+        let page = DividendsResponse::parse(reqwest::StatusCode::OK, json).unwrap();
+        assert_eq!(page.results.len(), 2);
+        let d = &page.results[0];
+        assert_eq!(
+            d.ex_dividend_date,
+            NaiveDate::from_ymd_opt(2003, 3, 21).unwrap()
+        );
+        assert_eq!(d.cash_amount, 0.354);
+        assert_eq!(d.frequency, Some(4));
+        assert_eq!(page.results[1].pay_date, None);
     }
 
     #[test]

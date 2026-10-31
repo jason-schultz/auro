@@ -127,6 +127,13 @@ pub struct FinancingModel {
     recorded: HashMap<String, Series<(f64, f64)>>,
     /// Each market's broker costs, by every name it's known by.
     brokers: HashMap<String, BrokerCosts>,
+    /// Cash dividends per share by ex-date, ascending, for each market
+    /// whose dividend history has been fetched (none paid: an empty list).
+    dividends: HashMap<String, Vec<(NaiveDate, f64)>>,
+    /// Markets with no dividend history to fetch (Massive covers US listings
+    /// only): the payments recorded from Questrade as they came, ascending,
+    /// often none. Their tests run without the dividends before these.
+    recorded_dividends: HashMap<String, Vec<(NaiveDate, f64)>>,
 }
 
 impl FinancingModel {
@@ -138,6 +145,8 @@ impl FinancingModel {
             policy: Arc::new(PolicyRates::new(policy)),
             recorded: HashMap::new(),
             brokers: HashMap::new(),
+            dividends: HashMap::new(),
+            recorded_dividends: HashMap::new(),
         };
         for (instrument, date, long, short) in recorded {
             model
@@ -156,6 +165,86 @@ impl FinancingModel {
     pub fn with_brokers(mut self, brokers: Vec<(String, BrokerCosts)>) -> Self {
         self.brokers = brokers.into_iter().collect();
         self
+    }
+
+    /// The model with each fetched market's dividends, `(market, [(ex-date,
+    /// cash a share)])`; a market fetched with none paid has an empty list.
+    pub fn with_dividends(mut self, dividends: Vec<(String, Vec<(NaiveDate, f64)>)>) -> Self {
+        self.dividends = dividends
+            .into_iter()
+            .map(|(market, mut paid)| {
+                paid.sort_by_key(|(d, _)| *d);
+                (market, paid)
+            })
+            .collect();
+        self
+    }
+
+    /// The model with the markets that have no dividend history to fetch,
+    /// each with the payments recorded for it so far (`recorded_dividends`).
+    pub fn with_recorded_dividends(
+        mut self,
+        recorded: Vec<(String, Vec<(NaiveDate, f64)>)>,
+    ) -> Self {
+        self.recorded_dividends = recorded
+            .into_iter()
+            .map(|(market, mut paid)| {
+                paid.sort_by_key(|(d, _)| *d);
+                (market, paid)
+            })
+            .collect();
+        self
+    }
+
+    /// For a market with no dividend history to fetch: Some(the first
+    /// recorded ex-date, or None before any). None for every other market.
+    pub fn dividends_recorded_since(&self, market: &str) -> Option<Option<NaiveDate>> {
+        self.recorded_dividends
+            .get(market)
+            .map(|paid| paid.first().map(|(d, _)| *d))
+    }
+
+    /// What's known of `market`'s dividends: None when they were never
+    /// fetched; Some(None) when it pays none; Some(Some(date)) when the
+    /// record starts at that ex-date (earlier payments are unknown).
+    pub fn dividends_from(&self, market: &str) -> Option<Option<NaiveDate>> {
+        self.dividends
+            .get(market)
+            .map(|paid| paid.first().map(|(d, _)| *d))
+    }
+
+    /// `market`'s dividends, `(ex-date, cash a share)` ascending: its
+    /// fetched history, or for a market with none to fetch, what has been
+    /// recorded; empty when it pays none or nothing is known.
+    pub fn dividends(&self, market: &str) -> &[(NaiveDate, f64)] {
+        self.dividends
+            .get(market)
+            .or_else(|| self.recorded_dividends.get(market))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `market` holds shares outright (its broker charges no
+    /// overnight cost), so its dividends are paid to a long.
+    pub fn owns_shares(&self, market: &str) -> bool {
+        self.costs_for(market)
+            .is_some_and(|c| c.overnight == Overnight::None)
+    }
+
+    /// Dividends paid to a long `trade` in `market`, as a return on its
+    /// entry: every ex-date after the day it was bought, up to and
+    /// including the day it was sold (it held the shares at the close
+    /// before each).
+    fn dividends_paid(&self, market: &str, trade: &Trade) -> f64 {
+        let paid = self.dividends(market);
+        if trade.direction != Direction::Long || trade.entry_price <= 0.0 {
+            return 0.0;
+        }
+        let bought = trade.entry_time.with_timezone(&New_York).date_naive();
+        let sold = trade.exit_time.with_timezone(&New_York).date_naive();
+        paid.iter()
+            .filter(|(ex, _)| *ex > bought && *ex <= sold)
+            .map(|(_, cash)| cash / trade.entry_price)
+            .sum()
     }
 
     /// The broker costs `market` is tested with, if any are loaded for it.
@@ -226,7 +315,7 @@ impl FinancingModel {
 /// Charge each trade's costs into its `pnl_percent`: overnight financing
 /// where the market's broker charges OANDA's (or none is loaded: OANDA's
 /// model), and a fixed spread and commission per round trip where it sets
-/// them.
+/// them. Shares held outright are paid their dividends instead.
 pub fn apply_costs(trades: &mut [Trade], instrument: &str, model: &FinancingModel) {
     let costs = model.costs_for(instrument);
     let overnight = costs.map_or(Overnight::OandaFinancing, |c| c.overnight);
@@ -234,8 +323,11 @@ pub fn apply_costs(trades: &mut [Trade], instrument: &str, model: &FinancingMode
         (c.spread_bps.unwrap_or(0.0) + 2.0 * c.commission_bps) / 10_000.0
     });
     for trade in trades.iter_mut() {
-        if overnight == Overnight::OandaFinancing {
-            trade.pnl_percent += model.trade_financing(instrument, trade);
+        match overnight {
+            Overnight::OandaFinancing => {
+                trade.pnl_percent += model.trade_financing(instrument, trade);
+            }
+            Overnight::None => trade.pnl_percent += model.dividends_paid(instrument, trade),
         }
         trade.pnl_percent -= per_trade;
     }
@@ -420,6 +512,63 @@ mod tests {
         apply_costs(&mut trades, "SPY", &model);
         assert!((trades[0].pnl_percent - (0.01 - 0.001)).abs() < 1e-12);
         assert!(!model.can_short("SPY"));
+    }
+
+    #[test]
+    fn a_long_held_over_an_ex_date_is_paid_its_dividend() {
+        let model = FinancingModel::default()
+            .with_brokers(vec![("SPY".into(), wealthsimple(0.0))])
+            .with_dividends(vec![(
+                "SPY".into(),
+                vec![(d(2024, 7, 5), 2.0), (d(2024, 7, 20), 3.0)],
+            )]);
+        // Bought Jul 1 at 100, sold the 5th: paid the 5th's (held at the
+        // close before it), not the 20th's.
+        let mut held = trade(Direction::Long, utc(1, 18), utc(5, 18));
+        held.entry_price = 100.0;
+        // Bought on the ex-date itself: too late for it.
+        let mut late = trade(Direction::Long, utc(5, 18), utc(10, 18));
+        late.entry_price = 100.0;
+        let mut trades = vec![held, late];
+        apply_costs(&mut trades, "SPY", &model);
+        assert!((trades[0].pnl_percent - 0.02).abs() < 1e-12);
+        assert!(trades[1].pnl_percent.abs() < 1e-12);
+        assert_eq!(model.dividends_from("SPY"), Some(Some(d(2024, 7, 5))));
+    }
+
+    #[test]
+    fn dividends_never_fetched_are_unknown_and_none_paid_is_known() {
+        let model = FinancingModel::default().with_dividends(vec![("GLD".into(), vec![])]);
+        assert_eq!(model.dividends_from("GLD"), Some(None));
+        assert_eq!(model.dividends_from("SPY"), None);
+    }
+
+    #[test]
+    fn a_market_without_dividend_history_is_paid_what_was_recorded() {
+        let model = FinancingModel::default()
+            .with_brokers(vec![("XIU.TO".into(), wealthsimple(0.0))])
+            .with_recorded_dividends(vec![
+                ("XIU.TO".into(), vec![(d(2024, 7, 5), 1.0)]),
+                ("SDE.TO".into(), vec![]),
+            ]);
+        // Recorded, not history: it's paid, but the record isn't where its
+        // tests start.
+        assert_eq!(model.dividends_from("XIU.TO"), None);
+        assert_eq!(
+            model.dividends_recorded_since("XIU.TO"),
+            Some(Some(d(2024, 7, 5)))
+        );
+        assert_eq!(model.dividends_recorded_since("SDE.TO"), Some(None));
+        assert_eq!(model.dividends_recorded_since("SPY"), None);
+
+        let mut trades = vec![trade(Direction::Long, utc(1, 18), utc(30, 18))];
+        trades[0].entry_price = 100.0;
+        trades[0].exit_time =
+            chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 7, 10, 18, 0, 0).unwrap();
+        trades[0].entry_time =
+            chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 7, 1, 18, 0, 0).unwrap();
+        apply_costs(&mut trades, "XIU.TO", &model);
+        assert!((trades[0].pnl_percent - 0.01).abs() < 1e-12);
     }
 
     #[test]

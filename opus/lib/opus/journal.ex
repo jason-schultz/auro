@@ -293,13 +293,51 @@ defmodule Opus.Journal do
       |> Repo.all()
 
     names = strategy_names(Enum.map(trades, & &1.live_strategy_id))
+    closes = latest_closes(trades)
 
     Enum.map(trades, fn t ->
-      Map.merge(t, %{
+      t
+      |> with_now(closes)
+      |> Map.merge(%{
         strategy: Map.get(names, t.live_strategy_id, "—"),
         why_closed: TradeStory.exit_label(t)
       })
     end)
+  end
+
+  @doc """
+  How the live trades closed in `window` ended, most common first:
+  `[{label, count}]` in the trade story's words (`TradeStory.exit_label/1`).
+  """
+  @spec exit_counts(window()) :: [{String.t(), pos_integer()}]
+  def exit_counts({from_ts, to_ts}) do
+    trades_query()
+    |> where([t], t.status == "closed" and t.exit_time >= ^from_ts and t.exit_time <= ^to_ts)
+    |> Repo.all()
+    |> Enum.frequencies_by(&TradeStory.exit_label/1)
+    |> Enum.sort_by(fn {_label, n} -> -n end)
+  end
+
+  @doc """
+  The OANDA account's value at each New York day's last snapshot over the
+  last `days` days, oldest first: `%{on, value}`.
+  """
+  @spec nav_by_day(pos_integer()) :: [%{on: Date.t(), value: float()}]
+  def nav_by_day(days \\ 365) do
+    since = Opus.Clock.midnight(Date.add(Opus.Clock.today(), -days))
+
+    Repo.query!(
+      """
+      SELECT (timestamp AT TIME ZONE 'America/New_York')::date AS on,
+             (array_agg(nav ORDER BY timestamp DESC))[1] AS value
+      FROM account_snapshots
+      WHERE timestamp >= $1 AND nav IS NOT NULL
+      GROUP BY 1 ORDER BY 1
+      """,
+      [since]
+    )
+    |> Map.fetch!(:rows)
+    |> Enum.map(fn [on, value] -> %{on: on, value: value / 1} end)
   end
 
   @doc """
@@ -311,6 +349,7 @@ defmodule Opus.Journal do
   def trade(id) do
     with {:ok, uuid} <- Ecto.UUID.cast(id),
          %{} = t <- trades_query() |> where([t], t.id == type(^uuid, Ecto.UUID)) |> Repo.one() do
+      t = with_now(t, latest_closes([t]))
       strategy = t.live_strategy_id && Repo.get(LiveStrategy, t.live_strategy_id)
 
       Map.merge(t, %{
@@ -320,6 +359,38 @@ defmodule Opus.Journal do
       })
     else
       _ -> nil
+    end
+  end
+
+  # Where each open trade stands now (`now_pct`, `now_at`), from its
+  # market's latest one-minute close; closed trades are left as they are.
+  defp with_now(%{status: "open", instrument: i} = t, closes) do
+    case closes[i] do
+      %{close: close, at: at} ->
+        Map.merge(t, %{now_pct: TradeStory.unrealized(t, close), now_at: at})
+
+      nil ->
+        t
+    end
+  end
+
+  defp with_now(t, _closes), do: t
+
+  # The latest one-minute close of each open trade's market.
+  defp latest_closes(trades) do
+    case trades |> Enum.filter(&(&1.status == "open")) |> Enum.map(& &1.instrument) do
+      [] ->
+        %{}
+
+      instruments ->
+        from(c in "candles",
+          where: c.instrument in ^Enum.uniq(instruments) and c.granularity == "M1",
+          distinct: c.instrument,
+          order_by: [asc: c.instrument, desc: c.timestamp],
+          select: {c.instrument, %{close: c.close, at: type(c.timestamp, :utc_datetime_usec)}}
+        )
+        |> Repo.all()
+        |> Map.new()
     end
   end
 

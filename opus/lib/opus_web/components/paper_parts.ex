@@ -21,6 +21,13 @@ defmodule OpusWeb.Components.PaperParts do
   def book_name("crash_puts_half"), do: copy("Crash puts · half at double")
   def book_name(other), do: %{s: other, wsb: other}
 
+  @doc "An option leg in a few words: `short 2 × $260.00 put`."
+  @spec leg_words(map()) :: String.t()
+  def leg_words(%{quantity: n} = p) when n > 1,
+    do: "#{p.side} #{n} × #{money(p.strike)} #{p.kind}"
+
+  def leg_words(p), do: "#{p.side} #{money(p.strike)} #{p.kind}"
+
   attr :label, :map, required: true, doc: "copy/1"
   attr :value, :string, required: true
   attr :tone, :string, default: nil

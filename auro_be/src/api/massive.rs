@@ -1,14 +1,17 @@
 use axum::extract::State;
 use axum::Json;
 use chrono::{DateTime, Duration, Utc};
+use chrono_tz::America::New_York;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::options::ChainWindow;
-use crate::brokers::massive::client::ContractFilter;
-use crate::brokers::massive::models::AggBar;
+use crate::brokers::adjusted;
+use crate::brokers::massive::client::{ContractFilter, MassiveClient};
+use crate::brokers::massive::models::{AggBar, Dividend, Split};
 use crate::brokers::stock_bar_final_at;
 use crate::db::repositories::candles as candles_repo;
+use crate::db::repositories::dividends as dividends_repo;
 use crate::db::repositories::instruments as instruments_repo;
 use crate::db::repositories::options::{self as options_repo, ContractRow, OptionBarRow};
 use crate::engine::instrument::Instrument;
@@ -20,10 +23,6 @@ use crate::state::AppState;
 /// The free plan serves roughly two years of history; anything longer is a
 /// request mistake, not a backfill.
 const MAX_PERSIST_DAYS: i64 = 800;
-
-/// A refetched daily close this far from the stored one means Massive has
-/// re-adjusted the history (a split), not corrected a bar.
-const ADJUSTMENT_TOLERANCE: f64 = 0.01;
 
 fn default_persist_days() -> i64 {
     5
@@ -53,6 +52,112 @@ async fn require_instrument(state: &AppState, ticker: &str) -> AppResult<Instrum
         })
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PersistDividends {
+    pub symbol: String,
+}
+
+/// Fetch every cash dividend `symbol` has paid from Massive and store them,
+/// stamping the instrument as checked (none found: it pays none). The tests
+/// of shares held at a broker with no overnight cost add them back to long
+/// holds; the bars alone leave them out.
+pub async fn persist_dividends(
+    State(state): State<AppState>,
+    Json(body): Json<PersistDividends>,
+) -> AppResult<Json<Value>> {
+    let Some(massive) = state.massive.as_ref() else {
+        return Err(AppError::Internal("Massive not configured".into()));
+    };
+    let symbol = body.symbol.trim().to_uppercase();
+    let instrument = require_instrument(&state, &symbol).await?;
+    Ok(Json(
+        load_dividends(&state, massive, &instrument, &symbol).await?,
+    ))
+}
+
+/// Store `symbol`'s dividends on the scale of its stored bars. Massive
+/// gives each payment per share as paid, while the bars are split-adjusted
+/// to today: a payment before a 2:1 split is halved to match. A payment the
+/// bars already price in is left out (see `priced_in`).
+async fn load_dividends(
+    state: &AppState,
+    massive: &MassiveClient,
+    instrument: &Instrument,
+    symbol: &str,
+) -> AppResult<Value> {
+    let splits = massive.list_splits(symbol).await?;
+    let paid = on_todays_shares(massive.list_dividends(symbol).await?, &splits);
+    let bars = candles_repo::load_candles(&state.db, symbol, Granularity::D)
+        .await
+        .map_err(AppError::Database)?;
+    let (priced, kept): (Vec<Dividend>, Vec<Dividend>) =
+        paid.into_iter().partition(|d| priced_in(d, &bars));
+    let stored = dividends_repo::store(&state.db, instrument.id, &kept)
+        .await
+        .map_err(AppError::Database)?;
+    tracing::info!(
+        "Stored {stored} Massive dividends for {symbol} ({} splits, {} priced in)",
+        splits.len(),
+        priced.len()
+    );
+    Ok(json!({
+        "symbol": symbol,
+        "dividends": kept.len(),
+        "first": kept.first().map(|d| d.ex_dividend_date),
+        "last": kept.last().map(|d| d.ex_dividend_date),
+        "splits": splits.iter().map(|s| json!({
+            "date": s.execution_date, "from": s.split_from, "to": s.split_to,
+        })).collect::<Vec<_>>(),
+        "priced_in": priced.iter().map(|d| json!({
+            "ex_date": d.ex_dividend_date, "cash": d.cash_amount,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// `paid` per share held today: each payment before a split scaled by it
+/// (× 1/2 before a 2:1 split), as split-adjusted bars are.
+fn on_todays_shares(paid: Vec<Dividend>, splits: &[Split]) -> Vec<Dividend> {
+    paid.into_iter()
+        .map(|d| {
+            let factor: f64 = splits
+                .iter()
+                .filter(|s| s.execution_date > d.ex_dividend_date && s.split_to > 0.0)
+                .map(|s| s.split_from / s.split_to)
+                .product();
+            Dividend {
+                cash_amount: d.cash_amount * factor,
+                ..d
+            }
+        })
+        .collect()
+}
+
+/// A payment over this share of the price is checked against the bars.
+const BIG_PAYMENT: f64 = 0.05;
+
+/// Whether the bars already price `d` in: a big payment (over
+/// `BIG_PAYMENT` of the close before) whose ex-date shows under half of it
+/// as a drop. Vendors adjust older prices for a spin-off paid as shares
+/// (XLF's 2016 XLRE payment, listed as $4.44 cash, is folded into
+/// Questrade's XLF bars); paying it too would count it twice. Without the
+/// bars around the ex-date, it is kept.
+fn priced_in(d: &Dividend, bars: &[Candle]) -> bool {
+    let day = |c: &Candle| c.time.with_timezone(&New_York).date_naive();
+    let Some(at) = bars.iter().position(|c| day(c) >= d.ex_dividend_date) else {
+        return false;
+    };
+    let (Some(before), Some(ex)) = (at.checked_sub(1).map(|i| &bars[i]), bars.get(at)) else {
+        return false;
+    };
+    let prev = before.mid.close;
+    if day(ex) != d.ex_dividend_date || prev <= 0.0 {
+        return false;
+    }
+    let share = d.cash_amount / prev;
+    let drop = 1.0 - ex.mid.open / prev;
+    share > BIG_PAYMENT && drop < share / 2.0
+}
+
 /// Fetch `days` of `symbol` bars from Massive and upsert the completed ones
 /// into `candles`. Same contract as the Questrade persist endpoint; this is
 /// the US-equity source, Questrade stays the Canadian one.
@@ -77,47 +182,26 @@ pub async fn persist_candles(
     let from = (now - Duration::days(body.days)).date_naive();
     let to = now.date_naive();
 
-    let mut raw = massive
+    let raw = massive
         .get_aggregates(&symbol, granularity, from, to)
         .await?;
 
     // Only bars that have fully closed: a run during the session must not
     // store a still-forming bar that the next run would see differently.
-    let mut rows = completed_rows(&raw, &symbol, granularity, now)?;
+    let rows = completed_rows(&raw, &symbol, granularity, now)?;
 
-    // Bars are split-adjusted as of the fetch, so after a split the short
-    // nightly window comes back on the new scale while older stored bars
-    // stay on the old one. Spot it in the overlap and refetch everything
-    // stored for the symbol.
-    let mut full_refetch = None;
-    if let (Granularity::D, Some(first), Some(last)) = (granularity, rows.first(), rows.last()) {
-        let stored = candles_repo::closes_between(
-            &state.db,
-            &symbol,
-            granularity,
-            first.candle.time,
-            last.candle.time,
-        )
+    // Bars come split-adjusted as of the fetch: after a split, older
+    // stored history is put on the new scale, and a fund's dividends
+    // (already loaded) are reloaded to match.
+    let rescaled = adjusted::match_stored_scale(&state.db, &rows)
         .await
         .map_err(AppError::Database)?;
-        if let Some(ratio) = adjustment_ratio(&stored, &rows) {
-            let oldest = candles_repo::earliest_candle_time(&state.db, &symbol, granularity)
-                .await
-                .map_err(AppError::Database)?
-                .map_or(from, |t| t.date_naive());
-            tracing::warn!(
-                "Massive {} daily closes moved ×{:.4} against stored bars (split?); \
-                 refetching all stored history from {}",
-                symbol,
-                ratio,
-                oldest
-            );
-            raw = massive
-                .get_aggregates(&symbol, granularity, oldest, to)
-                .await?;
-            rows = completed_rows(&raw, &symbol, granularity, now)?;
-            full_refetch = Some(json!({ "from": oldest, "ratio": ratio }));
-        }
+    if rescaled.is_some()
+        && dividends_repo::checked(&state.db, instrument.id)
+            .await
+            .map_err(AppError::Database)?
+    {
+        load_dividends(&state, massive, &instrument, &symbol).await?;
     }
 
     let stored = candles_repo::upsert_candles(&state.db, &rows)
@@ -140,23 +224,8 @@ pub async fn persist_candles(
         "candles_stored": stored,
         "first": rows.first().map(|r| r.candle.time),
         "last": rows.last().map(|r| r.candle.time),
-        "full_refetch": full_refetch,
+        "rescaled": rescaled,
     })))
-}
-
-/// Stored close ÷ refetched close at the timestamp where the two differ
-/// most, when that is more than `ADJUSTMENT_TOLERANCE` (a split of 2:1
-/// gives 2.0); None when every overlapping bar agrees.
-fn adjustment_ratio(stored: &[(DateTime<Utc>, f64)], fetched: &[CandleRow]) -> Option<f64> {
-    stored
-        .iter()
-        .filter_map(|(time, stored_close)| {
-            let row = fetched.iter().find(|r| r.candle.time == *time)?;
-            let ratio = stored_close / row.candle.mid.close;
-            ratio.is_finite().then_some(ratio)
-        })
-        .max_by(|a, b| a.ln().abs().total_cmp(&b.ln().abs()))
-        .filter(|ratio| (ratio - 1.0).abs() > ADJUSTMENT_TOLERANCE)
 }
 
 fn completed_rows(
@@ -378,7 +447,7 @@ fn completed_option_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{NaiveDate, TimeZone};
 
     fn bar(t: i64) -> AggBar {
         AggBar {
@@ -406,40 +475,71 @@ mod tests {
         assert_eq!(rows[0].granularity, Granularity::M5);
     }
 
-    fn daily(day: u32, close: f64) -> CandleRow {
-        let t = Utc.with_ymd_and_hms(2026, 10, day, 4, 0, 0).unwrap();
-        let mut bar = bar(t.timestamp_millis());
-        bar.c = close;
-        completed_rows(&[bar], "NVDA", Granularity::D, t + Duration::days(1))
-            .unwrap()
-            .remove(0)
+    fn paid(y: i32, m: u32, d: u32, cash: f64) -> Dividend {
+        Dividend {
+            ex_dividend_date: NaiveDate::from_ymd_opt(y, m, d).unwrap(),
+            pay_date: None,
+            cash_amount: cash,
+            frequency: Some(4),
+        }
     }
 
-    fn stored_close(day: u32, close: f64) -> (DateTime<Utc>, f64) {
-        (Utc.with_ymd_and_hms(2026, 10, day, 4, 0, 0).unwrap(), close)
-    }
-
-    #[test]
-    fn a_split_shows_as_the_stored_to_refetched_ratio() {
-        // 2:1 split effective the 22nd: the refetch halves the 20th and 21st.
-        let fetched = vec![daily(20, 100.0), daily(21, 101.0), daily(22, 102.0)];
-        let stored = vec![stored_close(20, 200.0), stored_close(21, 202.0)];
-        let ratio = adjustment_ratio(&stored, &fetched).unwrap();
-        assert!((ratio - 2.0).abs() < 1e-9);
-        // A reverse split shows below one.
-        let stored = vec![stored_close(20, 10.0)];
-        let ratio = adjustment_ratio(&stored, &fetched).unwrap();
-        assert!((ratio - 0.1).abs() < 1e-9);
+    fn split(y: i32, m: u32, d: u32, from: f64, to: f64) -> Split {
+        Split {
+            execution_date: NaiveDate::from_ymd_opt(y, m, d).unwrap(),
+            split_from: from,
+            split_to: to,
+        }
     }
 
     #[test]
-    fn small_corrections_and_new_bars_are_not_a_split() {
-        let fetched = vec![daily(20, 100.0), daily(21, 101.0)];
-        // Within 1%: a vendor correction, not an adjustment.
-        assert_eq!(adjustment_ratio(&[stored_close(20, 100.5)], &fetched), None);
-        // No overlap (all new bars) or nothing stored.
-        assert_eq!(adjustment_ratio(&[stored_close(19, 50.0)], &fetched), None);
-        assert_eq!(adjustment_ratio(&[], &fetched), None);
+    fn payments_before_a_split_are_scaled_to_todays_shares() {
+        // EEM: 3:1 in 2005 and again in 2008.
+        let splits = [split(2005, 6, 9, 1.0, 3.0), split(2008, 7, 24, 1.0, 3.0)];
+        let scaled = on_todays_shares(
+            vec![
+                paid(2004, 12, 20, 9.0),
+                paid(2007, 12, 24, 1.95),
+                paid(2008, 12, 22, 0.5),
+            ],
+            &splits,
+        );
+        let cash: Vec<f64> = scaled.iter().map(|d| d.cash_amount).collect();
+        assert!((cash[0] - 1.0).abs() < 1e-12);
+        assert!((cash[1] - 0.65).abs() < 1e-12);
+        assert!((cash[2] - 0.5).abs() < 1e-12);
+        // A reverse split (8 → 1) scales the other way.
+        let reverse =
+            on_todays_shares(vec![paid(2019, 1, 2, 0.1)], &[split(2020, 4, 28, 8.0, 1.0)]);
+        assert!((reverse[0].cash_amount - 0.8).abs() < 1e-12);
+    }
+
+    fn day_bar(d: u32, open: f64, close: f64) -> Candle {
+        // Midnight New York, as daily stock bars are stamped.
+        Candle::from_trade_bar(
+            Utc.with_ymd_and_hms(2016, 9, d, 4, 0, 0).unwrap(),
+            crate::engine::types::OHLC {
+                open,
+                high: open.max(close),
+                low: open.min(close),
+                close,
+            },
+            0.0,
+        )
+    }
+
+    #[test]
+    fn a_big_payment_the_bars_already_price_in_is_left_out() {
+        // XLF 2016: $4.44 "cash" on a $19.18 close, and no drop on the day.
+        let bars = [day_bar(16, 19.28, 19.18), day_bar(19, 19.35, 19.31)];
+        assert!(priced_in(&paid(2016, 9, 19, 4.44), &bars));
+        // The same payment with the drop showing is a real payment.
+        let dropped = [day_bar(16, 19.28, 19.18), day_bar(19, 14.80, 14.9)];
+        assert!(!priced_in(&paid(2016, 9, 19, 4.44), &dropped));
+        // Ordinary payments are never second-guessed, nor any without bars.
+        assert!(!priced_in(&paid(2016, 9, 19, 0.1), &bars));
+        assert!(!priced_in(&paid(2016, 9, 20, 4.44), &bars));
+        assert!(!priced_in(&paid(2016, 9, 19, 4.44), &[]));
     }
 
     #[test]

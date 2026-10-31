@@ -20,8 +20,11 @@ defmodule OpusWeb.StrategiesLive do
   import OpusWeb.SignalChart, only: [signal_sparkline: 1]
   import OpusWeb.StrategyParts
 
+  alias Opus.Pipeline.Events
   alias Opus.Auro.Client
   alias Opus.Trading.{AccountPause, RulesEngine, Strategies}
+
+  @gather_ms 500
 
   @impl true
   def mount(_params, _session, socket) do
@@ -31,7 +34,7 @@ defmodule OpusWeb.StrategiesLive do
         recipes: [],
         filter: :all,
         show_archive: false,
-        ticking: false,
+        reload_due: false,
         sparks: %{},
         stats: %{},
         engine_error: nil,
@@ -39,6 +42,7 @@ defmodule OpusWeb.StrategiesLive do
         as_of: nil
       )
 
+    if connected?(socket), do: Events.subscribe_all()
     {:ok, if(connected?(socket), do: socket |> load() |> load_sparks(), else: socket)}
   end
 
@@ -92,11 +96,8 @@ defmodule OpusWeb.StrategiesLive do
       end
 
     recipes = Strategies.recipes()
-    tick? = connected?(socket) and busy?(recipes) and not socket.assigns.ticking
-    if tick?, do: Process.send_after(self(), :tick, 5_000)
 
     assign(socket,
-      ticking: socket.assigns.ticking or tick?,
       recipes: recipes,
       stats: stats,
       engine_error: engine_error,
@@ -123,7 +124,19 @@ defmodule OpusWeb.StrategiesLive do
   end
 
   @impl true
-  def handle_info(:tick, socket), do: {:noreply, socket |> assign(ticking: false) |> load()}
+  # A pipeline stage started or finished (`Opus.Pipeline.Events`). A sweep
+  # of many tests can send a burst, so they are gathered for half a second
+  # into one reload.
+  def handle_info({:pipeline_stage, _config_id}, %{assigns: %{reload_due: true}} = socket),
+    do: {:noreply, socket}
+
+  def handle_info({:pipeline_stage, _config_id}, socket) do
+    Process.send_after(self(), :reload, @gather_ms)
+    {:noreply, assign(socket, reload_due: true)}
+  end
+
+  def handle_info(:reload, socket),
+    do: {:noreply, socket |> assign(reload_due: false) |> load()}
 
   @impl true
   def handle_async({:spark, id}, {:ok, {instrument, {:ok, chart}}}, socket),
@@ -382,21 +395,6 @@ defmodule OpusWeb.StrategiesLive do
 
   # Where a recipe's full test results are listed.
   defp tests_path(recipe), do: recipe_path(recipe) <> "#tests"
-
-  # Tests take a while; while any is waiting or running, look again shortly.
-  defp busy?(recipes) do
-    Enum.any?(recipes, fn recipe ->
-      stage_sets =
-        Enum.map(recipe.runs, & &1.stages) ++ Enum.map(recipe.assignments, & &1.results)
-
-      Enum.any?(stage_sets, fn stages ->
-        Enum.any?(
-          [:backtest, :walk_forward, :monte_carlo, :parameter_stability, :holdout],
-          &(stages[&1].status in [:pending, :running])
-        )
-      end)
-    end)
-  end
 
   attr :row, :map, required: true
   attr :stats, :map, default: nil

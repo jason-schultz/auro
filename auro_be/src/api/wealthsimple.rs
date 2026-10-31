@@ -5,6 +5,7 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Value};
 
+use crate::brokers::questrade::identity;
 use crate::brokers::wealthsimple::models::{UpsertWealthsimpleAccounts, WealthsimpleAccount};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -40,12 +41,14 @@ pub async fn refresh_prices(State(state): State<AppState>) -> AppResult<Json<Val
 
     let mut client = qt.lock().await;
 
-    // Resolve unique symbols → symbol IDs
+    // Resolve unique symbols → symbol IDs: a listing in the instruments
+    // table through its recorded id, so the 15-minute re-price doesn't
+    // search Questrade by name every time.
     let mut symbol_to_id: HashMap<String, i64> = HashMap::new();
     for pos in &positions {
         let sym = pos.symbol.to_uppercase();
         if let Entry::Vacant(slot) = symbol_to_id.entry(sym) {
-            match client.search_symbol(slot.key()).await {
+            match identity::symbol_id_for(&mut client, &state.db, slot.key()).await {
                 Ok(id) => {
                     slot.insert(id);
                 }

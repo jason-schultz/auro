@@ -8,6 +8,9 @@ defmodule Opus.Accounts.HoldingsPriceWorkerTest do
     refute HoldingsPriceWorker.in_session?(~U[2026-10-29 13:15:00Z])
     assert HoldingsPriceWorker.in_session?(~U[2026-10-29 13:30:00Z])
     assert HoldingsPriceWorker.in_session?(~U[2026-10-29 20:00:00Z])
+    # The close run as Oban stamps it, a fraction past 16:00 New York.
+    assert HoldingsPriceWorker.in_session?(~U[2026-10-29 20:00:00.556152Z])
+    refute HoldingsPriceWorker.in_session?(~U[2026-10-29 20:00:01Z])
     refute HoldingsPriceWorker.in_session?(~U[2026-10-29 20:15:00Z])
   end
 

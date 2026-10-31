@@ -1,5 +1,7 @@
 defmodule Opus.Pipeline.CoordinatorTest do
-  use Opus.DataCase, async: true
+  # Not async: it adds instruments, whose unique keys other files' tests
+  # share; two adding the same ones in parallel can deadlock.
+  use Opus.DataCase, async: false
 
   alias Opus.Instruments
   alias Opus.Pipeline.{Coordinator, StrategyConfig}

@@ -756,6 +756,78 @@ defmodule Opus.Options.Paper do
     }
   end
 
+  @doc """
+  Closed trades across every book, newest first, for the Journal: what each
+  was, how it ended, the cash it opened for (premium taken in above zero,
+  paid out below) and what it made, commissions in. An assignment's or a
+  call-away's cash buys or sells the shares, so it isn't the option's result
+  and is left out; a shares lot makes its sale less its cost.
+  """
+  @spec closed_trades(pos_integer()) :: [map()]
+  def closed_trades(limit \\ 30) do
+    trades =
+      from(t in Trade,
+        where: t.status == "closed",
+        order_by: [desc: t.closed_on, desc: t.id],
+        limit: ^limit
+      )
+      |> with_symbol()
+      |> Repo.all()
+
+    ids = Enum.map(trades, & &1.id)
+
+    legs =
+      Repo.all(from(p in Position, where: p.trade_id in ^ids)) |> Enum.group_by(& &1.trade_id)
+
+    cash =
+      from(e in Event,
+        join: p in Position,
+        on: p.id == e.position_id,
+        where: p.trade_id in ^ids and e.kind not in ~w(mark assign call_away),
+        group_by: [p.trade_id, e.kind == "open"],
+        select: {{p.trade_id, e.kind == "open"}, sum(e.cash)}
+      )
+      |> Repo.all()
+      |> Map.new()
+
+    for t <- trades do
+      legs = legs |> Map.get(t.id, []) |> Enum.sort_by(&{&1.strike || 0, &1.kind, &1.id})
+      opened = Map.get(cash, {t.id, true}, 0.0)
+      shares = legs |> Enum.filter(&(&1.kind == "shares")) |> Enum.sum_by(&shares_result/1)
+
+      %{
+        id: t.id,
+        book: t.strategy,
+        symbol: t.symbol,
+        structure: t.structure,
+        opened_on: t.opened_on,
+        closed_on: t.closed_on,
+        legs: legs,
+        ended: ended(legs),
+        opened_cash: opened,
+        pnl: opened + Map.get(cash, {t.id, false}, 0.0) + shares
+      }
+    end
+  end
+
+  defp shares_result(%{close_price: sold} = lot) when is_number(sold),
+    do: (sold - lot.open_price) * lot.quantity - lot.commission
+
+  defp shares_result(_lot), do: 0.0
+
+  # How a closed trade ended, from its legs: assigned or called away if any
+  # leg was, expired if every leg ran to expiry, else closed before it.
+  defp ended(legs) do
+    statuses = MapSet.new(legs, & &1.status)
+
+    cond do
+      "assigned" in statuses -> :assigned
+      "called_away" in statuses -> :called_away
+      statuses == MapSet.new(["expired"]) -> :expired
+      true -> :closed
+    end
+  end
+
   @doc "Every book's P&L added up (marked to the latest quotes), for the tab badge."
   @spec total_pnl() :: float()
   def total_pnl, do: Enum.sum_by(books(), &book(&1).pnl) / 1

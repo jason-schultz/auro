@@ -44,6 +44,20 @@ config :opus, Oban,
        # Every 15 minutes in the session: re-price the Wealthsimple holdings
        # from Questrade quotes (Opus.Accounts.HoldingsPriceWorker).
        {"*/15 9-16 * * 1-5", Opus.Accounts.HoldingsPriceWorker, timezone: "America/New_York"},
+       # The holdings at the close, after the 16:00 re-price (Opus.Accounts.SnapshotWorker).
+       {"10 16 * * 1-5", Opus.Accounts.SnapshotWorker, timezone: "America/New_York"},
+       # 15:45 New York: what each share-alert assignment says, 15 minutes
+       # before the close it was tested on (Opus.Trading.ShareAlertWorker).
+       {"45 15 * * 1-5", Opus.Trading.ShareAlertWorker, timezone: "America/New_York"},
+       # Spreads of markets tested as shares held (Opus.MarketData.SpreadWorker):
+       # sampled every 15 minutes mid-session, settled after the close.
+       {"*/15 10-15 * * 1-5", Opus.MarketData.SpreadWorker,
+        args: %{step: "sample"}, timezone: "America/New_York"},
+       {"20 16 * * 1-5", Opus.MarketData.SpreadWorker,
+        args: %{step: "settle"}, timezone: "America/New_York"},
+       # The latest dividend of each listing with no dividend history to load
+       # (Opus.MarketData.DividendRecordWorker), recorded as it comes.
+       {"40 20 * * 1-5", Opus.MarketData.DividendRecordWorker, timezone: "America/New_York"},
        # 07:00 New York Tue–Sat: the US daily bars for the previous session
        # (one job per symbol). Massive's free plan publishes a session's bar
        # some time the next day, so the old evening run stored day D only on
@@ -72,11 +86,14 @@ config :opus, Oban,
        {"15 17 * * 1-5", Opus.Trading.DriftWorker, timezone: "America/New_York"},
        # Monday 12:00 UTC (08:00 ET): snapshot last week's forward-test numbers.
        {"0 12 * * 1", Opus.Journal.DigestWorker},
-       # Dashboard alerts to Discord: new ones every 5 minutes, and a check-in
-       # after the US close so a quiet day still says it was quiet.
+       # Dashboard alerts to Discord: new ones every 5 minutes; the day's
+       # write-up after the US close (so a quiet day still says it was
+       # quiet), and the week's on Friday.
        {"*/5 * * * *", Opus.Dashboard.NotifyWorker},
        {"30 16 * * 1-5", Opus.Dashboard.NotifyWorker,
-        args: %{check_in: true}, timezone: "America/New_York"}
+        args: %{check_in: true}, timezone: "America/New_York"},
+       {"0 17 * * 5", Opus.Dashboard.NotifyWorker,
+        args: %{summary: "week"}, timezone: "America/New_York"}
      ]}
   ],
   queues: [pipeline: 2, market_data: 1, massive: 1, alerts: 1]

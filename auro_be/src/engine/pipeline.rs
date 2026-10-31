@@ -10,6 +10,7 @@ use crate::db::repositories::candles::load_candles;
 use crate::db::repositories::financing as financing_repo;
 use crate::db::repositories::live_strategies as live_strategies_repo;
 use crate::db::repositories::pipeline as pipeline_repo;
+use crate::engine::buy_and_hold::{self, Hold};
 use crate::engine::financing::{apply_costs, FinancingModel, Overnight};
 use crate::engine::stats::{
     backtest_on_account, calculate_backtest_stats, AccountSizing, BacktestStats,
@@ -40,7 +41,13 @@ mod parameter_stability;
 ///   counts each market's k settings tries as √k; ranked baskets judged on
 ///   months; the walk-forward's in-sample minimum; the nearby-settings
 ///   (parameter stability) stage.
-pub const RULES_VERSION: i32 = 1;
+/// - 2: Oct 30 2026: shares held outright (`owned_shares`, Wealthsimple)
+///   are judged in Monte Carlo against just holding the same funds (bad
+///   run at holding's risk no worse than holding's worst drop, Sharpe at
+///   least holding's) instead of the fixed 10% cap; CFDs unchanged.
+///   Same day (before any v2 pass): the bad run is read against holding's
+///   own 1-in-20 bad run, redrawn the same way, not its one actual drop.
+pub const RULES_VERSION: i32 = 2;
 
 #[derive(Clone)]
 pub struct StrategyConfig {
@@ -208,6 +215,24 @@ fn costs_json(config: &StrategyConfig, financing: &FinancingModel) -> Option<Val
         "spread_bps": costs.spread_bps,
         "commission_bps": costs.commission_bps,
         "shorts_skipped": shorts_skipped(&config.parameters, &config.instrument, financing),
+        // Shares held outright: their dividends are paid to longs, known
+        // from this ex-date ("none" when the fund pays none).
+        "dividends_from": match (costs.overnight, financing.dividends_from(&config.instrument)) {
+            (Overnight::None, Some(Some(first))) => serde_json::json!(first),
+            (Overnight::None, Some(None)) => serde_json::json!("none"),
+            _ => Value::Null,
+        },
+        // No dividend history to fetch (Massive is US only): the test runs
+        // without the dividends before the first one recorded ("none" when
+        // none has been yet).
+        "dividends_recorded_since": match (
+            costs.overnight,
+            financing.dividends_recorded_since(&config.instrument),
+        ) {
+            (Overnight::None, Some(Some(first))) => serde_json::json!(first),
+            (Overnight::None, Some(None)) => serde_json::json!("none"),
+            _ => Value::Null,
+        },
     }))
 }
 
@@ -394,16 +419,36 @@ pub async fn require_brokers(pool: &PgPool, config: &StrategyConfig) -> AppResul
         .filter(|m| financing.costs_for(m).is_none())
         .map(String::as_str)
         .collect();
-    if off.is_empty() {
+    if !off.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "{} {} no broker set for {} tests (the Instruments page), so there are no costs \
+             to grade {} on.",
+            off.join(", "),
+            if off.len() == 1 { "has" } else { "have" },
+            if off.len() == 1 { "its" } else { "their" },
+            if off.len() == 1 { "it" } else { "them" }
+        )));
+    }
+    // Shares held outright earn their dividends: unknown ones would leave
+    // a long hold's income out of its grade. A market with no history to
+    // fetch (Massive is US only) is tested without it, and its results say
+    // so (`dividends_recorded_since`).
+    let unknown: Vec<&str> = markets
+        .iter()
+        .filter(|m| {
+            financing.owns_shares(m)
+                && financing.dividends_from(m).is_none()
+                && financing.dividends_recorded_since(m).is_none()
+        })
+        .map(String::as_str)
+        .collect();
+    if unknown.is_empty() {
         return Ok(());
     }
     Err(AppError::BadRequest(format!(
-        "{} {} no broker set for {} tests (the Instruments page), so there are no costs to \
-         grade {} on.",
-        off.join(", "),
-        if off.len() == 1 { "has" } else { "have" },
-        if off.len() == 1 { "its" } else { "their" },
-        if off.len() == 1 { "it" } else { "them" }
+        "{}'s dividends haven't been loaded, so a long hold would be graded without its \
+         income. Load them first (Load dividends, on the Instruments page).",
+        unknown.join(", ")
     )))
 }
 
@@ -528,6 +573,31 @@ pub async fn load_holdout_start(pool: &PgPool) -> AppResult<chrono::DateTime<chr
     ))
 }
 
+/// `candles` from the first ex-date on record when `market` is shares held
+/// outright: before it the dividends are unknown, so a long hold there
+/// would be graded without its income. Other markets' bars are unchanged.
+fn from_known_dividends(
+    candles: Vec<Candle>,
+    market: &str,
+    financing: &FinancingModel,
+) -> Vec<Candle> {
+    match (
+        financing.owns_shares(market),
+        financing.dividends_from(market),
+    ) {
+        (true, Some(Some(first))) => candles
+            .into_iter()
+            .filter(|c| {
+                c.time
+                    .with_timezone(&chrono_tz::America::New_York)
+                    .date_naive()
+                    >= first
+            })
+            .collect(),
+        _ => candles,
+    }
+}
+
 /// The bars an exploration stage may see: everything before the holdout.
 pub(crate) async fn load_exploration_candles(
     pool: &PgPool,
@@ -598,13 +668,24 @@ async fn load_subject(
                 .await
                 .map_err(AppError::Database)?
         };
-        return Ok(Ok(Subject::One(candles)));
+        let financing = load_financing(pool).await?;
+        return Ok(Ok(Subject::One(from_known_dividends(
+            candles,
+            &config.instrument,
+            &financing,
+        ))));
     };
     let before = match sealed {
         true => Some(load_holdout_start(pool).await?),
         false => None,
     };
-    let members = basket::load(pool, &basket, config.granularity, before).await?;
+    let mut members = basket::load(pool, &basket, config.granularity, before).await?;
+    // Each fund from its first known dividend, as on its own.
+    let financing = load_financing(pool).await?;
+    for member in &mut members {
+        let candles = std::mem::take(&mut member.candles);
+        member.candles = from_known_dividends(candles, &member.market, &financing);
+    }
     if let Some(missing) = basket::missing(&members, |_| true) {
         return Ok(Err(format!(
             "No {} bars{} for {}: take {} out of the basket",
@@ -622,6 +703,31 @@ async fn load_subject(
 }
 
 impl Subject {
+    /// Just holding the same funds over the same bars
+    /// (`buy_and_hold::hold`), for a result on shares held outright: the
+    /// benchmark a long-only rule there has to beat. None for anything
+    /// else (a CFD held long pays financing, so holding isn't free).
+    fn hold(&self, instrument: &str, financing: &FinancingModel) -> Option<Hold> {
+        let funds: Vec<(&str, &[Candle])> = match self {
+            Subject::One(candles) => vec![(instrument, candles.as_slice())],
+            Subject::Basket(_, members) => members
+                .iter()
+                .map(|m| (m.market.as_str(), m.candles.as_slice()))
+                .collect(),
+        };
+        if !funds
+            .iter()
+            .all(|(market, _)| financing.owns_shares(market))
+        {
+            return None;
+        }
+        let with_dividends: Vec<buy_and_hold::Fund> = funds
+            .iter()
+            .map(|(market, candles)| (*candles, financing.dividends(market)))
+            .collect();
+        buy_and_hold::hold(&with_dividends)
+    }
+
     /// One market's bars; None for a basket.
     fn single(&self) -> Option<&[Candle]> {
         match self {
@@ -746,6 +852,26 @@ fn months_rules(
 /// Judge a stage's stats against its thresholds, save the verdict and
 /// hand it back. A ranked basket is judged on months, not trades
 /// (`months_rules`).
+/// The class a config's pass bars are chosen by
+/// (`validation_thresholds.instrument_class`): `owned_shares` when every
+/// market in it is shares held outright (a cash account at Wealthsimple:
+/// judged against just holding them), else the OANDA instrument's class.
+async fn market_class(pool: &PgPool, config: &StrategyConfig) -> AppResult<&'static str> {
+    let markets = match basket::Basket::of(config) {
+        Ok(Some(basket)) => basket.markets,
+        _ => vec![config.instrument.clone()],
+    };
+    let financing = load_financing(pool).await?;
+    Ok(if markets.iter().all(|m| financing.owns_shares(m)) {
+        OWNED_SHARES
+    } else {
+        instrument_to_class(&config.instrument)
+    })
+}
+
+/// The pass-bar class of shares held outright (`market_class`).
+pub const OWNED_SHARES: &str = "owned_shares";
+
 async fn judge(
     pool: &PgPool,
     config: &StrategyConfig,
@@ -754,7 +880,7 @@ async fn judge(
     mut stats_json: Value,
 ) -> AppResult<EvaluationResult> {
     let timeframe_class = config.granularity.timeframe_class();
-    let instrument_class = instrument_to_class(&config.instrument);
+    let instrument_class = market_class(pool, config).await?;
     let mut thresholds = load_thresholds(
         pool,
         stage,
@@ -936,6 +1062,7 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
 
     let financing = load_financing(pool).await?;
     let costs = costs_json(config, &financing);
+    let held = subject.hold(&config.instrument, &financing);
     let job = config.clone();
     let tested = match off_runtime(move || subject.test(&job, &financing, Part::Whole)).await? {
         Ok(tested) => tested,
@@ -948,6 +1075,17 @@ pub async fn run_backtest(pool: &PgPool, config: &StrategyConfig) -> AppResult<E
     }
     if let Some(costs) = costs {
         stats_json["costs"] = costs;
+    }
+    if let Some(held) = held {
+        // The rule's own account valued every day, as holding is: its
+        // close-day Sharpe above would book a months-long hold all at once.
+        let rule = path_stats(tested.daily.iter().copied());
+        stats_json["buy_and_hold"] = serde_json::json!(held);
+        stats_json["buy_and_hold"]["rule"] = serde_json::json!({
+            "annual_sharpe": rule.annual_sharpe,
+            "total_return": rule.total_return,
+            "max_drawdown": rule.max_drawdown,
+        });
     }
     let result = judge(pool, config, evaluation_id, "backtest", stats_json).await?;
 
@@ -1327,6 +1465,54 @@ fn run_monte_carlo_sims<R: rand::Rng + ?Sized>(daily: &[f64], rng: &mut R) -> Va
     })
 }
 
+/// For shares held outright, Monte Carlo judged against just holding the
+/// same funds (`held`) instead of a fixed drawdown cap: the rule's daily
+/// account returns scaled to swing as much as holding does, their 95th
+/// percentile bad run beside holding's, redrawn the same way
+/// (`p95_drawdown_vs_hold`, 1 = as bad: like for like, so a rule that just
+/// held would score about 1, not fail against holding's one lucky or
+/// unlucky history), and the rule's Sharpe less
+/// holding's (`sharpe_vs_hold`). Scaling makes it fair however small the
+/// rule's positions are; Sharpe doesn't change with scale.
+fn against_holding<R: rand::Rng + ?Sized>(
+    stats: &mut Value,
+    daily: &[f64],
+    held: &Hold,
+    rng: &mut R,
+) {
+    let rule = path_stats(daily.iter().copied());
+    let n = daily.len() as f64;
+    let mean = daily.iter().sum::<f64>() / n;
+    let vol = (daily.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n).sqrt() * 252f64.sqrt();
+    let scale = if vol > f64::EPSILON {
+        held.annual_vol / vol
+    } else {
+        1.0
+    };
+    let scaled: Vec<f64> = daily.iter().map(|r| r * scale).collect();
+    let at_hold_risk = run_monte_carlo_sims(&scaled, rng)["p95_drawdown"]
+        .as_f64()
+        .unwrap_or(f64::NAN);
+    let hold_p95 = run_monte_carlo_sims(&held.daily, rng)["p95_drawdown"]
+        .as_f64()
+        .unwrap_or(f64::NAN);
+    stats["buy_and_hold"] = serde_json::json!(held);
+    stats["buy_and_hold"]["p95_drawdown"] = serde_json::json!(hold_p95);
+    stats["buy_and_hold"]["rule"] = serde_json::json!({
+        "annual_sharpe": rule.annual_sharpe,
+        "total_return": rule.total_return,
+        "max_drawdown": rule.max_drawdown,
+        "annual_vol": vol,
+    });
+    stats["p95_drawdown_at_hold_risk"] = serde_json::json!(at_hold_risk);
+    stats["p95_drawdown_vs_hold"] = if hold_p95 > f64::EPSILON {
+        serde_json::json!(at_hold_risk / hold_p95)
+    } else {
+        Value::Null
+    };
+    stats["sharpe_vs_hold"] = serde_json::json!(rule.annual_sharpe - held.annual_sharpe);
+}
+
 pub async fn run_monte_carlo(
     pool: &PgPool,
     config: &StrategyConfig,
@@ -1339,6 +1525,7 @@ pub async fn run_monte_carlo(
     };
 
     let financing = load_financing(pool).await?;
+    let held = subject.hold(&config.instrument, &financing);
     let job = config.clone();
     let tested = match off_runtime(move || subject.test(&job, &financing, Part::Whole)).await? {
         Ok(tested) => tested,
@@ -1354,7 +1541,14 @@ pub async fn run_monte_carlo(
     }
 
     let num_days = daily.len();
-    let stats_json = off_runtime(move || run_monte_carlo_sims(&daily, &mut rand::rng())).await?;
+    let stats_json = off_runtime(move || {
+        let mut stats = run_monte_carlo_sims(&daily, &mut rand::rng());
+        if let Some(held) = held {
+            against_holding(&mut stats, &daily, &held, &mut rand::rng());
+        }
+        stats
+    })
+    .await?;
     let result = judge(pool, config, evaluation_id, "monte_carlo", stats_json).await?;
 
     tracing::info!(
@@ -1634,6 +1828,129 @@ pub async fn run_parameter_stability(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_share_market_is_tested_from_its_first_known_dividend() {
+        use crate::engine::financing::{BrokerCosts, Overnight};
+        let day = |d: u32| chrono::TimeZone::with_ymd_and_hms(&Utc, 2007, 3, d, 4, 0, 0).unwrap();
+        let candles: Vec<Candle> = (14..=19)
+            .map(|d| {
+                Candle::from_trade_bar(
+                    day(d),
+                    crate::engine::types::OHLC {
+                        open: 1.0,
+                        high: 1.0,
+                        low: 1.0,
+                        close: 1.0,
+                    },
+                    0.0,
+                )
+            })
+            .collect();
+        let owned = BrokerCosts {
+            broker: "wealthsimple".into(),
+            overnight: Overnight::None,
+            spread_bps: Some(10.0),
+            commission_bps: 0.0,
+            can_short: false,
+        };
+        let first = chrono::NaiveDate::from_ymd_opt(2007, 3, 16).unwrap();
+        let financing = FinancingModel::default()
+            .with_brokers(vec![("DIA".into(), owned.clone()), ("GLD".into(), owned)])
+            .with_dividends(vec![
+                ("DIA".into(), vec![(first, 0.5)]),
+                ("GLD".into(), vec![]),
+            ]);
+
+        let dia = from_known_dividends(candles.clone(), "DIA", &financing);
+        assert_eq!(dia.len(), 4, "the 16th on");
+        assert_eq!(
+            from_known_dividends(candles.clone(), "GLD", &financing).len(),
+            6
+        );
+        assert_eq!(
+            from_known_dividends(candles.clone(), "SPX500_USD", &financing).len(),
+            6
+        );
+        // No history to fetch (a Canadian listing): its recorded dividends
+        // don't clip the test.
+        let financing =
+            financing.with_recorded_dividends(vec![("XIU.TO".into(), vec![(first, 0.3)])]);
+        assert_eq!(from_known_dividends(candles, "XIU.TO", &financing).len(), 6);
+    }
+
+    #[test]
+    fn owned_shares_are_judged_against_holding_at_holdings_risk() {
+        use rand::SeedableRng;
+        // A small, steady rule: tiny positions, so its own drops are tiny.
+        let daily: Vec<f64> = (0..600)
+            .map(|i| if i % 5 == 0 { -0.002 } else { 0.001 })
+            .collect();
+        let held = Hold {
+            total_return: 1.0,
+            annual_return: 0.08,
+            max_drawdown: 0.40,
+            annual_sharpe: 0.5,
+            annual_vol: 0.16,
+            first_day: chrono::NaiveDate::from_ymd_opt(2010, 1, 4).unwrap(),
+            last_day: chrono::NaiveDate::from_ymd_opt(2012, 6, 1).unwrap(),
+            daily: (0..600)
+                .map(|i| if i % 7 == 0 { -0.03 } else { 0.006 })
+                .collect(),
+        };
+        let mut stats = serde_json::json!({});
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        against_holding(&mut stats, &daily, &held, &mut rng);
+
+        let rule_sharpe = stats["buy_and_hold"]["rule"]["annual_sharpe"]
+            .as_f64()
+            .unwrap();
+        assert!((stats["sharpe_vs_hold"].as_f64().unwrap() - (rule_sharpe - 0.5)).abs() < 1e-12);
+        // Scaled up to swing like holding, its bad run is far bigger than
+        // its own tiny drops, and is read against holding's own bad run.
+        let at_risk = stats["p95_drawdown_at_hold_risk"].as_f64().unwrap();
+        assert!(
+            at_risk
+                > stats["buy_and_hold"]["rule"]["max_drawdown"]
+                    .as_f64()
+                    .unwrap()
+        );
+        let hold_p95 = stats["buy_and_hold"]["p95_drawdown"].as_f64().unwrap();
+        assert!(
+            (stats["p95_drawdown_vs_hold"].as_f64().unwrap() - at_risk / hold_p95).abs() < 1e-12
+        );
+    }
+
+    #[test]
+    fn a_rule_that_just_holds_scores_about_as_bad_as_holding() {
+        use rand::SeedableRng;
+        let daily: Vec<f64> = (0..1500)
+            .map(|i| match i % 9 {
+                0 => -0.025,
+                4 => -0.01,
+                _ => 0.006,
+            })
+            .collect();
+        let held = Hold {
+            total_return: 1.0,
+            annual_return: 0.08,
+            max_drawdown: 0.05,
+            annual_sharpe: 0.5,
+            annual_vol: {
+                let n = daily.len() as f64;
+                let m = daily.iter().sum::<f64>() / n;
+                (daily.iter().map(|r| (r - m).powi(2)).sum::<f64>() / n).sqrt() * 252f64.sqrt()
+            },
+            first_day: chrono::NaiveDate::from_ymd_opt(2010, 1, 4).unwrap(),
+            last_day: chrono::NaiveDate::from_ymd_opt(2015, 12, 31).unwrap(),
+            daily: daily.clone(),
+        };
+        let mut stats = serde_json::json!({});
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        against_holding(&mut stats, &daily, &held, &mut rng);
+        let ratio = stats["p95_drawdown_vs_hold"].as_f64().unwrap();
+        assert!((ratio - 1.0).abs() < 0.1, "ratio {ratio}");
+    }
 
     #[test]
     fn long_only_drops_the_short_entry_and_keeps_the_rest() {

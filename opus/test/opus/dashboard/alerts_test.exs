@@ -146,6 +146,32 @@ defmodule Opus.Dashboard.AlertsTest do
 
     assert alert.title == "Questrade is offline"
     assert alert.link == "/accounts"
+    assert alert.what_to_do =~ "generate a new token in Questrade's API centre"
+  end
+
+  test "the holdings falling 5% or more at today's close is a check, not before" do
+    today = DateTime.to_date(@now)
+    fell = %{on: today, value: 950.0, day_change: -60.0, day_pct: -0.0594, drawdown: 0.1}
+
+    assert [alert] = Alerts.build(input(%{holdings: fell}))
+    assert alert.level == :check
+    assert alert.title == "Your holdings fell 5.9% today"
+    assert alert.link == "/accounts"
+
+    assert Alerts.build(input(%{holdings: %{fell | day_pct: -0.03}})) == []
+    assert Alerts.build(input(%{holdings: %{fell | on: Date.add(today, -1)}})) == []
+  end
+
+  test "an offline OANDA gets OANDA's play, not Questrade's" do
+    maintenance =
+      ~s|OANDA API error: HTTP 503 Service Unavailable: {"errorMessage":"System under maintenance"}|
+
+    [alert] = Alerts.build(input(%{offline_brokers: [%{broker: "OANDA", error: maintenance}]}))
+    assert alert.what_to_do =~ "down for maintenance: nothing to do"
+    refute alert.what_to_do =~ "Questrade"
+
+    [alert] = Alerts.build(input(%{offline_brokers: [%{broker: "OANDA", error: "HTTP 401"}]}))
+    assert alert.what_to_do =~ "a 401 means the OANDA API token needs replacing"
   end
 
   test "a wheel put in the money is held, and the alert says so" do
