@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
+use chrono::NaiveDate;
 
 use crate::engine::live::sizing::MAX_POSITION_PCT_OF_NAV;
 use crate::engine::pipeline::span;
@@ -56,8 +56,9 @@ pub struct BacktestStats {
     /// Per trade: the average trade over how much trades vary. Only
     /// meaningful with the trade count (`pipeline::t_stat`).
     pub sharpe_ratio: f64,
-    /// The standard Sharpe, a year's worth (`annual_sharpe`): comparable
-    /// across strategies and with what charting tools report.
+    /// The standard Sharpe, a year's worth, from the account valued every
+    /// day (`Marked::annual_sharpe`): comparable across strategies and with
+    /// what charting tools report.
     pub annual_sharpe: f64,
     pub num_trades: usize,
     /// Set when judged on calendar-month account returns
@@ -75,6 +76,11 @@ pub struct Marked {
     pub account_return: f64,
     /// `BacktestStats::account_max_drawdown` (≤ 0).
     pub account_max_drawdown: f64,
+    /// `BacktestStats::annual_sharpe`: from the account's return each
+    /// weekday, open trades valued at each day's last bar
+    /// (`portfolio::Outcome::annual_sharpe`), so a trade's ups and downs
+    /// land on the days they happen, not all on the day it closes.
+    pub annual_sharpe: f64,
 }
 
 /// Calculates the backtest statistics for one market's trades.
@@ -115,19 +121,14 @@ pub fn backtest_on_account(
         max_drawdown: -outcome.summed_max_drawdown,
         account_return: outcome.total_return,
         account_max_drawdown: -outcome.max_drawdown,
+        annual_sharpe: outcome.annual_sharpe,
     };
-    (stats_with(trades, from, to, sizing, marked), outcome)
+    (stats_with(trades, sizing, marked), outcome)
 }
 
-/// The backtest statistics of `trades` traded between `from` and `to`,
-/// with drawdowns and growth already valued at every bar (`marked`).
-pub fn stats_with(
-    trades: &[Trade],
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-    sizing: AccountSizing,
-    marked: Marked,
-) -> BacktestStats {
+/// The backtest statistics of `trades`, with drawdowns, growth and the
+/// Sharpe already valued at every bar (`marked`).
+pub fn stats_with(trades: &[Trade], sizing: AccountSizing, marked: Marked) -> BacktestStats {
     if trades.is_empty() {
         return BacktestStats {
             total_return: 0.0,
@@ -182,7 +183,7 @@ pub fn stats_with(
         account_max_drawdown: marked.account_max_drawdown,
         account_risk_pct: sizing.risk_pct,
         sharpe_ratio: sharpe_of(&pnls),
-        annual_sharpe: annual_sharpe(trades, from, to),
+        annual_sharpe: marked.annual_sharpe,
         num_trades: trades.len(),
         num_months: None,
     }
@@ -223,40 +224,9 @@ fn sharpe_of(returns: &[f64]) -> f64 {
     }
 }
 
-/// The standard (annualized) Sharpe from daily returns: each trade's return
-/// is booked on the UTC day it closes, every weekday from `from` to `to`
-/// without one counts as a flat day, and the daily mean over the daily
-/// standard deviation (population, like the per-trade figure) is scaled by
-/// √252. Days out of the market count, so a strategy that trades rarely
-/// isn't flattered. 0 with under two days or no variation.
-pub fn annual_sharpe(trades: &[Trade], from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
-    let returns = trades.iter().map(|t| (t.exit_time, t.pnl_percent));
-    annual_sharpe_of(&daily_returns(returns, from, to))
-}
-
-/// Returns booked on the UTC day they close, every weekday from `from` to
-/// `to` present (0 when nothing closed that day).
-pub fn daily_returns(
-    returns: impl IntoIterator<Item = (DateTime<Utc>, f64)>,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-) -> BTreeMap<NaiveDate, f64> {
-    let mut days: BTreeMap<NaiveDate, f64> = BTreeMap::new();
-    let (first, last) = (from.date_naive(), to.date_naive());
-    let mut day = first;
-    while day <= last {
-        if !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
-            days.insert(day, 0.0);
-        }
-        day += Duration::days(1);
-    }
-    for (at, r) in returns {
-        *days.entry(at.date_naive()).or_insert(0.0) += r;
-    }
-    days
-}
-
-/// The annual Sharpe of a daily return series (`daily_returns`).
+/// The annual Sharpe of a daily return series (weekdays, flat days as 0):
+/// the daily mean over the daily standard deviation (population), scaled
+/// by √252. 0 with under two days or no variation.
 pub fn annual_sharpe_of(days: &BTreeMap<NaiveDate, f64>) -> f64 {
     let n = days.len() as f64;
     if n < 2.0 {
@@ -273,7 +243,7 @@ pub fn annual_sharpe_of(days: &BTreeMap<NaiveDate, f64>) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
 
     use crate::engine::types::{Direction, EntryReason, ExitReason, Trade, OHLC};
 
@@ -407,42 +377,32 @@ mod tests {
         assert!(stats.account_return.abs() < 1e-12);
     }
 
-    fn closed_on(day: &str, pnl: f64) -> Trade {
-        let at = chrono::DateTime::parse_from_rfc3339(&format!("{day}T20:00:00Z"))
-            .unwrap()
-            .with_timezone(&Utc);
-        Trade {
-            exit_time: at,
-            entry_time: at,
-            ..dummy_trade(pnl)
-        }
-    }
-
     #[test]
-    fn annual_sharpe_counts_flat_weekdays_and_skips_weekends() {
-        // Mon 2026-01-05 to Fri 2026-01-16: ten weekdays, two trades.
-        let trades = vec![
-            closed_on("2026-01-06", 0.02),
-            closed_on("2026-01-13", -0.01),
-        ];
-        let got = annual_sharpe(&trades, utc("2026-01-05"), utc("2026-01-16"));
-
-        let days = [0.0, 0.02, 0.0, 0.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0];
-        let mean = days.iter().sum::<f64>() / 10.0;
-        let sd = (days.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / 10.0).sqrt();
-        assert!((got - mean / sd * 252f64.sqrt()).abs() < 1e-12);
-    }
-
-    #[test]
-    fn annual_sharpe_is_zero_without_variation_or_days() {
-        assert_eq!(
-            annual_sharpe(&[], utc("2026-01-05"), utc("2026-01-16")),
-            0.0
-        );
-        assert_eq!(
-            annual_sharpe(&[], utc("2026-01-05"), utc("2026-01-05")),
-            0.0
-        );
+    fn the_annual_sharpe_reads_the_account_valued_every_day() {
+        // Long a month while the price rises steadily, closed at +10%: the
+        // close-day Sharpe sees one up day among flat ones, the account
+        // valued daily sees the steady rise it was.
+        let bars: Vec<Candle> = (0..31)
+            .map(|i| {
+                bar(
+                    utc("2026-01-05") + Duration::days(i),
+                    100.0 + i as f64 / 3.0,
+                )
+            })
+            .collect();
+        let trade = Trade {
+            entry_price: 100.0,
+            exit_price: 110.0,
+            pnl_percent: 0.10,
+            entry_time: bars[0].time,
+            exit_time: bars[30].time,
+            stop_price: 90.0,
+            ..dummy_trade(0.10)
+        };
+        let stats = calculate_backtest_stats(&[trade], &bars, SIZING);
+        // Booked on the close day it would be one +10% day among 22 flat
+        // ones: about 3.3.
+        assert!(stats.annual_sharpe > 10.0, "{}", stats.annual_sharpe);
     }
 
     #[test]

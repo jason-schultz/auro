@@ -29,6 +29,7 @@ defmodule OpusWeb.Components.PaperTrades do
   attr :trade, :map, default: nil
   attr :leg, :map, default: nil
   attr :analysis, :map, default: nil
+  attr :now, :map, default: %{}
 
   def body(assigns) do
     ~H"""
@@ -46,62 +47,97 @@ defmodule OpusWeb.Components.PaperTrades do
         >
           <.t {copy("Overview")} />
         </.link>
-        <div :for={trade <- @book.trades} class="flex flex-col">
-          <.link
-            patch={
-              if @trade && @trade.id == trade.id,
-                do: ~p"/options?view=paper&book=#{@book.strategy}",
-                else: ~p"/options?view=paper&book=#{@book.strategy}&trade=#{trade.id}"
-            }
-            class={[
-              "flex flex-col gap-0.5 rounded-field border px-3 py-2",
-              if(@trade && @trade.id == trade.id,
-                do: "border-primary bg-base-300",
-                else: "border-base-300 hover:border-primary"
-              ),
-              trade.status != "open" && "opacity-70"
-            ]}
-          >
-            <span class="flex items-baseline justify-between gap-3">
-              <span class="text-[14px] font-medium">{trade.symbol} {structure_name(trade.structure)}</span>
-              <span class={["text-[14px] font-medium", tone(trade.pnl)]}>{money(trade.pnl)}</span>
-            </span>
-            <span class="text-[12px] text-muted">
-              {strikes(trade)} · {day(trade.expiration)} · {trade.status}
-            </span>
-          </.link>
-          <ol
-            :if={@trade && @trade.id == trade.id}
-            class="m-0 ml-3 flex list-none flex-col border-l border-base-300 p-0"
-          >
-            <li :for={leg <- trade.legs}>
-              <.link
-                patch={
-                  if @leg && @leg.position.id == leg.id,
-                    do: ~p"/options?view=paper&book=#{@book.strategy}&trade=#{trade.id}",
-                    else:
-                      ~p"/options?view=paper&book=#{@book.strategy}&trade=#{trade.id}&leg=#{leg.id}"
-                }
-                class={[
-                  "flex justify-between gap-3 px-3 py-1.5 text-[13px]",
-                  if(@leg && @leg.position.id == leg.id,
-                    do: "font-medium text-primary",
-                    else: "text-muted hover:text-base-content"
-                  )
-                ]}
-              >
-                <span>{leg_words(leg)}</span>
-                <span>{leg.status}</span>
-              </.link>
-            </li>
-          </ol>
-        </div>
+        <%= for {label, trades} <- trade_groups(@book.trades), trades != [] do %>
+          <span class="mt-2 px-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+            <.t {label} /> · {length(trades)}
+          </span>
+          <.trade_item
+            :for={trade <- trades}
+            trade={trade}
+            selected={@trade}
+            leg={@leg}
+            book={@book.strategy}
+          />
+        <% end %>
       </nav>
 
       <div class="min-w-0">
         <.overview :if={@trade == nil} book={@book} />
-        <.trade_panel :if={@trade} trade={@trade} leg={@leg} analysis={@analysis} book={@book} />
+        <.trade_panel
+          :if={@trade}
+          trade={@trade}
+          leg={@leg}
+          analysis={@analysis}
+          book={@book}
+          now={@now[@trade.symbol]}
+        />
       </div>
+    </div>
+    """
+  end
+
+  # Open trades first, then the closed ones, each under its own heading:
+  # a closed trade between two open ones reads as if it were still on.
+  defp trade_groups(trades) do
+    {open, closed} = Enum.split_with(trades, &(&1.status == "open"))
+    [{copy("Open"), open}, {copy("Closed"), closed}]
+  end
+
+  attr :trade, :map, required: true
+  attr :selected, :map, default: nil
+  attr :leg, :map, default: nil
+  attr :book, :string, required: true
+
+  defp trade_item(assigns) do
+    ~H"""
+    <div class="flex flex-col">
+      <.link
+        patch={
+          if @selected && @selected.id == @trade.id,
+            do: ~p"/options?view=paper&book=#{@book}",
+            else: ~p"/options?view=paper&book=#{@book}&trade=#{@trade.id}"
+        }
+        class={[
+          "flex flex-col gap-0.5 rounded-field border px-3 py-2",
+          if(@selected && @selected.id == @trade.id,
+            do: "border-primary bg-base-300",
+            else: "border-base-300 hover:border-primary"
+          ),
+          @trade.status != "open" && "opacity-70"
+        ]}
+      >
+        <span class="flex items-baseline justify-between gap-3">
+          <span class="text-[14px] font-medium">{@trade.symbol} {structure_name(@trade.structure)}</span>
+          <span class={["text-[14px] font-medium", tone(@trade.pnl)]}>{money(@trade.pnl)}</span>
+        </span>
+        <span class="text-[12px] text-muted">
+          {strikes(@trade)} · {day(@trade.expiration)} · {@trade.status}
+        </span>
+      </.link>
+      <ol
+        :if={@selected && @selected.id == @trade.id}
+        class="m-0 ml-3 flex list-none flex-col border-l border-base-300 p-0"
+      >
+        <li :for={leg <- @trade.legs}>
+          <.link
+            patch={
+              if @leg && @leg.position.id == leg.id,
+                do: ~p"/options?view=paper&book=#{@book}&trade=#{@trade.id}",
+                else: ~p"/options?view=paper&book=#{@book}&trade=#{@trade.id}&leg=#{leg.id}"
+            }
+            class={[
+              "flex justify-between gap-3 px-3 py-1.5 text-[13px]",
+              if(@leg && @leg.position.id == leg.id,
+                do: "font-medium text-primary",
+                else: "text-muted hover:text-base-content"
+              )
+            ]}
+          >
+            <span>{leg_words(leg)}</span>
+            <span>{leg.status}</span>
+          </.link>
+        </li>
+      </ol>
     </div>
     """
   end
@@ -160,6 +196,7 @@ defmodule OpusWeb.Components.PaperTrades do
   attr :leg, :map, default: nil
   attr :analysis, :map, default: nil
   attr :book, :map, required: true
+  attr :now, :map, default: nil
 
   defp trade_panel(assigns) do
     trade = assigns.trade
@@ -185,6 +222,13 @@ defmodule OpusWeb.Components.PaperTrades do
             else: "closed #{@trade.closed_on && day(@trade.closed_on)}"}
         </span>
       </div>
+      <p :if={@trade.status == "open"} class="-mt-2 text-[13px] text-muted">
+        {@trade.symbol}
+        <span :if={@now}>
+          now {money(@now.price)}<span :if={@now.at}> ({clock(@now.at)} {zone_name(@now.at)})</span>;
+        </span>
+        valued at {money(@trade.spot)} in the book's last snapshot.
+      </p>
 
       <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
         <.fact
