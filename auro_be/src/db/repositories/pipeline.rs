@@ -55,6 +55,9 @@ pub(crate) async fn load_validation_thresholds(
     .await?;
 
     // Specificity score: higher = more specific. Per metric, keep highest.
+    // A most-specific row with operator `off` takes that metric out of the
+    // judging for its class (owned shares' fixed drawdown cap: they're
+    // judged against just holding instead).
     let mut best: HashMap<String, (i32, ValidationThresholdRow)> = HashMap::new();
     for (metric, operator, value, ic, st) in rows {
         let specificity = (if ic == instrument_class { 2 } else { 0 })
@@ -78,7 +81,11 @@ pub(crate) async fn load_validation_thresholds(
             );
         }
     }
-    Ok(best.into_values().map(|(_, row)| row).collect())
+    Ok(best
+        .into_values()
+        .map(|(_, row)| row)
+        .filter(|row| row.operator != "off")
+        .collect())
 }
 
 pub(crate) async fn upsert_evaluation_running(

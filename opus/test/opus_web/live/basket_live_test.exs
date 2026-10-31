@@ -63,6 +63,30 @@ defmodule OpusWeb.BasketLiveTest do
     assert [%StrategyConfig{instrument: "SPX500_USD"}] = Repo.all(StrategyConfig)
   end
 
+  test "a running basket shows each stage's result when the pipeline says it landed",
+       %{conn: conn, recipe: recipe} do
+    {:ok, [config]} =
+      Opus.Trading.Baskets.submit(recipe, ~w(SPX500_USD XAU_USD), %{"mode" => "together"})
+
+    {:ok, view, html} = live(conn, ~p"/strategies/recipes/#{recipe.id}/basket")
+    assert html =~ "Running: each result shows here as it lands"
+
+    Repo.insert!(%StrategyEvaluation{
+      strategy_config_id: config.id,
+      stage: "backtest",
+      status: "failed",
+      stats: %{"account_return" => -0.68, "account_max_drawdown" => 0.52, "num_trades" => 90},
+      rules_version: StrategyEvaluation.rules_version(),
+      failure_reason: "total_return: -0.6840 must be greater than 0",
+      evaluated_at: DateTime.utc_now()
+    })
+
+    Opus.Pipeline.Events.broadcast(config.id)
+    html = render(view)
+    assert html =~ "It failed the backtest"
+    refute html =~ "Running: each result shows here as it lands"
+  end
+
   test "a finished run says what happened, what to do, and each market's share",
        %{conn: conn, recipe: recipe} do
     {:ok, [config]} =

@@ -9,6 +9,8 @@ defmodule OpusWeb.InstrumentsLive do
 
   require Logger
 
+  import OpusWeb.Format, only: [day: 1]
+
   alias Opus.Auro.Client
   alias Opus.Instruments
   alias Opus.Instruments.Instrument
@@ -37,6 +39,8 @@ defmodule OpusWeb.InstrumentsLive do
        feeds: @feeds,
        asset_classes: Instrument.asset_classes(),
        brokers: Instruments.brokers(),
+       share_brokers: Instruments.share_brokers(),
+       loading_dividends: MapSet.new(),
        busy: false
      )
      |> reload()}
@@ -91,6 +95,17 @@ defmodule OpusWeb.InstrumentsLive do
     end
   end
 
+  # A market tested as shares owned outright needs its dividends before it
+  # can be tested; fetching them takes up to half a minute, in the background.
+  def handle_event("load_dividends", %{"id" => id}, socket) do
+    %Instrument{} = i = Enum.find(socket.assigns.instruments, &(to_string(&1.id) == id))
+
+    {:noreply,
+     socket
+     |> update(:loading_dividends, &MapSet.put(&1, i.id))
+     |> start_async({:dividends, i.id}, fn -> Instruments.load_dividends(i.massive_ticker) end)}
+  end
+
   # Asking Questrade takes up to a few minutes, so it runs in the
   # background: the page stays usable and the button says it's busy.
   def handle_event("enrich", _params, %{assigns: %{busy: true}} = socket),
@@ -101,6 +116,30 @@ defmodule OpusWeb.InstrumentsLive do
   end
 
   @impl true
+  def handle_async({:dividends, id}, result, socket) do
+    socket = update(socket, :loading_dividends, &MapSet.delete(&1, id))
+
+    case result do
+      {:ok, {:ok, count}} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Loaded #{count} dividends. It can be tested now.")
+         |> reload()}
+
+      {:ok, {:error, reason}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Couldn't load the dividends: #{Client.describe_error(reason)}"
+         )}
+
+      {:exit, _reason} ->
+        {:noreply,
+         put_flash(socket, :error, "Loading the dividends didn't finish. Check the Opus log.")}
+    end
+  end
+
   def handle_async(:enrich, {:ok, {:ok, %{"resolved" => resolved, "failed" => failed}}}, socket) do
     {:noreply,
      socket
@@ -300,6 +339,17 @@ defmodule OpusWeb.InstrumentsLive do
                       </option>
                     </select>
                   </form>
+                  <.dividends
+                    :if={i.test_broker in @share_brokers}
+                    instrument={i}
+                    loading={MapSet.member?(@loading_dividends, i.id)}
+                  />
+                  <span :if={i.test_broker in @share_brokers} class="block text-[12px] text-muted">
+                    {if i.spread_bps,
+                      do:
+                        "Spread #{:erlang.float_to_binary(i.spread_bps / 1, decimals: 1)} bp, measured",
+                      else: "Spread: the broker's default until measured"}
+                  </span>
                 </td>
                 <td class="py-2.5 text-center"><.flag_box instrument={i} flag={:active} /></td>
                 <td :for={{flag, _label} <- @feeds} class="py-2.5 text-center">
@@ -328,6 +378,41 @@ defmodule OpusWeb.InstrumentsLive do
       phx-value-id={@instrument.id}
       phx-value-flag={@flag}
     />
+    """
+  end
+
+  attr :instrument, Instrument, required: true
+  attr :loading, :boolean, default: false
+
+  # Held as shares, its tests pay its dividends: say whether they're loaded,
+  # offer to load them, or say there's no source.
+  defp dividends(%{instrument: %{dividends_checked_at: %NaiveDateTime{}}} = assigns) do
+    ~H"""
+    <span class="mt-1 block text-[12px] text-muted">
+      Dividends loaded {day(@instrument.dividends_checked_at)}
+    </span>
+    """
+  end
+
+  defp dividends(%{instrument: %{massive_ticker: nil}} = assigns) do
+    ~H"""
+    <span class="mt-1 block text-[12px] text-warning">
+      No dividend history (US listings only): tested without past dividends; new ones recorded from Questrade
+    </span>
+    """
+  end
+
+  defp dividends(assigns) do
+    ~H"""
+    <button
+      type="button"
+      phx-click="load_dividends"
+      phx-value-id={@instrument.id}
+      disabled={@loading}
+      class="mt-1 block text-[12px] font-medium text-primary hover:underline disabled:text-muted disabled:no-underline"
+    >
+      {if @loading, do: "Loading dividends…", else: "Load dividends (needed to test)"}
+    </button>
     """
   end
 end

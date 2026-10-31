@@ -28,9 +28,15 @@ defmodule OpusWeb.PipelineController do
       parameters: params["parameters"]
     }
 
-    case %StrategyConfig{} |> StrategyConfig.changeset(attrs) |> Repo.insert() do
-      {:ok, config} ->
-        json(conn, %{config_id: config.id})
+    with nil <- Opus.Pipeline.Coordinator.untestable(attrs),
+         {:ok, config} <- %StrategyConfig{} |> StrategyConfig.changeset(attrs) |> Repo.insert() do
+      json(conn, %{config_id: config.id})
+    else
+      # Its markets can't be tested yet: say why now, not when a stage fails.
+      {kind, _names} = why when kind in [:no_broker, :no_dividends] ->
+        conn
+        |> put_status(422)
+        |> json(%{error: "not testable", details: Opus.Instruments.untestable_words(why)})
 
       {:error, changeset} ->
         errors =

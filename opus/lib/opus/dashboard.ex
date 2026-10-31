@@ -12,6 +12,7 @@ defmodule Opus.Dashboard do
 
   import Ecto.Query
 
+  alias Opus.Accounts.Snapshots
   alias Opus.Accounts
   alias Opus.Accounts.IndexExposure
   alias Opus.Auro.Client
@@ -46,7 +47,8 @@ defmodule Opus.Dashboard do
     paper_events: "paper book events",
     book_tiles: "paper book tiles",
     live: "live trading tile",
-    stuck_runs: "stopped strategy tests"
+    stuck_runs: "stopped strategy tests",
+    holdings: "holdings history"
   }
 
   @no_live %{engine_up: false, open_trades: 0, nav: nil, nav_change: nil}
@@ -77,6 +79,7 @@ defmodule Opus.Dashboard do
       |> section(:live_closes, [], fn -> live_closes(now) end)
       |> section(:nav_age, nil, fn -> nav_age(now) end)
       |> section(:stuck_runs, [], &Stuck.list/0)
+      |> section(:holdings, nil, fn -> Snapshots.history(30) |> Snapshots.summary() end)
 
     {s, failed} =
       {s, failed}
@@ -107,7 +110,8 @@ defmodule Opus.Dashboard do
       paper_events: s.paper_events,
       live_opens: Enum.filter(s.live_open, &opened_since?(&1, now)),
       live_closes: s.live_closes,
-      ideas: scanned_on && %{count: length(ideas), scanned_on: scanned_on}
+      ideas: scanned_on && %{count: length(ideas), scanned_on: scanned_on},
+      holdings: s.holdings
     }
 
     %{

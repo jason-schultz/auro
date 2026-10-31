@@ -102,6 +102,7 @@ defmodule Opus.Dashboard.Alerts do
       drift(input),
       stuck_runs(input),
       offline_brokers(input),
+      holdings_drop(input),
       paper_in_the_money(input),
       paper_deliveries(input),
       paper_big_losses(input),
@@ -320,15 +321,63 @@ defmodule Opus.Dashboard.Alerts do
         "broker_offline:#{b.broker}",
         "#{b.broker} is offline",
         b.error,
-        "Balances on the Accounts page are incomplete until it's back. For Questrade, " <>
-          "an expired token is the usual cause: generate a new token in Questrade's " <>
-          "API centre and paste it on the Accounts page. No restart needed.",
+        offline_play(b),
         "/accounts"
       )
     end
   end
 
   defp offline_brokers(_input), do: []
+
+  # The hand-entered holdings fell hard at today's close.
+  @holdings_drop 0.05
+
+  defp holdings_drop(%{holdings: %{day_pct: pct, on: on} = h, today: today})
+       when is_number(pct) and pct <= -@holdings_drop do
+    if Date.compare(on, today) == :eq do
+      alert(
+        :check,
+        "holdings_drop:#{on}",
+        "Your holdings fell #{pct(-pct)} today",
+        "The Wealthsimple holdings closed at #{money(h.value)}, #{money(h.day_change)} on the " <>
+          "day; #{pct(h.drawdown)} below their high.",
+        "Look at which holding moved on the Accounts page, and whether anything you know " <>
+          "changed. Nothing here trades them; any move is yours to make at Wealthsimple.",
+        "/accounts"
+      )
+    else
+      []
+    end
+  end
+
+  defp holdings_drop(_input), do: []
+
+  # What to do depends on the broker: each goes down for its own reasons.
+  defp offline_play(%{broker: "OANDA", error: error}) do
+    if maintenance?(error),
+      do:
+        "OANDA is down for maintenance: nothing to do, it comes back by itself. Until then " <>
+          "live strategies can't open or manage trades, open trades keep their stops and " <>
+          "targets at OANDA, and balances on the Accounts page are incomplete.",
+      else:
+        "Live strategies can't open or manage trades until it's back (open trades keep their " <>
+          "stops and targets at OANDA). If it lasts, check the engine log; a 401 means the " <>
+          "OANDA API token needs replacing in the engine's settings."
+  end
+
+  defp offline_play(%{broker: "Questrade"}),
+    do:
+      "Prices, bars and option quotes from Questrade stop until it's back. An expired token " <>
+        "is the usual cause: generate a new token in Questrade's API centre and paste it on " <>
+        "the Accounts page. No restart needed."
+
+  defp offline_play(_broker),
+    do: "Balances on the Accounts page are incomplete until it's back. Check the engine log."
+
+  defp maintenance?(error) when is_binary(error),
+    do: String.contains?(error, ["503", "maintenance"])
+
+  defp maintenance?(_error), do: false
 
   defp paper_in_the_money(%{paper: trades}) do
     for t <- trades, leg <- t.shorts, cushion(leg, t.spot) < 0 do

@@ -26,14 +26,14 @@ defmodule OpusWeb.Components.TradeStory do
     <nav aria-label="Strategy" class="flex flex-wrap gap-2 text-[13px]">
       <.link
         patch={~p"/journal"}
-        class={["rounded-full border px-3 py-1", chip_tone(@selected == nil)]}
+        class={chip_class(@selected == nil)}
       >
         All
       </.link>
       <.link
         :for={s <- @strategies}
         patch={~p"/journal?#{[strategy: s.strategy_id]}"}
-        class={["rounded-full border px-3 py-1", chip_tone(@selected == s.strategy_id)]}
+        class={chip_class(@selected == s.strategy_id)}
       >
         {s.name}
         <span class="text-muted">· {s.trades} closed</span>
@@ -45,8 +45,37 @@ defmodule OpusWeb.Components.TradeStory do
     """
   end
 
-  defp chip_tone(true), do: "border-primary bg-primary/10 text-primary"
-  defp chip_tone(false), do: "border-base-300 bg-base-200 hover:border-primary"
+  @doc """
+  A filter or tab pill's classes, chosen or not. The outline is a ring (a
+  box shadow), which stays smooth round the ends where a 1px border looks
+  jagged on the dark theme.
+  """
+  @spec chip_class(boolean()) :: [String.t()]
+  def chip_class(chosen),
+    do: ["rounded-full px-3 py-1 ring-1 ring-inset transition-colors", chip_tone(chosen)]
+
+  defp chip_tone(true), do: "bg-primary/10 text-primary ring-primary/70"
+  defp chip_tone(false), do: "bg-base-200 ring-base-content/20 hover:ring-primary/70"
+
+  @doc """
+  A clickable table row's classes: its cells carry the highlight, rounded
+  at both ends; pad the first and last cells so it sits evenly round the
+  text. No lines between rows (a square line beside a rounded highlight
+  looks broken): the table spaces them instead (`list_table_class/0`).
+  """
+  @spec row_class(boolean()) :: [String.t() | false]
+  def row_class(chosen),
+    do: [
+      "cursor-pointer",
+      "[&>td:first-child]:rounded-l-field [&>td:last-child]:rounded-r-field",
+      "hover:[&>td]:bg-base-300/60",
+      chosen && "[&>td]:bg-base-300"
+    ]
+
+  @doc "The table of clickable rows (`row_class/1`): rows a hair apart, no lines."
+  @spec list_table_class() :: String.t()
+  def list_table_class,
+    do: "w-full border-separate border-spacing-x-0 border-spacing-y-0.5 text-sm"
 
   attr :trades, :list, required: true
   attr :selected, :string, default: nil
@@ -54,18 +83,18 @@ defmodule OpusWeb.Components.TradeStory do
 
   def trade_list(assigns) do
     ~H"""
-    <div class="overflow-x-auto rounded-box border border-base-300 bg-base-200 px-4 py-1.5">
-      <table class="w-full border-collapse text-sm">
+    <div class="overflow-x-auto rounded-box border border-base-300 bg-base-200 px-2 py-1.5">
+      <table class={list_table_class()}>
         <thead>
           <tr class="text-left text-xs text-muted">
-            <th class="border-b border-base-300 py-2.5 font-medium">Opened (ET)</th>
+            <th class="border-b border-base-300 py-2.5 pl-3 font-medium">Opened (ET)</th>
             <th class="border-b border-base-300 py-2.5 pl-4 font-medium">
               <.t {copy("Trade")} />
             </th>
             <th class="border-b border-base-300 py-2.5 text-right font-medium">
               <.t {copy("Result")} />
             </th>
-            <th class="border-b border-base-300 py-2.5 pl-4 font-medium">
+            <th class="border-b border-base-300 py-2.5 pr-3 pl-4 font-medium">
               <.t {copy("Why it closed")} />
             </th>
           </tr>
@@ -74,12 +103,9 @@ defmodule OpusWeb.Components.TradeStory do
           <tr
             :for={t <- @trades}
             phx-click={JS.patch(trade_path(@strategy, t.id))}
-            class={[
-              "cursor-pointer border-b border-neutral last:border-b-0 hover:bg-base-300/60",
-              t.id == @selected && "bg-base-300"
-            ]}
+            class={row_class(t.id == @selected)}
           >
-            <td class="py-2.5 whitespace-nowrap">
+            <td class="py-2.5 pl-3 whitespace-nowrap">
               <.link patch={trade_path(@strategy, t.id)} class="text-primary hover:underline">
                 {stamp(t.entry_time)}
               </.link>
@@ -88,13 +114,25 @@ defmodule OpusWeb.Components.TradeStory do
               {Story.market(t)} {String.downcase(t.direction || "")}
               <span :if={!@strategy} class="block text-[12px] text-muted">{t.strategy}</span>
             </td>
-            <td class={["py-2.5 text-right whitespace-nowrap", tone(t.pnl)]}>
-              {if t.status == "open", do: "open", else: money(t.pnl)}
+            <td
+              :if={t.status == "open"}
+              class={["py-2.5 text-right whitespace-nowrap", tone(t[:now_pct])]}
+            >
+              {if t[:now_pct], do: signed_pct(t.now_pct, 2), else: "open"}
+              <span class="block text-[12px] text-muted">
+                {if t[:now_pct], do: "open, now", else: "no price yet"}
+              </span>
+            </td>
+            <td
+              :if={t.status != "open"}
+              class={["py-2.5 text-right whitespace-nowrap", tone(t.pnl)]}
+            >
+              {money(t.pnl)}
               <span :if={t.pnl_percent} class="block text-[12px] text-muted">
                 {signed_pct(t.pnl_percent, 2)}
               </span>
             </td>
-            <td class="py-2.5 pl-4 text-muted">{t.why_closed}</td>
+            <td class="py-2.5 pr-3 pl-4 text-muted">{t.why_closed}</td>
           </tr>
         </tbody>
       </table>

@@ -263,7 +263,9 @@ defmodule Opus.Trading.Baskets do
     |> Enum.map_join("; ", fn {field, messages} -> "#{field} #{Enum.join(messages, ", ")}" end)
   end
 
-  defp why({:no_broker, names}), do: Instruments.without_broker_words(names)
+  defp why({kind, names}) when kind in [:no_broker, :no_dividends],
+    do: Instruments.untestable_words({kind, names})
+
   defp why(other), do: inspect(other)
 
   @doc """

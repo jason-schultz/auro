@@ -8,8 +8,10 @@ defmodule Opus.Accounts.Overview do
   CAD total, one row per account sorted by value with its share of the
   total, and one positions table per Wealthsimple account that has any.
 
-  Only CAD accounts count toward the total and the allocation; a non-CAD
-  account is still listed, with `share` nil.
+  Only real CAD accounts count toward the total and the allocation; a
+  non-CAD account is still listed, with `share` nil. Paper accounts (the
+  engine marks OANDA's practice account `paper`) are listed and add up to
+  their own `paper_cad`, never to the total.
   """
 
   @type account :: %{
@@ -18,6 +20,7 @@ defmodule Opus.Accounts.Overview do
           number: String.t() | nil,
           broker: String.t(),
           source: :live | :manual,
+          paper: boolean(),
           currency: String.t(),
           cash: float() | nil,
           value: float(),
@@ -27,6 +30,7 @@ defmodule Opus.Accounts.Overview do
 
   @type t :: %{
           total_cad: float(),
+          paper_cad: float(),
           accounts: [account()],
           positions: [%{account: String.t(), rows: [map()], priced_at: DateTime.t() | nil}],
           offline: [%{broker: String.t(), error: String.t() | nil}]
@@ -34,18 +38,15 @@ defmodule Opus.Accounts.Overview do
 
   @spec build([map()], [map()]) :: t()
   def build(brokers, wealthsimple_accounts) do
+    held = Map.new(wealthsimple_accounts, &{to_string(&1["id"]), &1["positions"] || []})
+
     accounts =
       brokers
       |> Enum.filter(& &1["connected"])
-      |> Enum.flat_map(&broker_rows/1)
+      |> Enum.flat_map(&broker_rows(&1, held))
       |> Enum.sort_by(& &1.value, :desc)
 
-    total_cad =
-      accounts
-      |> Enum.filter(&(&1.currency == "CAD"))
-      |> Enum.map(& &1.value)
-      |> Enum.sum()
-      |> Kernel.*(1.0)
+    total_cad = cad_total(accounts, false)
 
     accounts =
       accounts
@@ -58,6 +59,7 @@ defmodule Opus.Accounts.Overview do
 
     %{
       total_cad: total_cad,
+      paper_cad: cad_total(accounts, true),
       accounts: accounts,
       positions: position_tables(wealthsimple_accounts),
       offline:
@@ -67,7 +69,7 @@ defmodule Opus.Accounts.Overview do
     }
   end
 
-  defp broker_rows(%{"broker" => broker, "accounts" => accounts}) do
+  defp broker_rows(%{"broker" => broker, "accounts" => accounts}, held) do
     Enum.map(accounts, fn account ->
       %{
         key: "#{broker}-#{account["id"]}",
@@ -75,9 +77,10 @@ defmodule Opus.Accounts.Overview do
         number: number(broker, account),
         broker: broker_name(broker),
         source: if(broker == "wealthsimple", do: :manual, else: :live),
+        paper: account["paper"] == true,
         currency: account["currency"],
         cash: if(broker == "wealthsimple", do: nil, else: account["cash"]),
-        value: value(account)
+        value: value(broker, account, held)
       }
     end)
   end
@@ -98,12 +101,36 @@ defmodule Opus.Accounts.Overview do
   defp broker_name("wealthsimple"), do: "Wealthsimple"
   defp broker_name(other), do: other
 
-  defp value(%{"total_equity" => equity}) when is_number(equity), do: equity * 1.0
+  # A hand-entered Wealthsimple account is its cash and its listed holdings
+  # at their latest price, so it moves as they're re-priced; one without
+  # listed holdings (a managed portfolio) takes its typed holdings value.
+  defp value("wealthsimple", account, held) do
+    holdings =
+      case held[account["id"]] do
+        [_ | _] = positions ->
+          positions |> Enum.map(&position_row/1) |> Enum.sum_by(&(&1.value || 0.0))
 
-  defp value(account) do
+        _none ->
+          account["market_value"] || 0
+      end
+
+    ((account["cash"] || 0) + holdings) * 1.0
+  end
+
+  defp value(_broker, %{"total_equity" => equity}, _held) when is_number(equity), do: equity * 1.0
+
+  defp value(_broker, account, _held) do
     ((account["cash"] || 0) + (account["market_value"] || 0)) * 1.0
   end
 
+  defp cad_total(accounts, paper) do
+    accounts
+    |> Enum.filter(&(&1.currency == "CAD" and &1.paper == paper))
+    |> Enum.sum_by(& &1.value)
+    |> Kernel.*(1.0)
+  end
+
+  defp share(%{paper: true}, _total), do: nil
   defp share(%{currency: "CAD", value: value}, total) when total > 0, do: value / total
   defp share(_account, _total), do: nil
 

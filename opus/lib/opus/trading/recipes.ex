@@ -184,11 +184,11 @@ defmodule Opus.Trading.Recipes do
   @spec testable(String.t(), String.t()) ::
           :ok
           | {:error, {:no_history, DateTime.t() | nil, Date.t()}}
-          | {:error, {:no_broker, [String.t()]}}
+          | {:error, {:no_broker | :no_dividends, [String.t()]}}
   def testable(instrument, granularity) do
-    case Instruments.without_broker([instrument]) do
-      [] -> history(instrument, granularity)
-      off -> {:error, {:no_broker, off}}
+    case Instruments.untestable([instrument]) do
+      nil -> history(instrument, granularity)
+      why -> {:error, why}
     end
   end
 

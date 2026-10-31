@@ -42,6 +42,8 @@ pub const TESTER_COLUMNS: &[&str] = &[
     "brokers.name",
     "instruments.test_broker",
     "instruments.spread_bps",
+    "dividends.ex_date",
+    "instruments.dividends_checked_at",
 ];
 
 /// Names in `required` that are not present in the public schema.

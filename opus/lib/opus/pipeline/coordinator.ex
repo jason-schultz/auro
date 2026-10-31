@@ -26,6 +26,7 @@ defmodule Opus.Pipeline.Coordinator do
   alias Opus.Instruments
   alias Opus.Pipeline.{BacktestWorker, StrategyConfig, StrategyEvaluation}
   alias Opus.Repo
+  alias Opus.Trading.ShareAlerts
 
   @type pipeline_status_row :: %{
           config_id: Ecto.UUID.t(),
@@ -49,16 +50,26 @@ defmodule Opus.Pipeline.Coordinator do
   `attrs` must include: instrument, granularity, strategy_type, parameters.
 
   Returns `{:ok, config}` or `{:error, reason}`; `{:error, {:no_broker,
-  names}}` when a market has no broker set for its tests, so no costs to
-  grade it on (the engine refuses those stages too).
+  names}}` or `{:error, {:no_dividends, names}}` when a market can't be
+  tested yet (`Opus.Instruments.untestable/1`; the engine refuses those
+  stages too).
   """
   @spec submit_config(map()) :: {:ok, StrategyConfig.t()} | {:error, term()}
   def submit_config(attrs) do
-    case Instruments.without_broker(markets(attrs)) do
-      [] -> insert_and_start(attrs)
-      off -> {:error, {:no_broker, off}}
+    case untestable(attrs) do
+      nil -> insert_and_start(attrs)
+      why -> {:error, why}
     end
   end
+
+  @doc """
+  Why a config with `attrs` can't be tested yet (its markets'
+  `Opus.Instruments.untestable/1`), or nil. For any path that stores a
+  config without starting it.
+  """
+  @spec untestable(map()) :: nil | {:no_broker | :no_dividends, [String.t()]}
+  def untestable(attrs),
+    do: attrs |> markets() |> Enum.reject(&is_nil/1) |> Instruments.untestable()
 
   defp markets(%{parameters: %{"basket" => %{"markets" => [_ | _] = markets}}}), do: markets
   defp markets(attrs), do: [attrs[:instrument] || attrs["instrument"]]
@@ -105,6 +116,9 @@ defmodule Opus.Pipeline.Coordinator do
 
   A basket (several markets tested as one account, `parameters["basket"]`)
   is refused with `{:error, :basket}`: baskets are tested, not traded live.
+
+  A market tested as shares held goes live as share alerts
+  (`Opus.Trading.ShareAlerts.action_for/1`), never as OANDA trades.
   """
   @spec promote_to_live(String.t()) ::
           {:ok, :promoted | :already_promoted} | {:error, :not_found | :basket | term()}
@@ -121,7 +135,8 @@ defmodule Opus.Pipeline.Coordinator do
                strategy_type: config.strategy_type,
                instrument: config.instrument,
                granularity: config.granularity,
-               parameters: config.parameters
+               parameters: config.parameters,
+               action: ShareAlerts.action_for(config.instrument)
              }) do
           {:ok, _body} ->
             Logger.info(

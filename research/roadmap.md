@@ -23,8 +23,10 @@ All four rounds ran Oct 28–30; round 4's fixes ride on the services move and
 Postgres leaving Docker. Re-running them: [`audit_checklist.md`](audit_checklist.md).
 
 Loose ends meanwhile:
-- Re-test the three index dip-buy assignments: their passes predate the Friday
-  stub-bar fix, and EU50 already fails today's walk-forward bar while enabled.
+- DONE Oct 30: the three index dip-buy assignments re-tested under today's rules
+  (after the stub-bar fix): SPX500 D passes every stage, holdout too; NAS100 D
+  fails the luck check (0.77, needs 0.80) and is still switched on (your call);
+  EU50 D fails the backtest (t 1.14, needs 2.0) and is off.
 - A nightly `pg_dump` backup, ahead of round 4.
 
 ## 1b. Track Wealthsimple holdings like any other security

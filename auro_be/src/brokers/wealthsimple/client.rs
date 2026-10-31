@@ -158,6 +158,7 @@ impl BrokerClient for WealthsimpleClient {
                 market_value: a.market_value,
                 total_equity: a.total_equity,
                 buying_power: None,
+                paper: false,
             })
             .collect();
 

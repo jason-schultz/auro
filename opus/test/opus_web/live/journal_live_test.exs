@@ -3,7 +3,9 @@ defmodule OpusWeb.JournalLiveTest do
 
   import Phoenix.LiveViewTest
 
+  alias Opus.Instruments
   alias Opus.Journal.DigestWorker
+  alias Opus.Options.Paper.{Event, Position, Trade}
   alias Opus.Repo
   alias Opus.Trading.LiveStrategy
 
@@ -13,6 +15,7 @@ defmodule OpusWeb.JournalLiveTest do
   setup do
     Repo.query!("DELETE FROM live_trades")
     Repo.query!("DELETE FROM weekly_digests")
+    for table <- [Event, Position, Trade], do: Repo.delete_all(table)
     Repo.delete_all(LiveStrategy)
     :ok
   end
@@ -72,6 +75,64 @@ defmodule OpusWeb.JournalLiveTest do
     end
 
     assert html =~ "First digest lands next Monday."
+  end
+
+  test "the Options tab tells each closed options trade in options terms", %{conn: conn} do
+    {:ok, spy} = Instruments.add("SPY", "etf")
+
+    trade =
+      Repo.insert!(%Trade{
+        strategy: "wheel",
+        underlying_instrument_id: spy.id,
+        structure: "put",
+        opened_on: ~D[2026-10-23],
+        closed_on: ~D[2026-10-29],
+        status: "closed"
+      })
+
+    put =
+      Repo.insert!(%Position{
+        trade_id: trade.id,
+        underlying_instrument_id: spy.id,
+        side: "short",
+        kind: "put",
+        quantity: 1,
+        strike: 260.0,
+        expiration: ~D[2026-12-04],
+        open_price: 3.17,
+        opened_on: ~D[2026-10-23],
+        status: "closed",
+        close_price: 1.43,
+        closed_on: ~D[2026-10-29]
+      })
+
+    for {kind, cash} <- [{"open", 316.9}, {"close", -143.1}],
+        do:
+          Repo.insert!(%Event{
+            position_id: put.id,
+            underlying_instrument_id: spy.id,
+            strategy: "wheel",
+            on: ~D[2026-10-29],
+            kind: kind,
+            cash: cash
+          })
+
+    {:ok, view, html} = live(conn, ~p"/journal")
+    refute html =~ "Options trades"
+    assert html =~ "Options"
+
+    html = view |> element("nav[aria-label=Journal] a", "Options") |> render_click()
+    assert html =~ "Options trades"
+    assert html =~ "SPY put"
+    assert html =~ "closed early"
+    # The newest trade's story, in options terms.
+    assert html =~ "Kept $173.80 of $316.90 premium"
+    assert html =~ "SPY: sold the $260.00 put at $3.17, expiring Dec 4"
+    assert html =~ "taking in $316.90 after commissions"
+    assert html =~ "bought back the $260.00 put at $1.43"
+    assert html =~ "54.8% of the premium kept"
+    assert html =~ "6 days"
+    assert html =~ ~s|href="/options?view=paper&amp;book=wheel&amp;trade=SPY"|
   end
 
   test "lists a frozen weekly digest", %{conn: conn} do

@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-use super::models::{AggBar, OptionContract, Page};
+use super::models::{AggBar, Dividend, OptionContract, Page, Split};
 use crate::engine::types::Granularity;
 use crate::error::{AppError, AppResult};
 
@@ -135,6 +135,33 @@ impl MassiveClient {
     ) -> AppResult<Vec<AggBar>> {
         self.fetch_all(self.aggregates_url(ticker, granularity, from, to))
             .await
+    }
+
+    /// The URL for every cash dividend `ticker` has paid, oldest first.
+    pub fn dividends_url(&self, ticker: &str) -> String {
+        format!(
+            "{}/{}/reference/dividends?ticker={}&order=asc&sort=ex_dividend_date&limit={}",
+            self.base_url, REFERENCE_VERSION, ticker, REF_PAGE_LIMIT
+        )
+    }
+
+    /// Every cash dividend `ticker` has paid that the vendor knows of,
+    /// following pages.
+    pub async fn list_dividends(&self, ticker: &str) -> AppResult<Vec<Dividend>> {
+        self.fetch_all(self.dividends_url(ticker)).await
+    }
+
+    /// The URL for every split `ticker` has had, oldest first.
+    pub fn splits_url(&self, ticker: &str) -> String {
+        format!(
+            "{}/{}/reference/splits?ticker={}&order=asc&sort=execution_date&limit={}",
+            self.base_url, REFERENCE_VERSION, ticker, REF_PAGE_LIMIT
+        )
+    }
+
+    /// Every split `ticker` has had that the vendor knows of.
+    pub async fn list_splits(&self, ticker: &str) -> AppResult<Vec<Split>> {
+        self.fetch_all(self.splits_url(ticker)).await
     }
 
     /// Every contract matching `filter`, following pages.

@@ -80,21 +80,4 @@ defmodule Opus.Dashboard.NotifyWorkerTest do
     assert {:error, {500, _}} = NotifyWorker.notify([alert("engine")], @now)
     assert sent_keys() == []
   end
-
-  test "the check-in says all quiet, or lists what to look at" do
-    gathered = %{
-      input: %{now: ~U[2026-10-27 20:30:00Z], engine: :up},
-      positions: [%{book: "live"}, %{book: "wheel"}, %{book: "put_spread"}],
-      books: [%{pnl: -150.0}, %{pnl: 10.0}],
-      live: %{open_trades: 1}
-    }
-
-    assert NotifyWorker.check_in(gathered, [alert("ideas:x", :fyi)]) ==
-             {"Auro check-in, Oct 27: all quiet",
-              ["Engine: running", "Open: 2 paper, 1 live", "Paper books so far: −$140.00"]}
-
-    {title, lines} = NotifyWorker.check_in(gathered, [alert("engine")])
-    assert title == "Auro check-in, Oct 27: 1 to look at"
-    assert List.last(lines) == "• T engine"
-  end
 end

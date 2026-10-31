@@ -20,6 +20,7 @@ defmodule OpusWeb.BasketLive do
   import OpusWeb.StrategyParts,
     only: [evidence: 1, field: 1, luck_check: 1, resume: 1, stat: 1, test_badge: 1]
 
+  alias Opus.Pipeline.Events
   alias Opus.Trading.{Baskets, Recipes, StrategyResults, StrategyWords}
 
   @impl true
@@ -30,6 +31,8 @@ defmodule OpusWeb.BasketLive do
          socket |> put_flash(:error, "No such strategy.") |> push_navigate(to: ~p"/strategies")}
 
       recipe ->
+        if connected?(socket), do: Events.subscribe(recipe.definition, recipe.granularity)
+
         markets =
           if Baskets.timeframe_ok?(recipe.granularity),
             do: Baskets.markets(recipe.granularity),
@@ -59,8 +62,21 @@ defmodule OpusWeb.BasketLive do
     end
   end
 
-  defp load_runs(%{assigns: %{recipe: recipe}} = socket),
-    do: assign(socket, runs: StrategyResults.for_baskets(recipe.definition, recipe.granularity))
+  defp load_runs(%{assigns: %{recipe: recipe}} = socket) do
+    runs = StrategyResults.for_baskets(recipe.definition, recipe.granularity)
+    assign(socket, runs: runs, busy: busy?(runs))
+  end
+
+  defp busy?(runs),
+    do:
+      Enum.any?(runs, fn run ->
+        Enum.any?(Map.values(run.stages), &(&1.status in [:running, :pending]))
+      end)
+
+  # A pipeline stage started or finished (`Opus.Pipeline.Events`): each
+  # result shows the moment it lands.
+  @impl true
+  def handle_info({:pipeline_stage, _config_id}, socket), do: {:noreply, load_runs(socket)}
 
   @impl true
   def handle_event("preset", %{"id" => id}, socket) do
@@ -89,7 +105,8 @@ defmodule OpusWeb.BasketLive do
           if mode == "separate",
             do:
               "The tests are running on #{length(configs)} markets, each on its own. Their results show on the strategy's page.",
-            else: "The basket test is running. Its result shows below as each stage finishes."
+            else:
+              "The basket test is running. Each stage's result shows below as it finishes; the page updates by itself."
 
         {:noreply, socket |> put_flash(:info, message) |> load_runs()}
 
@@ -396,13 +413,18 @@ defmodule OpusWeb.BasketLive do
             <h2 id="runs-h" class="text-[15px] font-semibold">
               <.t {copy("Basket results")} />
             </h2>
-            <button
-              type="button"
-              phx-click="refresh"
-              class="min-h-11 rounded-field border border-base-300 px-3 text-[13px] font-medium hover:border-primary"
-            >
-              Check for new results
-            </button>
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span :if={@busy} class="text-[13px] text-muted">
+                Running: each result shows here as it lands
+              </span>
+              <button
+                type="button"
+                phx-click="refresh"
+                class="min-h-11 rounded-field border border-base-300 px-3 text-[13px] font-medium hover:border-primary"
+              >
+                Check for new results
+              </button>
+            </div>
           </div>
           <p :if={@runs == []} class="m-0 text-[14px] text-muted">
             No basket test of this strategy yet. Pick markets above and run the tests.
@@ -686,7 +708,8 @@ defmodule OpusWeb.BasketLive do
           "line below."
 
       waiting ->
-        "The #{elem(waiting, 1)} is running or waiting. Nothing to do yet; check back for the next result."
+        "The #{elem(waiting, 1)} is running or waiting. Nothing to do yet: this page shows each " <>
+          "result as it lands."
 
       Enum.any?(Map.values(stages), &(&1.status in [:old_pass, :old_fail])) ->
         "It was judged by older rules. Run the tests again to see where it stands by today's."

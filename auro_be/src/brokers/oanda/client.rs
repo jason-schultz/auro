@@ -466,6 +466,22 @@ impl OandaClient {
     }
 }
 
+impl OandaClient {
+    /// Whether this is OANDA's practice environment (paper money): its API
+    /// host is `api-fxpractice.oanda.com`; live is `api-fxtrade.oanda.com`.
+    pub fn is_practice(&self) -> bool {
+        self.base_url.contains("fxpractice")
+    }
+
+    fn environment(&self) -> &'static str {
+        if self.is_practice() {
+            "Practice"
+        } else {
+            "Live"
+        }
+    }
+}
+
 impl BrokerClient for OandaClient {
     async fn broker_status(&mut self) -> BrokerStatus {
         match self.get_account().await {
@@ -487,13 +503,14 @@ impl BrokerClient for OandaClient {
                     error: None,
                     accounts: vec![BrokerAccount {
                         id: account.id.clone(),
-                        name: format!("Practice ({})", account.id),
-                        account_type: "Practice".into(),
+                        name: format!("{} ({})", self.environment(), account.id),
+                        account_type: self.environment().into(),
                         currency: account.currency,
                         cash: Some(cash),
                         market_value: None,
                         total_equity: Some(cash + unrealized),
                         buying_power,
+                        paper: self.is_practice(),
                     }],
                 }
             }
@@ -561,5 +578,19 @@ mod candle_query_tests {
             assert!(!q.iter().any(|(k, _)| *k == "dailyAlignment"), "{inst} {g}");
             assert!(q.contains(&("from", "2026-01-01T00:00:00Z".to_string())));
         }
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::OandaClient;
+
+    #[test]
+    fn the_practice_host_is_paper_money() {
+        let practice = OandaClient::new("https://api-fxpractice.oanda.com", "s", "k", "a");
+        let live = OandaClient::new("https://api-fxtrade.oanda.com/", "s", "k", "a");
+        assert!(practice.is_practice());
+        assert!(!live.is_practice());
+        assert_eq!(live.environment(), "Live");
     }
 }

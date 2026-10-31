@@ -90,7 +90,7 @@ defmodule OpusWeb.Components.PaperTrades do
                   )
                 ]}
               >
-                <span>{leg_name(leg)}</span>
+                <span>{leg_words(leg)}</span>
                 <span>{leg.status}</span>
               </.link>
             </li>
@@ -218,7 +218,7 @@ defmodule OpusWeb.Components.PaperTrades do
                 }
                 class="hover:text-primary"
               >
-                {leg_name(leg)}
+                {leg_words(leg)}
               </.link>
             </td>
             <td class="px-2 py-1.5 text-right">{num(leg.open_price)}</td>
@@ -664,11 +664,6 @@ defmodule OpusWeb.Components.PaperTrades do
       |> Enum.uniq()
       |> Enum.sort()
       |> Enum.map_join("/", &strike/1)
-
-  defp leg_name(%{quantity: n} = p) when n > 1,
-    do: "#{p.side} #{n} × #{money(p.strike)} #{p.kind}"
-
-  defp leg_name(p), do: "#{p.side} #{money(p.strike)} #{p.kind}"
 
   defp limit(nil), do: "unlimited"
   defp limit(value), do: money(value)

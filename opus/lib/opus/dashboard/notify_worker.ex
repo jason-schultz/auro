@@ -9,10 +9,11 @@ defmodule Opus.Dashboard.NotifyWorker do
   forgotten, so it's sent again if it comes back. The hour keeps an alert
   that flickers (an engine restarting) from pinging every 5 minutes.
 
-  At 16:30 New York on trading days (`%{"check_in" => true}`): a short
-  check-in, sent even when all is quiet. Everything runs on this computer,
-  so no alerts can also mean Opus isn't running; a missing check-in is how
-  you'd notice.
+  At 16:30 New York on trading days (`%{"check_in" => true}`): the day's
+  write-up (`Opus.Dashboard.Summary`), sent even when all is quiet.
+  Everything runs on this computer, so no alerts can also mean Opus isn't
+  running; a missing day's write-up is how you'd notice. Fridays at 17:00
+  (`%{"summary" => "week"}`): the week's.
 
   Nothing is sent or recorded without a webhook URL.
   """
@@ -24,10 +25,8 @@ defmodule Opus.Dashboard.NotifyWorker do
   require Logger
 
   alias Opus.Dashboard
-  alias Opus.Dashboard.{Alerts, Discord}
+  alias Opus.Dashboard.{Alerts, Discord, Summary}
   alias Opus.Repo
-
-  import OpusWeb.Format, only: [signed_money: 1]
 
   @forget_after_seconds 3600
 
@@ -42,11 +41,8 @@ defmodule Opus.Dashboard.NotifyWorker do
     end
   end
 
-  defp run(%{"check_in" => true}, now) do
-    gathered = Dashboard.gather(now)
-    {title, lines} = check_in(gathered, Dashboard.alerts(gathered.input))
-    Discord.post_message(title, lines)
-  end
+  defp run(%{"check_in" => true}, now), do: post_summary(:day, now)
+  defp run(%{"summary" => "week"}, now), do: post_summary(:week, now)
 
   defp run(_args, now) do
     alerts = now |> Dashboard.gather() |> Map.fetch!(:input) |> Dashboard.alerts()
@@ -98,29 +94,9 @@ defmodule Opus.Dashboard.NotifyWorker do
     end
   end
 
-  @doc "The check-in's title and lines, from what the dashboard gathered."
-  @spec check_in(map(), [Alerts.alert()]) :: {String.t(), [String.t()]}
-  def check_in(gathered, alerts) do
-    urgent = Enum.filter(alerts, &(&1.level in [:act, :check]))
-    paper = Enum.reject(gathered.positions, &(&1.book == "live"))
-    paper_pnl = Enum.sum_by(gathered.books, &(&1.pnl || 0.0))
-
-    title =
-      "Auro check-in, #{OpusWeb.Format.day(Opus.Clock.date(gathered.input.now))}: " <>
-        if(urgent == [], do: "all quiet", else: "#{length(urgent)} to look at")
-
-    lines =
-      [
-        engine_line(gathered.input.engine),
-        "Open: #{length(paper)} paper, #{gathered.live.open_trades} live",
-        "Paper books so far: #{signed_money(paper_pnl)}"
-        | Enum.map(urgent, &"• #{&1.title}")
-      ]
-
-    {title, lines}
+  defp post_summary(period, now) do
+    gathered = Dashboard.gather(now)
+    {title, lines} = Summary.build(period, gathered, Dashboard.alerts(gathered.input), now)
+    Discord.post_message(title, lines)
   end
-
-  defp engine_line(:up), do: "Engine: running"
-  defp engine_line({:down, _reason}), do: "Engine: NOT running"
-  defp engine_line(:unknown), do: "Engine: couldn't check (see the alerts)"
 end

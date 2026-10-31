@@ -56,6 +56,20 @@ pub async fn resolve_symbol_id(
     Ok(identity.symbol_id)
 }
 
+/// The Questrade symbol id for the ticker `symbol`: through its
+/// instruments row's recorded id when it has one (`resolve_symbol_id`: one
+/// search, ever), else a search by name.
+pub async fn symbol_id_for(
+    client: &mut QuestradeClient,
+    pool: &PgPool,
+    symbol: &str,
+) -> AppResult<i64> {
+    match instruments_repo::find_by_questrade_symbol(pool, symbol).await? {
+        Some(instrument) => resolve_symbol_id(client, pool, &instrument).await,
+        None => client.search_symbol(symbol).await,
+    }
+}
+
 /// Ask Questrade who `instrument` is, by its Questrade spelling.
 pub async fn lookup(
     client: &mut QuestradeClient,

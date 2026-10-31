@@ -1,5 +1,6 @@
 pub mod adx_filter;
 pub mod bollinger;
+pub mod buy_and_hold;
 pub mod carry;
 pub mod catalog;
 pub mod daily_bars;
@@ -26,6 +27,7 @@ pub mod report;
 pub mod rsi_reversion;
 pub mod rules;
 pub mod session;
+pub mod share_alerts;
 pub mod stats;
 pub mod stochastic;
 pub mod strategy;

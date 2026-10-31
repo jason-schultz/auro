@@ -14,7 +14,7 @@ use crate::brokers::questrade::identity;
 use crate::brokers::questrade::link::Connect;
 use crate::brokers::questrade::models::{EquityCandle, OptionQuote, QuoteResult, SymbolDetail};
 use crate::brokers::questrade::options::{select_contracts, SelectedContract};
-use crate::brokers::{stock_bar_final_at, stock_day_open};
+use crate::brokers::{adjusted, stock_bar_final_at, stock_day_open};
 use crate::db::repositories::candles as candles_repo;
 use crate::db::repositories::instruments as instruments_repo;
 use crate::db::repositories::options::{
@@ -25,6 +25,7 @@ use crate::engine::options::ContractSpec;
 use crate::engine::types::{Candle, CandleRow, Granularity};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use sqlx::PgPool;
 
 pub async fn status(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let Some(qt) = state.questrade.client() else {
@@ -189,7 +190,13 @@ struct Resolved {
     unresolved: Vec<String>,
 }
 
-async fn resolve_symbols(client: &mut QuestradeClient, symbols: &str) -> AppResult<Resolved> {
+/// Each ticker resolves through `identity::symbol_id_for` (a listing's
+/// recorded Questrade id, else a search).
+async fn resolve_symbols(
+    client: &mut QuestradeClient,
+    pool: &PgPool,
+    symbols: &str,
+) -> AppResult<Resolved> {
     let requested: Vec<String> = symbols
         .split(',')
         .map(|s| s.trim().to_uppercase())
@@ -207,7 +214,7 @@ async fn resolve_symbols(client: &mut QuestradeClient, symbols: &str) -> AppResu
         unresolved: Vec::new(),
     };
     for symbol in requested {
-        match client.search_symbol(&symbol).await {
+        match identity::symbol_id_for(client, pool, &symbol).await {
             Ok(id) => resolved.ids.push((symbol, id)),
             Err(e) => {
                 tracing::warn!("Questrade could not resolve {}: {}", symbol, e);
@@ -260,7 +267,7 @@ pub async fn get_quotes(
     };
 
     let mut client = qt.lock().await;
-    let resolved = resolve_symbols(&mut client, &params.symbols).await?;
+    let resolved = resolve_symbols(&mut client, &state.db, &params.symbols).await?;
     let quotes = client.get_quotes(&ids(&resolved)).await?;
     drop(client);
 
@@ -300,7 +307,7 @@ pub async fn get_symbols(
     };
 
     let mut client = qt.lock().await;
-    let resolved = resolve_symbols(&mut client, &params.symbols).await?;
+    let resolved = resolve_symbols(&mut client, &state.db, &params.symbols).await?;
     let details = client.get_symbols(&ids(&resolved)).await?;
     drop(client);
 
@@ -446,6 +453,11 @@ pub async fn persist_candles(
     // Questrade now and then sends a day twice (a midnight bar and a 01:00
     // copy of it); stamped alike, one write can't take both: keep the first.
     let rows = one_per_time(rows);
+    // Daily bars come split-adjusted as of the fetch: after a split, older
+    // stored history is put on the new scale.
+    let rescaled = adjusted::match_stored_scale(&state.db, &rows)
+        .await
+        .map_err(AppError::Database)?;
     let stored = candles_repo::upsert_candles(&state.db, &rows)
         .await
         .map_err(AppError::Database)?;
@@ -468,6 +480,7 @@ pub async fn persist_candles(
         "candles_stored": stored,
         "first": rows.first().map(|r| r.candle.time),
         "last": rows.last().map(|r| r.candle.time),
+        "rescaled": rescaled,
     })))
 }
 

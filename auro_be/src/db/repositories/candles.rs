@@ -179,6 +179,27 @@ pub async fn closes_between(
     .await
 }
 
+/// Put every stored bar of `instrument` (all granularities) that starts
+/// before `before` on a vendor's new scale: prices ÷ `ratio`, volume ×
+/// `ratio` (a 2:1 split is 2.0). For history a vendor re-adjusted after a
+/// split and won't refetch in full. Returns the bars changed.
+pub async fn rescale_before(
+    pool: &PgPool,
+    instrument: &str,
+    before: DateTime<Utc>,
+    ratio: f64,
+) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query(
+        "UPDATE candles SET            open = open / $3, high = high / $3, low = low / $3, close = close / $3,            bid_open = bid_open / $3, bid_high = bid_high / $3,            bid_low = bid_low / $3, bid_close = bid_close / $3,            ask_open = ask_open / $3, ask_high = ask_high / $3,            ask_low = ask_low / $3, ask_close = ask_close / $3,            volume = LEAST(ROUND(volume * $3), 2147483647)::int          WHERE instrument = $1 AND timestamp < $2",
+    )
+    .bind(instrument)
+    .bind(before)
+    .bind(ratio)
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
 /// Rows per INSERT statement. Keeps each statement's arrays modest while
 /// cutting round-trips by three orders of magnitude for backfills.
 const UPSERT_CHUNK: usize = 2000;

@@ -664,6 +664,7 @@ impl BrokerClient for QuestradeClient {
                 market_value: combined.map(|b| b.market_value),
                 total_equity: combined.map(|b| b.total_equity),
                 buying_power: combined.map(|b| b.buying_power),
+                paper: false,
             });
         }
 

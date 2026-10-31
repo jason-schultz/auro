@@ -146,6 +146,30 @@ defmodule Opus.Trading.RecipesTest do
            }) == {:error, {:no_broker, ["ZZZ"]}}
   end
 
+  test "a stock held as shares isn't tested until its dividends are loaded, and says how" do
+    {:ok, msft} = Opus.Instruments.add("MSFT", "equity")
+    bar!("MSFT", ~U[2024-10-18 04:00:00Z])
+    {:ok, recipe} = Recipes.create(%{name: "Draft", granularity: "D", definition: @definition})
+
+    assert Recipes.run_tests(recipe, "MSFT") == {:error, {:no_dividends, ["MSFT"]}}
+    words = Opus.Instruments.untestable_words({:no_dividends, ["MSFT"]})
+    assert words =~ "MSFT: tested as shares owned outright"
+    assert words =~ "Load them with Load dividends"
+    assert Opus.Instruments.dividend_source?("MSFT")
+
+    # A Canadian listing has no dividend history to load: it's tested
+    # without it (its results say so), not refused.
+    {:ok, _} = Opus.Instruments.add("SDE.TO", "equity")
+    refute Opus.Instruments.dividend_source?("SDE.TO")
+    assert Opus.Instruments.untestable(["SDE.TO"]) == nil
+    assert Opus.Instruments.load_dividends("SDE.TO") == {:error, :no_source}
+    assert Repo.all(StrategyConfig) == []
+
+    # Loaded (even none found): it can be tested.
+    Repo.query!("UPDATE instruments SET dividends_checked_at = now() WHERE id = $1", [msft.id])
+    assert {:ok, %StrategyConfig{instrument: "MSFT"}} = Recipes.run_tests(recipe, "MSFT")
+  end
+
   test "a stock or ETF is tested for Wealthsimple, an OANDA market for OANDA" do
     {:ok, shop} = Opus.Instruments.add("SHOP", "equity")
     {:ok, spy} = Opus.Instruments.add("SPY", "etf")

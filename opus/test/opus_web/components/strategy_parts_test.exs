@@ -265,11 +265,13 @@ defmodule OpusWeb.StrategyPartsTest do
                "overnight" => "none",
                "spread_bps" => 10.0,
                "commission_bps" => 0.0,
-               "shorts_skipped" => true
+               "shorts_skipped" => true,
+               "dividends_from" => "2007-03-16"
              })
            ) ==
              "Tested with Wealthsimple's costs: no overnight cost (shares owned outright), " <>
-               "a 10 bp spread a trade. Wealthsimple can't short, so its short rules were skipped."
+               "a 10 bp spread a trade. Dividends paid to longs; tested from 2007-03-16, where " <>
+               "its dividend record starts. Wealthsimple can't short, so its short rules were skipped."
 
     assert StrategyParts.costs_words(
              stage.(%{
@@ -282,6 +284,83 @@ defmodule OpusWeb.StrategyPartsTest do
            ) ==
              "Tested with OANDA's costs: overnight financing, the bid/ask spread on each fill."
 
+    # A listing with no dividend history (Canadian): left out, and said so.
+    canadian = %{
+      "broker" => "wealthsimple",
+      "overnight" => "none",
+      "spread_bps" => 10.0,
+      "commission_bps" => 0.0,
+      "shorts_skipped" => false,
+      "dividends_from" => nil,
+      "dividends_recorded_since" => "none"
+    }
+
+    assert StrategyParts.costs_words(stage.(canadian)) =~
+             "Dividends left out: there's no dividend history for this listing"
+
+    assert StrategyParts.costs_words(
+             stage.(%{canadian | "dividends_recorded_since" => "2026-09-26"})
+           ) =~ "Dividends left out before 2026-09-26"
+
     assert StrategyParts.costs_words(%{stats: %{}}) == nil
+  end
+
+  test "a share-market backtest says how just holding the same funds did" do
+    stage = fn mine ->
+      %{
+        stats: %{
+          # The close-day figure isn't what it's compared on.
+          "annual_sharpe" => 0.1,
+          "buy_and_hold" => %{
+            "rule" => %{"annual_sharpe" => mine},
+            "total_return" => 2.1,
+            "annual_return" => 0.065,
+            "annual_sharpe" => 0.55,
+            "max_drawdown" => 0.42
+          }
+        }
+      }
+    end
+
+    words = StrategyParts.hold_words(stage.(0.52))
+    assert words =~ "Just holding the same funds over the same years: +210.0% (+6.5% a year)"
+    assert words =~ "worst drop 42.0%"
+    assert words =~ "about the same: it added little"
+    assert StrategyParts.hold_words(stage.(0.9)) =~ "beats it"
+    assert StrategyParts.hold_words(stage.(0.3)) =~ "holding did better"
+    assert StrategyParts.hold_words(%{stats: %{}}) == nil
+  end
+
+  test "owned shares' Monte Carlo checks read against just holding" do
+    checks = [
+      %{
+        "metric" => "p95_drawdown_vs_hold",
+        "operator" => "lte",
+        "required" => 1.0,
+        "actual" => 0.62,
+        "passed" => true
+      },
+      %{
+        "metric" => "sharpe_vs_hold",
+        "operator" => "gte",
+        "required" => 0.0,
+        "actual" => -0.05,
+        "passed" => false
+      }
+    ]
+
+    stage = %{
+      status: :failed,
+      stats: %{"checks" => checks, "p95_drawdown" => 0.2, "profitable_pct" => 1.0},
+      at: nil,
+      reason: nil,
+      checks: Opus.Trading.StrategyResults.checks(%{"checks" => checks}, nil)
+    }
+
+    html =
+      render_component(&StrategyParts.evidence/1, results: %{results(stage) | monte_carlo: stage})
+
+    assert html =~ "at the risk of just holding, as a share of holding&#39;s own bad run 62.0%"
+    assert html =~ "Sharpe above just holding&#39;s -0.05"
   end
 end

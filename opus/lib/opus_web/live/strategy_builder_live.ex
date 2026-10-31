@@ -56,6 +56,8 @@ defmodule OpusWeb.StrategyBuilderLive do
         chart: nil,
         preview_error: nil,
         untestable: nil,
+        loadable: nil,
+        loading: false,
         focus: nil,
         report_ref: nil,
         page_title: "New strategy"
@@ -136,7 +138,12 @@ defmodule OpusWeb.StrategyBuilderLive do
 
   defp preview(socket) do
     %{instrument: instrument, form: %{"granularity" => granularity}} = socket.assigns
-    socket = assign(socket, untestable: untestable(instrument, granularity))
+
+    socket =
+      assign(socket,
+        untestable: untestable(instrument, granularity),
+        loadable: loadable(instrument, granularity)
+      )
 
     if connected?(socket) do
       definition = definition(socket.assigns)
@@ -169,6 +176,15 @@ defmodule OpusWeb.StrategyBuilderLive do
     assign(socket, report: :loading, report_ref: ref)
   end
 
+  # The instrument, when all it lacks to be tested is dividends that can be
+  # loaded: the Load dividends button shows.
+  defp loadable(instrument, granularity) do
+    with {:error, {:no_dividends, _}} <- Recipes.testable(instrument, granularity),
+         true <- Opus.Instruments.dividend_source?(instrument),
+         do: instrument,
+         else: (_ -> nil)
+  end
+
   # Why the tests can't run on this instrument, in words, or nil.
   defp untestable(instrument, granularity) do
     case Recipes.testable(instrument, granularity) do
@@ -183,12 +199,35 @@ defmodule OpusWeb.StrategyBuilderLive do
           "kept aside for the holdout), so it can be previewed here but not tested. Pick an " <>
           "instrument with longer history, or other bars."
 
-      {:error, {:no_broker, names}} ->
-        Opus.Instruments.without_broker_words(names) <> " It can be previewed here, not tested."
+      {:error, why} ->
+        Opus.Instruments.untestable_words(why) <> " It can be previewed here, not tested yet."
     end
   end
 
   @impl true
+  # Dividends loaded: check the instrument again (the preview reruns too).
+  def handle_async(:dividends, {:ok, {:ok, count}}, socket) do
+    {:noreply,
+     socket
+     |> assign(loading: false)
+     |> put_flash(:info, "Loaded #{count} dividends for #{socket.assigns.loadable}.")
+     |> preview()}
+  end
+
+  def handle_async(:dividends, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(loading: false)
+     |> put_flash(:error, "Couldn't load the dividends: #{Client.describe_error(reason)}")}
+  end
+
+  def handle_async(:dividends, {:exit, _reason}, socket),
+    do:
+      {:noreply,
+       socket
+       |> assign(loading: false)
+       |> put_flash(:error, "Loading the dividends didn't finish.")}
+
   def handle_async(:preview, {:ok, {:ok, chart}}, socket),
     do: {:noreply, assign(socket, chart: chart, preview_error: nil, focus: nil)}
 
@@ -364,6 +403,17 @@ defmodule OpusWeb.StrategyBuilderLive do
     end
   end
 
+  # Fetching takes up to half a minute; the page stays usable meanwhile.
+  def handle_event("load_dividends", _params, %{assigns: %{loadable: name}} = socket)
+      when is_binary(name) do
+    {:noreply,
+     socket
+     |> assign(loading: true)
+     |> start_async(:dividends, fn -> Opus.Instruments.load_dividends(name) end)}
+  end
+
+  def handle_event("load_dividends", _params, socket), do: {:noreply, socket}
+
   def handle_event("save", %{"then" => then} = params, socket) do
     socket =
       if params["form"],
@@ -397,18 +447,22 @@ defmodule OpusWeb.StrategyBuilderLive do
     end
   end
 
+  # An edit re-tests every instrument the strategy is on, and the one
+  # picked for the preview when it isn't one of them: picking it and saving
+  # is asking for that test. The message says what started and what didn't.
   defp save(socket, :edit, _then, attrs) do
     case Recipes.update(socket.assigns.recipe, attrs) do
       {:ok, saved} ->
-        retested = Enum.map(socket.assigns.assignments, & &1.instrument)
-        Enum.each(retested, &Recipes.run_tests(saved, &1))
+        on = Enum.map(socket.assigns.assignments, & &1.instrument)
+        picked = socket.assigns.instrument
+
+        tries =
+          for instrument <- Enum.uniq(on ++ List.wrap(picked)),
+              do: {instrument, Recipes.run_tests(saved, instrument)}
 
         {:noreply,
          socket
-         |> put_flash(
-           :info,
-           "Saved. The tests are running again on #{Enum.join(retested, ", ")}; switch them back on when they pass."
-         )
+         |> put_flash(edit_flash_kind(tries), edit_message(tries, on, saved.granularity))
          |> push_navigate(to: ~p"/strategies")}
 
       {:error, :locked} ->
@@ -442,7 +496,7 @@ defmodule OpusWeb.StrategyBuilderLive do
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, put_flash(socket, :error, errors(changeset))}
 
-      {:error, untestable} when elem(untestable, 0) in [:no_history, :no_broker] ->
+      {:error, untestable} when elem(untestable, 0) in [:no_history, :no_broker, :no_dividends] ->
         {:noreply,
          socket
          |> put_flash(
@@ -457,6 +511,45 @@ defmodule OpusWeb.StrategyBuilderLive do
          put_flash(socket, :error, "Saved, but the tests didn't start: #{inspect(reason)}")}
     end
   end
+
+  defp edit_flash_kind(tries),
+    do: if(Enum.any?(tries, &match?({_, {:ok, _}}, &1)), do: :info, else: :error)
+
+  defp edit_message([], _on, _granularity), do: "Saved. Pick an instrument to test it on."
+
+  defp edit_message(tries, on, granularity) do
+    {started, refused} = Enum.split_with(tries, &match?({_, {:ok, _}}, &1))
+    names = fn list -> list |> Enum.map(&elem(&1, 0)) |> Enum.join(", ") end
+
+    started_words =
+      case started do
+        [] ->
+          "Saved, but no test started."
+
+        _ ->
+          "Saved. Testing on #{names.(started)}: backtest first; results appear on its card" <>
+            if(Enum.any?(started, &(elem(&1, 0) in on)),
+              do: ". Instruments it was on stay off until you switch them back on.",
+              else: "."
+            )
+      end
+
+    refused_words =
+      Enum.map(refused, fn {instrument, {:error, why}} ->
+        " Not tested on #{instrument}: " <> refusal(why, instrument, granularity)
+      end)
+
+    Enum.join([started_words | refused_words])
+  end
+
+  defp refusal({:no_history, _first, _holdout}, instrument, granularity),
+    do: untestable(instrument, granularity)
+
+  defp refusal({kind, _names} = why, _instrument, _granularity)
+       when kind in [:no_broker, :no_dividends],
+       do: Opus.Instruments.untestable_words(why)
+
+  defp refusal(other, _instrument, _granularity), do: "#{inspect(other)}."
 
   defp maybe_test(recipe, "test", instrument) do
     case Recipes.run_tests(recipe, instrument) do
@@ -1015,6 +1108,9 @@ defmodule OpusWeb.StrategyBuilderLive do
                     )}.
                   </li>
                   <li>The tests run again on each of them.</li>
+                  <li :if={@instrument && @instrument not in Enum.map(@assignments, & &1.instrument)}>
+                    It's also tested on {@instrument}, the instrument picked for the preview.
+                  </li>
                   <li>They stay off until you switch them back on.</li>
                 <% else %>
                   <li>
@@ -1028,11 +1124,20 @@ defmodule OpusWeb.StrategyBuilderLive do
                 <% end %>
               </ol>
               <p
-                :if={@untestable && @mode != :edit}
+                :if={@untestable}
                 role="alert"
                 class="m-0 rounded-field border border-warning/40 bg-base-100 px-3 py-2 text-[13px]"
               >
                 {@untestable}
+                <button
+                  :if={@loadable}
+                  type="button"
+                  phx-click="load_dividends"
+                  disabled={@loading}
+                  class="ml-1 font-medium text-primary hover:underline disabled:text-muted disabled:no-underline"
+                >
+                  {if @loading, do: "Loading #{@loadable}'s dividends…", else: "Load dividends"}
+                </button>
               </p>
               <div class="flex flex-wrap gap-2">
                 <button
