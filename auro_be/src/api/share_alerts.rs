@@ -209,6 +209,7 @@ mod tests {
             symbol: "SPY".into(),
             symbol_id: 1,
             last_trade_price: Some(last),
+            last_trade_price_tr_hrs: None,
             last_trade_time: Some(last_trade_time.into()),
             bid_price: None,
             bid_size: None,
