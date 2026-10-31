@@ -176,10 +176,10 @@ pub enum Window {
     Whole,
     /// Bars before this moment (the walk-forward's in-sample part).
     Before(DateTime<Utc>),
-    /// Bars from this moment on (its out-of-sample part).
-    From(DateTime<Utc>),
-    /// Every bar, so blocks warm up on history, but only trades entered
-    /// from this moment on count (the holdout).
+    /// Every bar, so blocks (and a ranking's look-back) warm up on
+    /// history, but only trades entered from this moment on count: the
+    /// walk-forward's out-of-sample part and the holdout. A ranking
+    /// rebalances from this moment on, as a book started then would.
     Counting(DateTime<Utc>),
 }
 
@@ -188,7 +188,6 @@ impl Window {
         match self {
             Window::Whole | Window::Counting(_) => candles,
             Window::Before(at) => &candles[..candles.partition_point(|c| c.time < at)],
-            Window::From(at) => &candles[candles.partition_point(|c| c.time < at)..],
         }
     }
 }
@@ -242,7 +241,13 @@ pub fn run(
     };
 
     let mut per_market = match (&basket.mode, &basket.rank) {
-        (Mode::Ranked, Some(rule)) => ranked_trades(&bars, rule, config, financing)?,
+        (Mode::Ranked, Some(rule)) => {
+            let start = match window {
+                Window::Counting(at) => Some(at),
+                _ => None,
+            };
+            ranked_trades(&bars, rule, config, financing, start)?
+        }
         _ => together_trades(&bars, config, financing)?,
     };
     if let Window::Counting(at) = window {
@@ -282,8 +287,9 @@ pub fn run(
         max_drawdown: -outcome.max_drawdown,
         account_return: outcome.total_return,
         account_max_drawdown: -outcome.max_drawdown,
+        annual_sharpe: outcome.annual_sharpe,
     };
-    let mut stats = stats_with(&trades, from, to, sizing, marked);
+    let mut stats = stats_with(&trades, sizing, marked);
     if basket.mode == Mode::Ranked {
         stats.judge_by_months(&outcome.monthly);
     }
@@ -393,6 +399,7 @@ fn ranked_trades(
     rule: &RankRule,
     config: &StrategyConfig,
     financing: &FinancingModel,
+    start: Option<DateTime<Utc>>,
 ) -> Result<Vec<Vec<Trade>>, String> {
     let (block, value) = rule
         .source()
@@ -444,6 +451,9 @@ fn ranked_trades(
             .filter(|(first, last)| first <= slot && slot <= last)
             .count();
         present.len() * 2 >= trading
+            // Rebalances from `start` on; the bars before it only warm the
+            // ranking up.
+            && start.is_none_or(|at| present.iter().all(|&(m, i)| bars[m].1[i].time >= at))
     });
 
     let mut held: Vec<Option<Holding>> = bars.iter().map(|_| None).collect();
@@ -685,7 +695,44 @@ mod tests {
         let at = split_at(&members).unwrap();
         assert_eq!(at, day(1) + Duration::days(19) * 7 / 10);
         assert_eq!(Window::Before(at).bars(&members[0].candles).len(), 10);
-        assert_eq!(Window::From(at).bars(&members[1].candles).len(), 6);
+        // The unseen part runs on every bar, counting from the split.
+        assert_eq!(Window::Counting(at).bars(&members[1].candles).len(), 20);
+    }
+
+    #[test]
+    fn a_ranking_counted_from_the_split_starts_warm_and_rebalances_from_there() {
+        let raw = json!({"markets": ["AAA", "BBB", "CCC"], "mode": "ranked",
+            "rank": {"by": "mom.roc", "every_bars": 5, "long_top": 1, "short_bottom": 1}});
+        let config = config(raw);
+        let basket = Basket::of(&config).unwrap().unwrap();
+        let up: Vec<f64> = (0..28).map(|i| 100.0 + i as f64).collect();
+        let down: Vec<f64> = (0..28).map(|i| 100.0 - i as f64).collect();
+        let members = members(&[("AAA", up), ("BBB", vec![100.0; 28]), ("CCC", down)]);
+        let run = run(
+            &members,
+            &basket,
+            &config,
+            &FinancingModel::default(),
+            Window::Counting(day(20)),
+        )
+        .unwrap();
+
+        // The 3-bar return is already known on the split day (warmed on the
+        // bars before it), so the book opens there, not a rebalance later;
+        // the position held since day 6 isn't counted.
+        let entries: Vec<_> = run
+            .outcome
+            .fills
+            .iter()
+            .map(|f| (f.key.as_str(), f.trade.direction, f.trade.entry_time))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                ("AAA", Direction::Long, day(20)),
+                ("CCC", Direction::Short, day(20))
+            ]
+        );
     }
 
     #[test]
@@ -829,7 +876,7 @@ mod tests {
         let grown = days.iter().fold(1.0, |nav, r| nav * (1.0 + r)) - 1.0;
         assert!((grown - run.outcome.total_return).abs() < 1e-9);
         let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(1);
-        let mc = super::super::run_monte_carlo_sims(days, &mut rng);
+        let mc = super::super::run_monte_carlo_sims(days, &run.outcome.daily_lows, &mut rng);
         assert_eq!(mc["mc_method"], "daily_block_bootstrap");
         assert_eq!(mc["num_days"], days.len());
         let dd = mc["p95_drawdown"].as_f64().unwrap();

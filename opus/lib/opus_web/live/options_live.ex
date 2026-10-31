@@ -16,6 +16,7 @@ defmodule OpusWeb.OptionsLive do
   alias Opus.Options
   alias Opus.Options.Idea
   alias Opus.Options.Paper
+  alias Opus.Options.Spot
   alias OpusWeb.Components.PaperBook
 
   @defaults %{
@@ -105,17 +106,22 @@ defmodule OpusWeb.OptionsLive do
     paper = Paper.book(book)
     {trade, leg, analysis} = paper_selection(book, paper, params)
 
+    underlyings = paper_underlyings(book, paper)
+
     {:noreply,
-     assign(socket,
+     socket
+     |> assign(
        view: "paper",
        paper: paper,
        paper_counts: Paper.open_counts(),
        paper_pnl: Paper.total_pnl(),
-       paper_underlyings: paper_underlyings(book, paper),
+       paper_underlyings: underlyings,
        trade: trade,
        leg: leg,
        paper_analysis: analysis
-     )}
+     )
+     |> assign_new(:spot_now, fn -> %{} end)
+     |> start_async(:spot_now, fn -> Spot.now(underlyings) end)}
   end
 
   defp paper_selection("wheel", paper, params) do
@@ -346,6 +352,11 @@ defmodule OpusWeb.OptionsLive do
 
   @impl true
   def handle_info({:ideas_updated, _scanned_on}, socket), do: {:noreply, assign_ideas(socket)}
+
+  # The underlyings' prices now (Questrade), asked for when a book opens.
+  @impl true
+  def handle_async(:spot_now, {:ok, now}, socket), do: {:noreply, assign(socket, spot_now: now)}
+  def handle_async(:spot_now, _failed, socket), do: {:noreply, socket}
 
   # The contract tab picks from the stored chain when its underlying has
   # one: the expiry and strike come from the snapshot, and a newly picked
@@ -606,6 +617,7 @@ defmodule OpusWeb.OptionsLive do
           trade={@trade}
           leg={@leg}
           analysis={@paper_analysis}
+          now={@spot_now}
         />
       </div>
     </Layouts.app>

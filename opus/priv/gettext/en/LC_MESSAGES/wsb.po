@@ -183,7 +183,6 @@ msgstr "Buying the dip with calls. YOLO, but with rules."
 msgid "Calls"
 msgstr "Calls 🚀"
 
-#: lib/opus_web/components/paper_book.ex:276
 #: lib/opus_web/live/accounts_live.ex:441
 #, elixir-autogen, elixir-format
 msgid "Cash"
@@ -451,32 +450,32 @@ msgstr "Dip YOLOs · house money"
 msgid "Identify via Questrade"
 msgstr "Ask Questrade who dis"
 
-#: lib/opus_web/components/paper_book.ex:629
-#: lib/opus_web/components/paper_book.ex:688
-#: lib/opus_web/components/paper_book.ex:731
-#: lib/opus_web/components/paper_trades.ex:417
-#: lib/opus_web/components/paper_trades.ex:466
-#: lib/opus_web/components/paper_trades.ex:517
+#: lib/opus_web/components/paper_book.ex:633
+#: lib/opus_web/components/paper_book.ex:692
+#: lib/opus_web/components/paper_book.ex:735
+#: lib/opus_web/components/paper_trades.ex:445
+#: lib/opus_web/components/paper_trades.ex:494
+#: lib/opus_web/components/paper_trades.ex:545
 #, elixir-autogen, elixir-format
 msgid "If it goes well"
 msgstr "If it prints (first one is free)"
 
-#: lib/opus_web/components/paper_book.ex:647
-#: lib/opus_web/components/paper_book.ex:702
-#: lib/opus_web/components/paper_book.ex:738
-#: lib/opus_web/components/paper_trades.ex:430
-#: lib/opus_web/components/paper_trades.ex:479
-#: lib/opus_web/components/paper_trades.ex:540
+#: lib/opus_web/components/paper_book.ex:651
+#: lib/opus_web/components/paper_book.ex:706
+#: lib/opus_web/components/paper_book.ex:742
+#: lib/opus_web/components/paper_trades.ex:458
+#: lib/opus_web/components/paper_trades.ex:507
+#: lib/opus_web/components/paper_trades.ex:568
 #, elixir-autogen, elixir-format
 msgid "If it goes wrong"
 msgstr "If it goes GUH"
 
-#: lib/opus_web/components/paper_trades.ex:600
+#: lib/opus_web/components/paper_trades.ex:628
 #, elixir-autogen, elixir-format
 msgid "If it stays calm"
 msgstr "If nothing happens (insurance wasted)"
 
-#: lib/opus_web/components/paper_trades.ex:579
+#: lib/opus_web/components/paper_trades.ex:607
 #, elixir-autogen, elixir-format
 msgid "If the market crashes"
 msgstr "If it all burns (the put prints)"
@@ -784,7 +783,7 @@ msgstr "Bags held"
 msgid "Options"
 msgstr "Casino"
 
-#: lib/opus_web/components/paper_book.ex:299
+#: lib/opus_web/components/paper_book.ex:303
 #: lib/opus_web/components/paper_trades.ex:47
 #, elixir-autogen, elixir-format
 msgid "Overview"
@@ -1193,8 +1192,8 @@ msgstr "Weekly loss porn"
 msgid "What happened"
 msgstr "Tendies report"
 
-#: lib/opus_web/components/paper_book.ex:560
-#: lib/opus_web/components/paper_trades.ex:235
+#: lib/opus_web/components/paper_book.ex:564
+#: lib/opus_web/components/paper_trades.ex:263
 #, elixir-autogen, elixir-format
 msgid "What happens next"
 msgstr "The plan, regard"
@@ -1371,7 +1370,7 @@ msgstr "bags"
 msgid "sell"
 msgstr "cash out"
 
-#: lib/opus_web/components/paper_book.ex:476
+#: lib/opus_web/components/paper_book.ex:480
 #, elixir-autogen, elixir-format
 msgid "shares from an assignment"
 msgstr "shares (bagholding)"
@@ -1821,6 +1820,7 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: lib/opus_web/components/option_journal.ex:29
+#: lib/opus_web/components/paper_trades.ex:75
 #, elixir-autogen, elixir-format
 msgid "Closed"
 msgstr "Cashed out"
@@ -1915,3 +1915,13 @@ msgstr "Tendies signal"
 #, elixir-autogen, elixir-format
 msgid "Share alerts at Wealthsimple"
 msgstr "Tendies signals for the Wealthsimple app"
+
+#: lib/opus_web/components/paper_trades.ex:75
+#, elixir-autogen, elixir-format
+msgid "Open"
+msgstr "Still cooking"
+
+#: lib/opus_web/components/paper_book.ex:276
+#, elixir-autogen, elixir-format
+msgid "This book's cash"
+msgstr "Dry powder (this book)"
