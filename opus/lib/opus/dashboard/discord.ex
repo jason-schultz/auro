@@ -66,7 +66,11 @@ defmodule Opus.Dashboard.Discord do
     end
   end
 
-  defp url, do: config()[:webhook_url]
+  @doc "The webhook: saved on the Settings page (`Opus.Settings`), else .env."
+  @spec webhook_url() :: String.t() | nil
+  def webhook_url, do: Opus.Settings.get("DISCORD_WEBHOOK_URL") || config()[:webhook_url]
+
+  defp url, do: webhook_url()
   defp req_options, do: config()[:req_options] || []
   defp config, do: Application.get_env(:opus, __MODULE__, [])
 end

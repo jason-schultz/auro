@@ -9,4 +9,5 @@ pub(crate) mod live_trades;
 pub mod options;
 pub(crate) mod pipeline;
 pub(crate) mod rules;
+pub(crate) mod settings;
 pub(crate) mod signal_events;

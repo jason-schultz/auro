@@ -4,8 +4,10 @@ pub mod config;
 pub mod db;
 pub mod engine;
 pub mod error;
+pub mod secrets;
 pub mod state;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::brokers::massive::client::MassiveClient;
@@ -69,17 +71,37 @@ pub async fn run(mode: Mode) -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let _log_guard = init_tracing(mode);
 
-    let config =
-        Config::from_env(mode).map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    // The database comes first (from .env): the rest of the settings may be
+    // stored in it, from Opus's Settings page, encrypted under
+    // AURO_SECRETS_KEY. The live engine stores secrets (Questrade tokens),
+    // so it needs the key; the tester only reads.
+    let key = std::env::var("AURO_SECRETS_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+        .map(|k| secrets::SecretsKey::from_hex(&k))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    match (key, mode) {
+        (Some(key), _) => secrets::install(key),
+        (None, Mode::Live) => anyhow::bail!(
+            "AURO_SECRETS_KEY is not set: the live engine keeps its tokens encrypted (openssl rand -hex 32, the same in Opus's settings)"
+        ),
+        (None, Mode::Tester) => {}
+    }
+
+    // Both processes check the schema; each sizes its own pool.
+    let (database_url, pool_size) = Config::database_from_env(mode)?;
+    let pool = db::create_pool(&database_url, pool_size, mode).await?;
+
+    let stored = stored_settings(&pool).await?;
+    let config = Config::from_stored(mode, &stored)
+        .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
 
     tracing::info!(
         "Starting Auro ({}) on {}",
         mode.as_str(),
         config.listen_addr()
     );
-
-    // Both processes check the schema; each sizes its own pool.
-    let pool = db::create_pool(&config.database_url, config.db_pool_size, mode).await?;
 
     let (state, app) = match mode {
         Mode::Live => (start_live(config.clone(), pool).await, api::live_router()),
@@ -101,6 +123,28 @@ pub async fn run(mode: Mode) -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// The settings saved on Opus's Settings page, decrypted, by name. One that
+/// won't open (another key, a damaged value) is left out with a warning,
+/// so its `.env` value is used instead; an empty one is left out too.
+async fn stored_settings(pool: &sqlx::PgPool) -> anyhow::Result<HashMap<String, String>> {
+    let rows = db::repositories::settings::load_all(pool).await?;
+    let mut stored = HashMap::new();
+    for (name, value) in rows {
+        match secrets::open(&name, &value) {
+            Ok(plain) if !plain.is_empty() => {
+                stored.insert(name, plain);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("{e}; using .env for {name} instead"),
+        }
+    }
+    tracing::info!(
+        "Settings from the database: {}",
+        stored.keys().cloned().collect::<Vec<_>>().join(", ")
+    );
+    Ok(stored)
 }
 
 /// The tester's state: the database and nothing that talks to a broker.

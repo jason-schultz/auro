@@ -6,8 +6,8 @@
 #   scripts/deploy.sh --rollback switch back to the previous release
 #
 # Builds into ~/Services/auro/releases/<commit>/ while the running services
-# carry on, refuses to go on while a migration is pending (run it, then deploy
-# again), points `current` at the new release, restarts the engine, tester
+# carry on, asks before running any migration the database hasn't run (and
+# stops if you say no), points `current` at the new release, restarts the engine, tester
 # and Opus, and checks each answers. If one doesn't, it switches back to the
 # release that was running and restarts that. The five newest releases are
 # kept. Setup first: scripts/install_services.sh.
@@ -17,6 +17,7 @@ HOME_DIR="$HOME/Services/auro"
 SRC="$HOME_DIR/src"
 LABELS=(ca.carbonandfire.auro.tester ca.carbonandfire.auro.engine ca.carbonandfire.auro.opus)
 CHECKS=(http://127.0.0.1:3001/api/health http://127.0.0.1:3000/api/health http://127.0.0.1:4321/)
+PORTS=(3001 3000 4321)
 DOMAIN="gui/$(id -u)"
 export PATH="$HOME/.asdf/shims:$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
 
@@ -41,16 +42,36 @@ restart_all() {
   done
 }
 
-healthy() { # every service answers within 90 seconds
-  local url
-  for url in "${CHECKS[@]}"; do
-    local tries=0
-    until curl -fsS -o /dev/null --max-time 5 "$url"; do
+# The process listening on a port, and the one launchd runs for a label.
+listener() { lsof -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | head -1; }
+service_pid() { launchctl print "$DOMAIN/$1" 2>/dev/null | awk '/^\tpid = / {print $3}'; }
+
+# Anything on the services' ports that isn't the service (an engine or Opus
+# left running in a terminal) would keep the service from starting while
+# answering its health check in its place.
+ports_free_for_services() {
+  local i pid
+  for i in "${!LABELS[@]}"; do
+    pid="$(listener "${PORTS[$i]}")"
+    if [ -n "$pid" ] && [ "$pid" != "$(service_pid "${LABELS[$i]}")" ]; then
+      say "port ${PORTS[$i]} is held by another process: $(ps -o command= -p "$pid" | cut -c1-80)"
+      say "stop it (an engine, tester or Opus still running in a terminal?), then deploy again"
+      return 1
+    fi
+  done
+}
+
+healthy() { # each service answers within 90 seconds, and it's the service
+  local i tries
+  for i in "${!LABELS[@]}"; do
+    tries=0
+    until curl -fsS -o /dev/null --max-time 5 "${CHECKS[$i]}" &&
+      [ "$(listener "${PORTS[$i]}")" = "$(service_pid "${LABELS[$i]}")" ]; do
       tries=$((tries + 1))
-      [ "$tries" -ge 30 ] && { say "no answer from $url"; return 1; }
+      [ "$tries" -ge 30 ] && { say "no answer from ${LABELS[$i]} at ${CHECKS[$i]}"; return 1; }
       sleep 3
     done
-    say "ok: $url"
+    say "ok: ${CHECKS[$i]}"
   done
 }
 
@@ -58,6 +79,7 @@ if [ "${1:-}" = "--rollback" ]; then
   older="$(ls -1dt "$HOME_DIR"/releases/*/ | sed 's:/$::' | grep -vx "$previous" | head -1)"
   [ -n "$older" ] || { say "no earlier release to go back to"; exit 1; }
   say "rolling back to $(basename "$older")"
+  ports_free_for_services || exit 1
   switch_to "$older"
   restart_all
   healthy
@@ -91,17 +113,37 @@ if [ ! -f "$release/.built" ]; then
   touch "$release/.built"
 fi
 
-# Migrations stay yours to run: stop here if this release has any the
-# database hasn't.
+# Migrations run only when you say so: this release's ones the database
+# hasn't run are listed, and a y or yes runs them (from the release's
+# source, with the service's settings) before anything restarts.
 pending="$(comm -23 \
   <(ls "$SRC/opus/priv/repo/migrations" | grep -oE '^[0-9]+' | sort) \
   <(psql -d auro -Atc 'select version from schema_migrations' | sort))"
 if [ -n "$pending" ]; then
-  say "migrations not run yet: $(echo $pending)"
-  say "run them (cd opus && mix ecto.migrate on main), then deploy again. Nothing was restarted."
-  exit 1
+  say "migrations not run yet:"
+  for version in $pending; do
+    say "  $(ls "$SRC/opus/priv/repo/migrations" | grep "^$version")"
+  done
+  read -r -p "[deploy] run them now? [y/N] " answer
+  case "$(echo "$answer" | tr '[:upper:]' '[:lower:]')" in
+    y | yes)
+      (
+        cd "$SRC/opus"
+        set -a
+        # shellcheck disable=SC1091
+        . "$HOME_DIR/shared/opus.env"
+        set +a
+        MIX_ENV=prod mix ecto.migrate
+      )
+      ;;
+    *)
+      say "not run. Nothing was restarted; deploy again when you're ready."
+      exit 1
+      ;;
+  esac
 fi
 
+ports_free_for_services || exit 1
 switch_to "$release"
 restart_all
 if healthy; then

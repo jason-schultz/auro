@@ -27,6 +27,12 @@ config :opus,
 
 # Alerts to a Discord channel's webhook (Opus.Dashboard.NotifyWorker); unset,
 # nothing is sent. Tests set their own (config/test.exs).
+# Opens the secrets saved on the Settings page (`Opus.Settings.Secret`); the
+# same 64 hex characters as the engine's AURO_SECRETS_KEY.
+if config_env() != :test do
+  config :opus, :secrets_key, System.get_env("AURO_SECRETS_KEY")
+end
+
 if config_env() != :test do
   config :opus, Opus.Dashboard.Discord, webhook_url: System.get_env("DISCORD_WEBHOOK_URL")
 end

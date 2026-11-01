@@ -48,3 +48,4 @@ anyhow = "1"
 
 # Random number generation (Monte Carlo simulation)
 rand = "0.10"
+aes-gcm = "0.11.1"

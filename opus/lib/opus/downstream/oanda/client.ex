@@ -6,13 +6,20 @@ defmodule Opus.Oanda.Client do
 
   require Logger
 
+  alias Opus.Settings
+
   # Practice unless config says otherwise (read at run time, so a release
   # takes OANDA_BASE_URL from its environment).
   @base_url "https://api-fxpractice.oanda.com"
 
-  def base_url, do: Application.get_env(:opus, :oanda_base_url, @base_url)
-  def account_id, do: Application.fetch_env!(:opus, :oanda_account_id)
-  def api_key, do: Application.fetch_env!(:opus, :oanda_api_key)
+  # Saved on the Settings page first (`Opus.Settings`), else .env.
+  def base_url,
+    do: Settings.get("OANDA_BASE_URL") || Application.get_env(:opus, :oanda_base_url, @base_url)
+
+  def account_id,
+    do: Settings.get("OANDA_ACCOUNT_ID") || Application.get_env(:opus, :oanda_account_id)
+
+  def api_key, do: Settings.get("OANDA_API_KEY") || Application.get_env(:opus, :oanda_api_key)
 
   @doc "Fetch all currently open trades from OANDA."
   def get_open_trades do

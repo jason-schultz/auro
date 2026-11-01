@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 
 /// Which of the two processes this is. Same crate, two binaries: `auro`
@@ -59,6 +60,27 @@ impl Config {
         Self::from_lookup(mode, |key| env::var(key).ok())
     }
 
+    /// The settings saved on Opus's Settings page (`stored`, already
+    /// decrypted), each ahead of the `.env` variable of the same name.
+    pub fn from_stored(mode: Mode, stored: &HashMap<String, String>) -> anyhow::Result<Self> {
+        Self::from_lookup(mode, |key| {
+            stored.get(key).cloned().or_else(|| env::var(key).ok())
+        })
+    }
+
+    /// What the process needs to reach the database, before any stored
+    /// setting can be read: the URL and the pool size, from `.env`.
+    pub fn database_from_env(mode: Mode) -> anyhow::Result<(String, u32)> {
+        let get = |key: &str| env::var(key).ok();
+        let url = get("DATABASE_URL").ok_or_else(|| {
+            anyhow::anyhow!(
+                "DATABASE_URL is not set (the {} engine needs it)",
+                mode.as_str()
+            )
+        })?;
+        Ok((url, pool_size(mode, get)?))
+    }
+
     fn from_lookup(mode: Mode, get: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
         let required = |key: &str| {
             get(key).ok_or_else(|| {
@@ -69,32 +91,15 @@ impl Config {
             Mode::Live => required(key),
             Mode::Tester => Ok(get(key).unwrap_or_default()),
         };
-        let (port_var, default_port, pool_var, default_pool) = match mode {
-            Mode::Live => (
-                "PORT",
-                DEFAULT_LIVE_PORT,
-                "AURO_LIVE_DB_POOL_SIZE",
-                DEFAULT_LIVE_DB_POOL,
-            ),
-            Mode::Tester => (
-                "AURO_TESTER_PORT",
-                DEFAULT_TESTER_PORT,
-                "AURO_TESTER_DB_POOL_SIZE",
-                DEFAULT_TESTER_DB_POOL,
-            ),
+        let (port_var, default_port) = match mode {
+            Mode::Live => ("PORT", DEFAULT_LIVE_PORT),
+            Mode::Tester => ("AURO_TESTER_PORT", DEFAULT_TESTER_PORT),
         };
 
         Ok(Self {
             mode,
             database_url: required("DATABASE_URL")?,
-            db_pool_size: match get(pool_var) {
-                Some(v) => v
-                    .parse()
-                    .ok()
-                    .filter(|n| *n > 0)
-                    .ok_or_else(|| anyhow::anyhow!("{pool_var} must be a positive number"))?,
-                None => default_pool,
-            },
+            db_pool_size: pool_size(mode, &get)?,
             oanda_api_key: oanda("OANDA_API_KEY")?,
             oanda_account_id: oanda("OANDA_ACCOUNT_ID")?,
             oanda_base_url: oanda("OANDA_BASE_URL")?,
@@ -118,6 +123,23 @@ impl Config {
 
     pub fn listen_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+}
+
+/// The process's Postgres pool size: `AURO_LIVE_DB_POOL_SIZE` /
+/// `AURO_TESTER_DB_POOL_SIZE`, else the mode's default.
+fn pool_size(mode: Mode, get: impl Fn(&str) -> Option<String>) -> anyhow::Result<u32> {
+    let (var, default) = match mode {
+        Mode::Live => ("AURO_LIVE_DB_POOL_SIZE", DEFAULT_LIVE_DB_POOL),
+        Mode::Tester => ("AURO_TESTER_DB_POOL_SIZE", DEFAULT_TESTER_DB_POOL),
+    };
+    match get(var) {
+        Some(v) => v
+            .parse()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| anyhow::anyhow!("{var} must be a positive number")),
+        None => Ok(default),
     }
 }
 

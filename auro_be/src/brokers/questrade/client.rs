@@ -14,6 +14,7 @@ use crate::brokers::client::BrokerClient;
 use crate::brokers::{BrokerAccount, BrokerKind, BrokerStatus};
 use crate::engine::types::Granularity;
 use crate::error::{AppError, AppResult};
+use crate::secrets;
 
 const AUTH_URL: &str = "https://login.questrade.com/oauth2/token";
 
@@ -45,6 +46,10 @@ pub struct QuestradeClient {
     symbol_cache: HashMap<String, i64>,
 }
 
+/// The names the tokens are sealed under (`secrets`).
+const REFRESH_TOKEN: &str = "questrade.refresh_token";
+const ACCESS_TOKEN: &str = "questrade.access_token";
+
 /// By hand so the refresh and access tokens never reach a log line.
 impl std::fmt::Debug for QuestradeClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -74,13 +79,19 @@ impl QuestradeClient {
     /// token is never retried. The successful token's rotation is persisted
     /// by `authenticate`. Returns None when no token is available.
     pub async fn connect(pool: &PgPool, env_token: Option<&str>) -> AppResult<Option<Self>> {
-        let db_token: Option<String> =
+        let stored: Option<String> =
             sqlx::query_scalar("SELECT refresh_token FROM questrade_tokens WHERE singleton = TRUE")
                 .fetch_optional(pool)
                 .await
                 .map_err(|e| {
                     AppError::Internal(format!("DB error loading questrade token: {}", e))
                 })?;
+        // Stored encrypted (`secrets`); a row written before that is plain
+        // and is sealed at the next rotation.
+        let db_token = stored
+            .map(|t| secrets::open(REFRESH_TOKEN, &t))
+            .transpose()
+            .map_err(AppError::Internal)?;
 
         let env_token = env_token.filter(|t| db_token.as_deref() != Some(*t));
         let candidates: Vec<String> = db_token
@@ -197,8 +208,12 @@ impl QuestradeClient {
                         updated_at    = NOW()
                 "#,
             )
-            .bind(&self.refresh_token)
-            .bind(&self.access_token)
+            .bind(secrets::seal(REFRESH_TOKEN, &self.refresh_token))
+            .bind(
+                self.access_token
+                    .as_deref()
+                    .map(|t| secrets::seal(ACCESS_TOKEN, t)),
+            )
             .bind(&self.api_server)
             .bind(self.expires_at)
             .execute(&self.pool)
