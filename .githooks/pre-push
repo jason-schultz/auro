@@ -4,6 +4,10 @@
 # Elixir: fmt --check + compile warnings-as-errors + tests
 set -euo pipefail
 
+# Git apps (VS Code, GitHub Desktop) run hooks without your shell setup:
+# find cargo, and mix through the asdf shims, either way.
+export PATH="$HOME/.asdf/shims:$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
+
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 failed=0
 
