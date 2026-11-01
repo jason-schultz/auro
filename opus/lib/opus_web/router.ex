@@ -30,6 +30,7 @@ defmodule OpusWeb.Router do
     live("/options", OptionsLive)
     live("/instruments", InstrumentsLive)
     live("/research", ResearchLive)
+    live("/settings", SettingsLive)
   end
 
   scope "/api", OpusWeb do

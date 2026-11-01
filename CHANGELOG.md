@@ -7,6 +7,7 @@ Releases start once Auro runs locally as a service; until then everything is in 
 
 ## Version 0.1.0 (TBD)
 
+- Settings page: OANDA, Massive and Discord keys saved in the database, secrets encrypted (AES-256-GCM, `AURO_SECRETS_KEY`), each with a read-only Test; both apps read a saved value ahead of `.env`; Questrade tokens encrypted at rest (commit pending)
 - Run as launchd services from a built release (`scripts/install_services.sh`, `scripts/deploy.sh` with health checks and rollback); dev Opus moves to port 4322 and runs no jobs or account workers; nightly database backup (`scripts/backup_db.sh`); Opus release reads the OANDA URL at run time (commit pending)
 - Regime detector deleted (step 2, after the restart) ([6fcbb21](https://github.com/jason-schultz/auro/commit/6fcbb21688698b15ec35d7626cf4ae44211b3ce3))
 - Regime detector retired: no longer started or recorded; the strategy page's Regime card and `/api/regimes` removed ([ccecfa2](https://github.com/jason-schultz/auro/commit/ccecfa2e243a47a85e69a1d692f69dc29e9491d3))

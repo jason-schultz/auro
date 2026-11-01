@@ -51,6 +51,7 @@ defmodule OpusWeb.Layouts do
           <.link navigate={~p"/options"} class="py-2 text-muted hover:text-base-content"><.t {copy("Options")} /></.link>
           <.link navigate={~p"/instruments"} class="py-2 text-muted hover:text-base-content"><.t {copy("Instruments")} /></.link>
           <.link navigate={~p"/research"} class="py-2 text-muted hover:text-base-content"><.t {copy("Research")} /></.link>
+          <.link navigate={~p"/settings"} class="py-2 text-muted hover:text-base-content"><.t {copy("Settings")} /></.link>
           <.theme_toggle />
         </nav>
       </div>

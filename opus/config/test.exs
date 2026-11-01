@@ -46,3 +46,10 @@ config :opus, Opus.Dashboard.Discord,
 
 # OANDA calls go to a Req.Test stub, never to the real account.
 config :opus, Opus.Oanda.Client, req_options: [plug: {Req.Test, Opus.Oanda.Client}, retry: false]
+
+# A fresh key for the saved secrets on every run (never a committed one),
+# and the Settings page's tests answered by a Req.Test stub.
+config :opus, :secrets_key, Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
+
+config :opus, Opus.Settings.Check,
+  req_options: [plug: {Req.Test, Opus.Settings.Check}, retry: false]
