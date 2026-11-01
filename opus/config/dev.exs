@@ -26,7 +26,8 @@ config :opus, Opus.Repo,
 # Binding to loopback ipv4 address prevents access from other machines.
 config :opus, OpusWeb.Endpoint,
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
-  http: [ip: {127, 0, 0, 1}, port: 4321],
+  # 4322: the service (a release, launchd) owns 4321.
+  http: [ip: {127, 0, 0, 1}, port: 4322],
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
@@ -89,3 +90,10 @@ config :phoenix_live_view,
   debug_attributes: true,
   # Enable helpful, but potentially expensive runtime checks
   enable_expensive_runtime_checks: true
+
+# A dev Opus runs beside the service against the same database: it shows
+# pages but never acts on its own. The service alone runs the account
+# workers (reconciler, rules push, breakers) and the job queues and cron, so
+# nothing runs twice; a job a dev page starts is picked up by the service.
+config :opus, start_scheduled_workers: false
+config :opus, Oban, plugins: false, queues: false

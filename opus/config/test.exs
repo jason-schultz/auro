@@ -37,7 +37,7 @@ config :phoenix, :plug_init_mode, :runtime
 config :opus, auro_base_url: "http://127.0.0.1:3999", auro_tester_url: "http://127.0.0.1:3998"
 
 config :opus, Oban, testing: :manual
-config :opus, start_scheduled_workers: false
+config :opus, start_scheduled_workers: false, start_page_feeds: false
 
 # Discord posts go to a Req.Test stub, never to a real channel.
 config :opus, Opus.Dashboard.Discord,

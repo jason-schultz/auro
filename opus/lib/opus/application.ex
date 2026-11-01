@@ -7,7 +7,7 @@ defmodule Opus.Application do
 
   @impl true
   def start(_type, _args) do
-    children = base_children() ++ scheduled_workers()
+    children = base_children() ++ scheduled_workers() ++ page_feeds()
     Opus.Pipeline.Events.attach()
 
     opts = [strategy: :one_for_one, name: Opus.Supervisor]
@@ -30,16 +30,26 @@ defmodule Opus.Application do
     ]
   end
 
+  # The processes that act on the account: syncing closed trades, pushing
+  # the safety rules to the engine, tripping circuit breakers. Exactly one
+  # Opus runs them, the service; a dev Opus beside it doesn't (config/dev.exs).
   defp scheduled_workers do
     if Application.get_env(:opus, :start_scheduled_workers, true) do
       [
-        # Trading services
         Opus.Trading.Reconciler,
         Opus.Trading.RulesEngine,
-        Opus.Trading.CircuitBreaker,
-        Opus.Trading.SignalEventListener,
-        Opus.Dashboard.Feed
+        Opus.Trading.CircuitBreaker
       ]
+    else
+      []
+    end
+  end
+
+  # What keeps open pages current (Postgres notifications, the dashboard's
+  # gather): read-only, so a dev Opus runs them too.
+  defp page_feeds do
+    if Application.get_env(:opus, :start_page_feeds, true) do
+      [Opus.Trading.SignalEventListener, Opus.Dashboard.Feed]
     else
       []
     end

@@ -7,6 +7,7 @@ Releases start once Auro runs locally as a service; until then everything is in 
 
 ## Version 0.1.0 (TBD)
 
+- Run as launchd services from a built release (`scripts/install_services.sh`, `scripts/deploy.sh` with health checks and rollback); dev Opus moves to port 4322 and runs no jobs or account workers; nightly database backup (`scripts/backup_db.sh`); Opus release reads the OANDA URL at run time (commit pending)
 - Regime detector deleted (step 2, after the restart) (commit pending)
 - Regime detector retired: no longer started or recorded; the strategy page's Regime card and `/api/regimes` removed ([ccecfa2](https://github.com/jason-schultz/auro/commit/ccecfa2e243a47a85e69a1d692f69dc29e9491d3))
 - Live trade returns are net of OANDA financing, like the backtest's (engine and reconciler) ([ccecfa2](https://github.com/jason-schultz/auro/commit/ccecfa2e243a47a85e69a1d692f69dc29e9491d3))

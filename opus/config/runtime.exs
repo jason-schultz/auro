@@ -78,7 +78,20 @@ if config_env() == :prod do
     # Loopback only, as in dev: the UI has no login and can switch strategies
     # on, so it must not be reachable from the network.
     http: [ip: {127, 0, 0, 1}, port: port],
+    # Pages are opened as localhost or 127.0.0.1.
+    check_origin: ["//localhost", "//127.0.0.1"],
     secret_key_base: secret_key_base
+
+  # Under launchd the log goes to a file that rotates (10 files of 10 MB),
+  # not to stdout, which would grow forever.
+  if log_dir = System.get_env("OPUS_LOG_DIR") do
+    config :logger, :default_handler,
+      config: [
+        file: String.to_charlist(Path.join(log_dir, "opus.log")),
+        max_no_bytes: 10_000_000,
+        max_no_files: 10
+      ]
+  end
 
   # ## SSL Support
   #

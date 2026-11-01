@@ -6,7 +6,9 @@ defmodule Opus.Oanda.Client do
 
   require Logger
 
-  @base_url Application.compile_env(:opus, :oanda_base_url, "https://api-fxpractice.oanda.com")
+  # Practice unless config says otherwise (read at run time, so a release
+  # takes OANDA_BASE_URL from its environment).
+  @base_url "https://api-fxpractice.oanda.com"
 
   def base_url, do: Application.get_env(:opus, :oanda_base_url, @base_url)
   def account_id, do: Application.fetch_env!(:opus, :oanda_account_id)
