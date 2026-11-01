@@ -26,7 +26,8 @@ logs/
 **/AGENTS.md
 fable_review/
 research/
+# Scripts for this machine and its data (backfills, one-off loads).
+local_scripts/
 running_local/
-scripts/
 **.elixir_ls/**
 
