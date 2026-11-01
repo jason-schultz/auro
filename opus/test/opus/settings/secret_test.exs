@@ -3,9 +3,8 @@ defmodule Opus.Settings.SecretTest do
 
   alias Opus.Settings.Secret
 
-  @key Base.decode16!("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-         case: :lower
-       )
+  # The bytes 0..31: a known key both sides' tests share, not a secret.
+  @key :binary.list_to_bin(Enum.to_list(0..31))
   # The engine's test (auro_be/src/secrets.rs) opens this same value: the two
   # sides read each other.
   @from_both "enc:v1:a0a1a2a3a4a5a6a7a8a9aaab952b1f5f20bf2fc90309f2b6577871c427e4848c944673a3675347bf"

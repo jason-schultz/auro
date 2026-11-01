@@ -143,15 +143,18 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-    /// Made by Opus (Erlang `:crypto`) with KEY, nonce a0a1…ab, name
+    /// The bytes 0..31 as hex: a known key Opus's test shares, not a secret.
+    fn key_hex() -> String {
+        (0u8..32).map(|b| format!("{b:02x}")).collect()
+    }
+    /// Made by Opus (Erlang `:crypto`) with `key_hex()`, nonce a0a1…ab, name
     /// OANDA_API_KEY: "s3cret-value".
     const FROM_OPUS: &str =
         "enc:v1:a0a1a2a3a4a5a6a7a8a9aaab952b1f5f20bf2fc90309f2b6577871c427e4848c944673a3675347bf";
 
     #[test]
     fn opens_what_opus_sealed_and_seals_it_the_same_way() {
-        let key = SecretsKey::from_hex(KEY).unwrap();
+        let key = SecretsKey::from_hex(&key_hex()).unwrap();
         assert_eq!(
             key.decrypt("OANDA_API_KEY", FROM_OPUS).unwrap(),
             "s3cret-value"
@@ -168,7 +171,7 @@ mod tests {
 
     #[test]
     fn a_value_wont_open_under_another_name_or_key() {
-        let key = SecretsKey::from_hex(KEY).unwrap();
+        let key = SecretsKey::from_hex(&key_hex()).unwrap();
         assert!(key.decrypt("MASSIVE_API_KEY", FROM_OPUS).is_err());
         let other = SecretsKey::from_hex(&"11".repeat(32)).unwrap();
         assert!(other.decrypt("OANDA_API_KEY", FROM_OPUS).is_err());
@@ -176,7 +179,7 @@ mod tests {
 
     #[test]
     fn round_trips_with_a_fresh_nonce_each_time_and_passes_plain_text_through() {
-        let key = SecretsKey::from_hex(KEY).unwrap();
+        let key = SecretsKey::from_hex(&key_hex()).unwrap();
         let a = key.encrypt("questrade.refresh_token", "tok");
         let b = key.encrypt("questrade.refresh_token", "tok");
         assert_ne!(a, b);
