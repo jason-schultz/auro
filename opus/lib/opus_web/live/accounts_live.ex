@@ -32,10 +32,6 @@ defmodule OpusWeb.AccountsLive do
         error: nil,
         as_of: nil,
         exposure: nil,
-        questrade_connecting: false,
-        questrade_notice: nil,
-        # Bumped on each submit so the token field is replaced, empty.
-        token_field: 0,
         # The holdings editor: nil when closed, else the draft being edited.
         draft: nil,
         draft_error: nil,
@@ -115,69 +111,7 @@ defmodule OpusWeb.AccountsLive do
      |> start_async(:save_holdings, fn -> Accounts.save_holdings(draft) end)}
   end
 
-  # The token is a secret: it goes straight to the engine and is never
-  # assigned, logged or shown. Phoenix filters any parameter named like
-  # "token" out of its own event logs.
-  def handle_event("connect_questrade", %{"questrade_token" => token}, socket) do
-    socket = update(socket, :token_field, &(&1 + 1))
-
-    case String.trim(token) do
-      "" ->
-        {:noreply,
-         assign(socket, questrade_notice: {:error, "Paste the token from Questrade first."})}
-
-      token ->
-        {:noreply,
-         socket
-         |> assign(questrade_connecting: true, questrade_notice: nil)
-         |> start_async(:questrade_connect, fn -> Client.connect_questrade(token) end)}
-    end
-  end
-
   @impl true
-  def handle_async(:questrade_connect, {:ok, {:ok, %{"connected" => true}}}, socket) do
-    {:noreply,
-     socket
-     |> assign(
-       questrade_connecting: false,
-       questrade_notice: {:ok, "Questrade is connected again."}
-     )
-     |> start_async(:overview, &Accounts.overview/0)}
-  end
-
-  def handle_async(:questrade_connect, {:ok, {:ok, answer}}, socket) do
-    why = if is_binary(answer["error"]), do: " Questrade said: #{answer["error"]}", else: ""
-
-    {:noreply,
-     assign(socket,
-       questrade_connecting: false,
-       questrade_notice:
-         {:error, "Questrade took the token but then didn't answer for the accounts.#{why}"}
-     )}
-  end
-
-  def handle_async(:questrade_connect, {:ok, {:error, reason}}, socket) do
-    {:noreply,
-     assign(socket,
-       questrade_connecting: false,
-       questrade_notice:
-         {:error,
-          "That didn't connect, and nothing changed. #{describe(reason)} " <>
-            "A token works only once, so generate a fresh one before trying again."}
-     )}
-  end
-
-  def handle_async(:questrade_connect, {:exit, _reason}, socket) do
-    # Not the reason: a crash report could carry the call's arguments.
-    Logger.error("[Accounts] Connecting Questrade crashed")
-
-    {:noreply,
-     assign(socket,
-       questrade_connecting: false,
-       questrade_notice: {:error, "Connecting Questrade failed. Check the Opus log."}
-     )}
-  end
-
   def handle_async(:exposure, {:ok, exposure}, socket),
     do: {:noreply, assign(socket, exposure: exposure)}
 
@@ -262,20 +196,6 @@ defmodule OpusWeb.AccountsLive do
           {@error}
         </p>
 
-        <p
-          :if={@questrade_notice}
-          role="status"
-          class={[
-            "rounded-box border bg-base-200 px-4 py-3 text-sm",
-            if(elem(@questrade_notice, 0) == :ok,
-              do: "border-primary/40",
-              else: "border-error/40"
-            )
-          ]}
-        >
-          {elem(@questrade_notice, 1)}
-        </p>
-
         <%= if @overview do %>
           <.summary overview={@overview} />
           <section class="flex flex-col gap-3">
@@ -316,12 +236,14 @@ defmodule OpusWeb.AccountsLive do
           <.holdings_editor :if={@draft} draft={@draft} error={@draft_error} saving={@saving} />
           <p :for={broker <- @overview.offline} class="text-[13px] text-muted">
             {broker.broker} is offline{if broker.error, do: ": #{broker.error}", else: "."}
+            <.link
+              :if={broker.broker == "Questrade"}
+              navigate={~p"/settings/integrations/questrade"}
+              class="font-medium text-primary hover:brightness-110"
+            >
+              Reconnect it on Settings
+            </.link>
           </p>
-          <.questrade_connect
-            :if={questrade_offline?(@overview)}
-            connecting={@questrade_connecting}
-            field={@token_field}
-          />
         <% else %>
           <p :if={!@error} class="text-[13px] text-muted">
             <.t {copy("Loading balances…")} />
@@ -329,47 +251,6 @@ defmodule OpusWeb.AccountsLive do
         <% end %>
       </div>
     </Layouts.app>
-    """
-  end
-
-  defp questrade_offline?(overview), do: Enum.any?(overview.offline, &(&1.broker == "Questrade"))
-
-  attr :connecting, :boolean, required: true
-  attr :field, :integer, required: true
-
-  # Questrade tokens work once: each connect swaps the one sent for a new
-  # one the engine saves. When the saved one stops working, a fresh token
-  # from Questrade gets the engine back without a restart.
-  defp questrade_connect(assigns) do
-    ~H"""
-    <section class="flex flex-col gap-3 rounded-box border border-base-300 bg-base-200 px-5 py-4">
-      <span class="text-[15px] font-semibold">Paste a new Questrade token</span>
-      <p class="text-[13px] text-muted">
-        Questrade stopped accepting the saved token, so its balances and prices are missing.
-        To get a new one: log in to Questrade, open the API centre (under your name, then
-        "API centre"), find this app and choose "Generate new token". Copy it and paste it here.
-        It is used once to connect and never shown or kept by Opus.
-      </p>
-      <form
-        id="questrade-connect"
-        phx-submit="connect_questrade"
-        class="flex flex-wrap items-center gap-2.5"
-      >
-        <input
-          id={"questrade-token-#{@field}"}
-          type="password"
-          name="questrade_token"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="Questrade token"
-          aria-label="Questrade token"
-          class="input w-80 max-w-full"
-        />
-        <.button disabled={@connecting}>
-          {if @connecting, do: "Connecting…", else: "Connect"}
-        </.button>
-      </form>
-    </section>
     """
   end
 

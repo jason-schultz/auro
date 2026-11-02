@@ -10,6 +10,7 @@ pub mod state;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::brokers::connections::{self, Connections};
 use crate::brokers::massive::client::MassiveClient;
 use brokers::oanda::client::OandaClient;
 use brokers::oanda::stream::run_price_stream;
@@ -128,7 +129,9 @@ pub async fn run(mode: Mode) -> anyhow::Result<()> {
 /// The settings saved on Opus's Settings page, decrypted, by name. One that
 /// won't open (another key, a damaged value) is left out with a warning,
 /// so its `.env` value is used instead; an empty one is left out too.
-async fn stored_settings(pool: &sqlx::PgPool) -> anyhow::Result<HashMap<String, String>> {
+pub(crate) async fn stored_settings(
+    pool: &sqlx::PgPool,
+) -> anyhow::Result<HashMap<String, String>> {
     let rows = db::repositories::settings::load_all(pool).await?;
     let mut stored = HashMap::new();
     for (name, value) in rows {
@@ -169,7 +172,7 @@ fn tester_state(config: Config, pool: sqlx::PgPool) -> AppState {
         price_tx,
         questrade: Arc::new(QuestradeLink::default()),
         wealthsimple: WealthsimpleClient::new(&pool),
-        massive: None,
+        connections: Arc::new(Connections::default()),
     }
 }
 
@@ -184,7 +187,9 @@ async fn start_live(config: Config, pool: sqlx::PgPool) -> AppState {
         &config.oanda_account_id,
     );
 
-    match oanda.get_account().await {
+    let connections = Arc::new(Connections::default());
+    let started = chrono::Utc::now();
+    let oanda_check = match oanda.get_account().await {
         Ok(account) => {
             tracing::info!(
                 "Connected to OANDA account {} ({}), balance: {}",
@@ -192,11 +197,20 @@ async fn start_live(config: Config, pool: sqlx::PgPool) -> AppState {
                 account.currency,
                 account.balance
             );
+            (true, api::settings::oanda_answered(&account))
         }
         Err(e) => {
             tracing::warn!("Failed to connect to OANDA: {}. Continuing anyway.", e);
+            (false, format!("OANDA didn't answer at startup: {e}"))
         }
-    }
+    };
+    connections.record_check(
+        connections::OANDA,
+        started,
+        oanda_check.0,
+        oanda_check.1,
+        true,
+    );
 
     if !is_forex_market_open() {
         tracing::info!(
@@ -236,7 +250,7 @@ async fn start_live(config: Config, pool: sqlx::PgPool) -> AppState {
         }
     }
 
-    let massive = match config.massive_api_key.as_deref() {
+    if let Some(client) = match config.massive_api_key.as_deref() {
         Some(key) => match MassiveClient::new(
             &config.massive_base_url,
             key,
@@ -247,6 +261,9 @@ async fn start_live(config: Config, pool: sqlx::PgPool) -> AppState {
                     "Massive market data configured ({}).",
                     config.massive_base_url
                 );
+                connections.update(connections::MASSIVE, |status| {
+                    status.in_use_since = Some(started);
+                });
                 Some(client)
             }
             Err(e) => {
@@ -258,7 +275,9 @@ async fn start_live(config: Config, pool: sqlx::PgPool) -> AppState {
             tracing::info!("No Massive API key configured; US stock bars disabled.");
             None
         }
-    };
+    } {
+        connections.set_massive(client);
+    }
 
     let state = AppState {
         db: pool.clone(),
@@ -269,7 +288,7 @@ async fn start_live(config: Config, pool: sqlx::PgPool) -> AppState {
         price_tx: price_tx.clone(),
         questrade,
         wealthsimple: WealthsimpleClient::new(&pool),
-        massive,
+        connections,
     };
 
     let instrument_metadata = load_instrument_metadata(&state.oanda, &state.db).await;
@@ -288,6 +307,12 @@ async fn start_live(config: Config, pool: sqlx::PgPool) -> AppState {
     {
         let state = state.clone();
         spawn_supervised("candle feed", move || run_candle_feed(state.clone()));
+    }
+    {
+        let state = state.clone();
+        spawn_supervised("stock feed", move || {
+            engine::live::stock_feed::run_stock_feed(state.clone())
+        });
     }
     {
         let state = state.clone();

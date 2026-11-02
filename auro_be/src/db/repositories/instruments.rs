@@ -37,6 +37,17 @@ pub async fn find_by_questrade_symbol(
     .await
 }
 
+/// The active listings flagged for Questrade bars, by symbol.
+pub async fn fed_by_questrade_bars(pool: &PgPool) -> Result<Vec<Instrument>, sqlx::Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM instruments \
+         WHERE feed_questrade_bars AND active AND questrade_symbol IS NOT NULL \
+         ORDER BY questrade_symbol"
+    )))
+    .fetch_all(pool)
+    .await
+}
+
 /// The listing Massive calls `ticker`, if it is in the master.
 pub async fn find_by_massive_ticker(
     pool: &PgPool,

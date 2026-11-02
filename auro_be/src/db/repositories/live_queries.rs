@@ -35,6 +35,19 @@ pub(crate) async fn enabled_strategy_keys(
     .await
 }
 
+/// (instrument, granularity) of every enabled live strategy that doesn't
+/// trade on OANDA (share alerts, options): the stock feed's first keys.
+pub(crate) async fn enabled_stock_strategy_keys(
+    pool: &PgPool,
+) -> Result<Vec<(String, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT DISTINCT instrument, granularity FROM live_strategies \
+         WHERE enabled AND action->>'type' <> 'oanda'",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 pub(crate) async fn strategy_count_for_instrument_excluding(
     pool: &PgPool,
     instrument: &str,

@@ -12,7 +12,7 @@ defmodule Opus.SettingsTest do
 
     assert Settings.get("OANDA_API_KEY") == "abcd-1234-wxyz"
 
-    %{fields: [key | _]} = Settings.view(Settings.provider("oanda"))
+    %{fields: [key | _]} = Settings.view(Settings.integration("oanda-practice"))
     assert %{stored: true, ends: "wxyz"} = key
     refute Map.has_key?(key, :value)
   end
@@ -45,14 +45,28 @@ defmodule Opus.SettingsTest do
       Req.Test.json(conn, %{"name" => "Auro alerts"})
     end)
 
-    assert Check.run(Settings.provider("discord")) ==
-             {:ok, ~s(Discord found the webhook "Auro alerts")}
+    assert Check.run(Settings.integration("discord")) ==
+             {:ok, ~s(Discord found the webhook "Auro alerts". Nothing was posted.)}
   end
 
-  test "a refused key says so" do
-    :ok = Settings.put("MASSIVE_API_KEY", "bad")
-    Req.Test.stub(Check, &Plug.Conn.send_resp(&1, 401, ""))
+  test "a refused webhook says so, and the check's outcome is kept with its words" do
+    discord = Settings.integration("discord")
+    :ok = Settings.put("DISCORD_WEBHOOK_URL", "https://discord.test/api/webhooks/9/gone")
+    Req.Test.stub(Check, &Plug.Conn.send_resp(&1, 404, ""))
 
-    assert {:error, "Refused (401)" <> _} = Check.run(Settings.provider("massive"))
+    assert {:error, words} = Check.run(discord)
+    assert words =~ "Discord refused it (404)"
+
+    :ok = Settings.record_check(discord, false, words)
+    assert %{check: %{ok: false, words: ^words}} = Settings.view(discord)
+  end
+
+  test "integrations come in page order, alphabetical within each group" do
+    assert [{"Brokers", brokers}, {"Market data", _}, {"AI", _}, {"Notifications", _}] =
+             Settings.groups()
+
+    names = Enum.map(brokers, & &1.name)
+    assert names == Enum.sort(names)
+    refute "Wealthsimple" in names
   end
 end

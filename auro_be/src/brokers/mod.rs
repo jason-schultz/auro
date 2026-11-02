@@ -1,5 +1,6 @@
 pub mod adjusted;
 pub mod client;
+pub mod connections;
 pub mod massive;
 pub mod oanda;
 pub mod questrade;

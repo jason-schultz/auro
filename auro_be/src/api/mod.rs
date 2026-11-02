@@ -13,6 +13,7 @@ mod portfolio;
 mod positions;
 mod questrade;
 mod rules;
+pub(crate) mod settings;
 mod share_alerts;
 mod signal_preview;
 mod strategy_report;
@@ -150,6 +151,9 @@ fn live_only() -> Router<AppState> {
             "/api/live/config",
             put(live_strategies::update_trading_config),
         )
+        // Settings saved on Opus's Settings page, applied without a restart.
+        .route("/api/settings/apply", post(settings::apply))
+        .route("/api/settings/status", get(settings::status))
         // Brokers
         .route("/api/brokers", get(brokers::list_brokers))
         .route("/api/brokers/wealthsimple", get(wealthsimple::get_accounts))

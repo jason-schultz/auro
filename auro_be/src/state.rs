@@ -5,7 +5,7 @@ use tokio::sync::{broadcast, RwLock};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::brokers::massive::client::MassiveClient;
+use crate::brokers::connections::Connections;
 use crate::brokers::oanda::client::OandaClient;
 use crate::brokers::oanda::models::StreamMessage;
 use crate::brokers::questrade::link::QuestradeLink;
@@ -28,7 +28,9 @@ pub struct AppState {
     /// running (`POST /api/questrade/connect`). Always empty in the tester.
     pub questrade: Arc<QuestradeLink>,
     pub wealthsimple: WealthsimpleClient,
-    pub massive: Option<MassiveClient>,
+    /// Massive, replaceable while running, and what Settings shows about
+    /// each changeable connection (`api::settings`).
+    pub connections: Arc<Connections>,
 }
 
 pub struct LiveState {
@@ -129,7 +131,7 @@ impl AppState {
             price_tx,
             questrade: Arc::new(QuestradeLink::default()),
             wealthsimple,
-            massive: None,
+            connections: Arc::new(Connections::default()),
         }
     }
 

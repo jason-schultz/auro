@@ -9,20 +9,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::options::ChainWindow;
+use crate::brokers::questrade::bars;
 use crate::brokers::questrade::client::QuestradeClient;
 use crate::brokers::questrade::identity;
 use crate::brokers::questrade::link::Connect;
 use crate::brokers::questrade::models::{EquityCandle, OptionQuote, QuoteResult, SymbolDetail};
 use crate::brokers::questrade::options::{select_contracts, SelectedContract};
-use crate::brokers::{adjusted, stock_bar_final_at, stock_day_open};
-use crate::db::repositories::candles as candles_repo;
 use crate::db::repositories::instruments as instruments_repo;
 use crate::db::repositories::options::{
     self as options_repo, ContractRow, OptionQuoteRow, StoredContract,
 };
 use crate::engine::instrument::Instrument;
 use crate::engine::options::ContractSpec;
-use crate::engine::types::{Candle, CandleRow, Granularity};
+use crate::engine::types::Granularity;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use sqlx::PgPool;
@@ -354,13 +353,6 @@ pub struct PersistCandles {
     pub to: Option<NaiveDate>,
 }
 
-/// `rows` in time order with one row per time, the first of each kept.
-fn one_per_time(mut rows: Vec<CandleRow>) -> Vec<CandleRow> {
-    rows.sort_by_key(|r| r.candle.time);
-    rows.dedup_by_key(|r| r.candle.time);
-    rows
-}
-
 /// The listing Questrade calls `symbol`, which must be in the master: the
 /// feeds store nothing for an instrument nobody has added.
 async fn require_instrument(state: &AppState, symbol: &str) -> AppResult<Instrument> {
@@ -428,39 +420,11 @@ pub async fn persist_candles(
         .await?;
     drop(client);
 
-    // Only bars that have fully closed: a run during the session must not
-    // store a still-forming bar that the next run would see differently.
-    let rows: Vec<CandleRow> = raw
-        .iter()
-        .map(Candle::try_from)
-        .collect::<AppResult<Vec<_>>>()?
-        .into_iter()
-        .map(|candle| match granularity {
-            Granularity::D => Candle {
-                time: stock_day_open(candle.time),
-                ..candle
-            },
-            _ => candle,
-        })
-        .filter(|c| stock_bar_final_at(c.time, granularity) <= now)
-        .map(|candle| CandleRow {
-            instrument: symbol.clone(),
-            granularity,
-            candle,
-        })
-        .collect();
-
-    // Questrade now and then sends a day twice (a midnight bar and a 01:00
-    // copy of it); stamped alike, one write can't take both: keep the first.
-    let rows = one_per_time(rows);
-    // Daily bars come split-adjusted as of the fetch: after a split, older
-    // stored history is put on the new scale.
-    let rescaled = adjusted::match_stored_scale(&state.db, &rows)
-        .await
-        .map_err(AppError::Database)?;
-    let stored = candles_repo::upsert_candles(&state.db, &rows)
-        .await
-        .map_err(AppError::Database)?;
+    let bars::Stored {
+        rows,
+        written: stored,
+        rescaled,
+    } = bars::store(&state.db, &symbol, granularity, &raw, now).await?;
     tracing::info!(
         "Persisted {} Questrade {} {} candles ({} days)",
         stored,
@@ -756,32 +720,7 @@ mod tests {
 
     use super::*;
     use crate::engine::options::OptionKind;
-    use crate::engine::types::OHLC;
-
-    #[test]
-    fn a_day_sent_twice_is_stored_once() {
-        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
-        let row = |time: DateTime<Utc>, close: f64| CandleRow {
-            instrument: "DIA".into(),
-            granularity: Granularity::D,
-            candle: Candle::from_trade_bar(
-                time,
-                OHLC {
-                    open: close,
-                    high: close,
-                    low: close,
-                    close,
-                },
-                0.0,
-            ),
-        };
-        let day = stock_day_open(at("1999-10-05T00:00:00-04:00"));
-        let copy = stock_day_open(at("1999-10-05T01:00:00-04:00"));
-        let next = stock_day_open(at("1999-10-06T00:00:00-04:00"));
-        let rows = one_per_time(vec![row(day, 104.0), row(copy, 104.0), row(next, 105.0)]);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[1].candle.time, next);
-    }
+    use crate::engine::types::Candle;
 
     #[test]
     fn equity_candle_converts_offset_time_to_utc() {

@@ -28,6 +28,11 @@ const OPTION_QUOTE_BATCH: usize = 100;
 /// limit) isn't waited for, and the retry fails as the first did.
 const MAX_RATE_LIMIT_WAIT: StdDuration = StdDuration::from_secs(5);
 
+/// The least time between two requests: at most 10 a second, half of
+/// Questrade's per-second market-data limit, whoever is asking (the live
+/// bar feed, a nightly job, a page).
+const REQUEST_SPACING: StdDuration = StdDuration::from_millis(100);
+
 /// Tries at writing a rotated refresh token to the DB before giving up loudly.
 const TOKEN_PERSIST_ATTEMPTS: u32 = 3;
 
@@ -44,6 +49,11 @@ pub struct QuestradeClient {
     expires_at: Option<DateTime<Utc>>,
     /// ticker (uppercase) → Questrade numeric symbol ID; populated on first search
     symbol_cache: HashMap<String, i64>,
+    /// When the last request left, for `REQUEST_SPACING`.
+    last_request: Option<tokio::time::Instant>,
+    /// Requests Questrade says are left in the current window
+    /// (`X-RateLimit-Remaining` on its last answer).
+    rate_remaining: Option<u32>,
 }
 
 /// The names the tokens are sealed under (`secrets`).
@@ -139,7 +149,24 @@ impl QuestradeClient {
             api_server: None,
             expires_at: None,
             symbol_cache: HashMap::new(),
+            last_request: None,
+            rate_remaining: None,
         })
+    }
+
+    /// Requests Questrade said were left in its current window, on its last
+    /// answer; none before the first. The live bar feed holds back when it's
+    /// low, so pages and nightly jobs keep their share.
+    pub fn rate_remaining(&self) -> Option<u32> {
+        self.rate_remaining
+    }
+
+    /// Wait out `REQUEST_SPACING` since the last request, then mark this one.
+    async fn pace(&mut self) {
+        if let Some(last) = self.last_request {
+            tokio::time::sleep_until(last + REQUEST_SPACING).await;
+        }
+        self.last_request = Some(tokio::time::Instant::now());
     }
 
     /// Exchange the current refresh token for a fresh access token.
@@ -280,6 +307,7 @@ impl QuestradeClient {
     ) -> AppResult<reqwest::Response> {
         self.ensure_authenticated().await?;
 
+        self.pace().await;
         let resp = self.send(&method, path, &build).await?;
         let resp = match resp.status() {
             reqwest::StatusCode::UNAUTHORIZED => {
@@ -290,6 +318,7 @@ impl QuestradeClient {
                     self.expires_at
                 );
                 self.authenticate().await?;
+                self.pace().await;
                 self.send(&method, path, &build).await?
             }
             reqwest::StatusCode::TOO_MANY_REQUESTS => {
@@ -298,10 +327,14 @@ impl QuestradeClient {
                     "Questrade 429 — waiting {wait:?} for the rate limit, then retrying"
                 );
                 tokio::time::sleep(wait).await;
+                self.pace().await;
                 self.send(&method, path, &build).await?
             }
             _ => resp,
         };
+        if let Some(remaining) = header_number(resp.headers(), "X-RateLimit-Remaining") {
+            self.rate_remaining = Some(remaining);
+        }
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -467,18 +500,11 @@ impl QuestradeClient {
             let start_time = format!("{}T00:00:00.000000-05:00", chunk_start);
             let end_time = format!("{}T23:59:59.999999-05:00", chunk_end);
 
-            let path = format!("markets/candles/{}", symbol_id);
             let result = self
-                .request(Method::GET, &path, |rb| {
-                    rb.query(&[
-                        ("startTime", start_time.as_str()),
-                        ("endTime", end_time.as_str()),
-                        ("interval", interval),
-                    ])
-                })
+                .candles_window(symbol_id, &start_time, &end_time, interval)
                 .await;
 
-            let resp = match result {
+            let candles = match result {
                 Err(e @ AppError::BrokerHttp { status: 400, .. }) if fetched_any_chunk => {
                     tracing::info!(
                         "Questrade candles {}..{} hit data-retention boundary ({}); stopping pagination",
@@ -487,14 +513,9 @@ impl QuestradeClient {
                     break;
                 }
                 Err(e) => return Err(e),
-                Ok(r) => r,
+                Ok(candles) => candles,
             };
             fetched_any_chunk = true;
-
-            let parsed: CandlesResponse = resp
-                .json()
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to parse candles: {}", e)))?;
 
             tracing::debug!(
                 "Questrade candles symbolId={} interval={} {}..{}: {} bars",
@@ -502,18 +523,9 @@ impl QuestradeClient {
                 interval,
                 chunk_start,
                 chunk_end,
-                parsed.candles.len()
+                candles.len()
             );
-
-            all_candles.extend(parsed.candles.into_iter().map(|c| EquityCandle {
-                time: c.start,
-                open: c.open,
-                high: c.high,
-                low: c.low,
-                close: c.close,
-                volume: c.volume,
-                vwap: c.vwap,
-            }));
+            all_candles.extend(candles);
 
             chunk_end = chunk_start - Duration::days(1);
         }
@@ -523,6 +535,57 @@ impl QuestradeClient {
         all_candles.dedup_by(|a, b| a.time == b.time);
 
         Ok(all_candles)
+    }
+
+    /// The bars from `from` to `to` in one request, for the live bar feed's
+    /// short windows (well under the 20k-bar cap).
+    pub async fn get_candles_between(
+        &mut self,
+        symbol_id: i64,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        interval: &str,
+    ) -> AppResult<Vec<EquityCandle>> {
+        let stamp = |t: DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        self.candles_window(symbol_id, &stamp(from), &stamp(to), interval)
+            .await
+    }
+
+    /// One `markets/candles` request.
+    async fn candles_window(
+        &mut self,
+        symbol_id: i64,
+        start_time: &str,
+        end_time: &str,
+        interval: &str,
+    ) -> AppResult<Vec<EquityCandle>> {
+        let path = format!("markets/candles/{}", symbol_id);
+        let resp = self
+            .request(Method::GET, &path, |rb| {
+                rb.query(&[
+                    ("startTime", start_time),
+                    ("endTime", end_time),
+                    ("interval", interval),
+                ])
+            })
+            .await?;
+        let parsed: CandlesResponse = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to parse candles: {}", e)))?;
+        Ok(parsed
+            .candles
+            .into_iter()
+            .map(|c| EquityCandle {
+                time: c.start,
+                open: c.open,
+                high: c.high,
+                low: c.low,
+                close: c.close,
+                volume: c.volume,
+                vwap: c.vwap,
+            })
+            .collect())
     }
 
     /// Fetch current quotes for one or more symbol IDs.
@@ -600,6 +663,11 @@ impl QuestradeClient {
         }
         Ok(quotes)
     }
+}
+
+/// A whole-number header, such as `X-RateLimit-Remaining`.
+fn header_number(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u32> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
 }
 
 /// How long a 429 asks us to wait: until `X-RateLimit-Reset` (Unix seconds),
