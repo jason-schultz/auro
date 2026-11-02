@@ -648,6 +648,34 @@ defmodule Opus.Auro.Client do
     |> handle_response()
   end
 
+  @doc """
+  Each connection the engine can change while running (`oanda`,
+  `massive`): in use since, the last check, and whether a restart is
+  needed to switch accounts (GET /api/settings/status).
+  """
+  @spec settings_status() :: {:ok, map()} | {:error, term()}
+  def settings_status do
+    client()
+    |> Req.get(url: "/api/settings/status", retry: false)
+    |> handle_response()
+  end
+
+  @doc """
+  Have the engine check `connection`'s saved settings and put them in use
+  if they work (POST /api/settings/apply). Answers that connection's status.
+  """
+  @spec apply_settings(String.t()) :: {:ok, map()} | {:error, term()}
+  def apply_settings(connection) do
+    client()
+    |> Req.post(
+      url: "/api/settings/apply",
+      json: %{connection: connection},
+      receive_timeout: 60_000,
+      retry: false
+    )
+    |> handle_response()
+  end
+
   @doc "Wealthsimple accounts with their hand-entered positions."
   @spec wealthsimple_accounts() :: {:ok, [map()]} | {:error, term()}
   def wealthsimple_accounts do

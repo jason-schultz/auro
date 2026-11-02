@@ -65,13 +65,13 @@ pub async fn persist_dividends(
     State(state): State<AppState>,
     Json(body): Json<PersistDividends>,
 ) -> AppResult<Json<Value>> {
-    let Some(massive) = state.massive.as_ref() else {
+    let Some(massive) = state.connections.massive() else {
         return Err(AppError::Internal("Massive not configured".into()));
     };
     let symbol = body.symbol.trim().to_uppercase();
     let instrument = require_instrument(&state, &symbol).await?;
     Ok(Json(
-        load_dividends(&state, massive, &instrument, &symbol).await?,
+        load_dividends(&state, &massive, &instrument, &symbol).await?,
     ))
 }
 
@@ -165,7 +165,7 @@ pub async fn persist_candles(
     State(state): State<AppState>,
     Json(body): Json<PersistCandles>,
 ) -> AppResult<Json<Value>> {
-    let Some(massive) = state.massive.as_ref() else {
+    let Some(massive) = state.connections.massive() else {
         return Err(AppError::Internal("Massive not configured".into()));
     };
     let granularity: Granularity = body.granularity.parse().map_err(AppError::BadRequest)?;
@@ -201,7 +201,7 @@ pub async fn persist_candles(
             .await
             .map_err(AppError::Database)?
     {
-        load_dividends(&state, massive, &instrument, &symbol).await?;
+        load_dividends(&state, &massive, &instrument, &symbol).await?;
     }
 
     let stored = candles_repo::upsert_candles(&state.db, &rows)
@@ -291,7 +291,7 @@ pub async fn sync_option_contracts(
     State(state): State<AppState>,
     Json(body): Json<SyncContracts>,
 ) -> AppResult<Json<Value>> {
-    let Some(massive) = state.massive.as_ref() else {
+    let Some(massive) = state.connections.massive() else {
         return Err(AppError::Internal("Massive not configured".into()));
     };
     body.window.validate()?;
@@ -352,7 +352,7 @@ pub async fn persist_option_bars(
     State(state): State<AppState>,
     Json(body): Json<PersistOptionBars>,
 ) -> AppResult<Json<Value>> {
-    let Some(massive) = state.massive.as_ref() else {
+    let Some(massive) = state.connections.massive() else {
         return Err(AppError::Internal("Massive not configured".into()));
     };
     body.window.validate()?;

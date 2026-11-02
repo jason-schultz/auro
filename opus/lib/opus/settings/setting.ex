@@ -9,5 +9,6 @@ defmodule Opus.Settings.Setting do
     field :updated_at, :utc_datetime_usec
     field :tested_at, :utc_datetime_usec
     field :test_result, :string
+    field :test_ok, :boolean
   end
 end

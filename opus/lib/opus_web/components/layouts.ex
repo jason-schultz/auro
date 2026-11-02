@@ -13,7 +13,7 @@ defmodule OpusWeb.Layouts do
 
   @doc """
   Renders the app layout: a one-line header with the Auro wordmark, the
-  page links and the theme toggle, then a single centred column.
+  page links, then a single centred column.
 
   ## Examples
 
@@ -52,7 +52,6 @@ defmodule OpusWeb.Layouts do
           <.link navigate={~p"/instruments"} class="py-2 text-muted hover:text-base-content"><.t {copy("Instruments")} /></.link>
           <.link navigate={~p"/research"} class="py-2 text-muted hover:text-base-content"><.t {copy("Research")} /></.link>
           <.link navigate={~p"/settings"} class="py-2 text-muted hover:text-base-content"><.t {copy("Settings")} /></.link>
-          <.theme_toggle />
         </nav>
       </div>
     </header>
@@ -156,55 +155,6 @@ defmodule OpusWeb.Layouts do
         Attempting to reconnect
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
-    </div>
-    """
-  end
-
-  @doc """
-  Provides dark vs light theme toggle based on themes defined in app.css.
-
-  See <head> in root.html.heex which applies the theme before page load.
-  """
-  def theme_toggle(assigns) do
-    ~H"""
-    <div class="card relative flex flex-row items-center border border-base-300 bg-base-300 rounded-full">
-      <div class="absolute w-1/4 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/4 [[data-theme=dark]_&]:left-2/4 [[data-theme=wsb]_&]:left-3/4 [[data-theme-source=system]_&]:!left-0 transition-[left]" />
-
-      <button
-        class="flex p-2 cursor-pointer w-1/4"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="system"
-        aria-label="Use system theme"
-      >
-        <.icon name="hero-computer-desktop-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/4"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="light"
-        aria-label="Use light theme"
-      >
-        <.icon name="hero-sun-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/4"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="dark"
-        aria-label="Use dark theme"
-      >
-        <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/4"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="wsb"
-        aria-label="Use the WallStreetBets theme"
-      >
-        <.icon name="hero-rocket-launch-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
     </div>
     """
   end

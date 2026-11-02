@@ -1,8 +1,8 @@
 use reqwest::{Client, RequestBuilder, Response};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tokio::time::Instant;
 
 use super::models::*;
@@ -11,7 +11,8 @@ use crate::brokers::{BrokerAccount, BrokerKind, BrokerStatus};
 use crate::engine::pipeline::{instrument_class, InstrumentClass};
 use crate::error::{AppError, AppResult};
 
-#[derive(Debug, Clone)]
+/// No `Debug` derive: the key is a secret (see the manual impl below).
+#[derive(Clone)]
 pub struct OandaClient {
     http_client: Client,
     /// The earliest moment the next REST request may leave. Shared by every
@@ -20,8 +21,24 @@ pub struct OandaClient {
     next_slot: Arc<Mutex<Instant>>,
     base_url: String,
     stream_url: String,
-    api_key: String,
+    /// Shared by every clone, so a key saved on Opus's Settings page
+    /// (`POST /api/settings/apply`) reaches the feed, the evaluator and the
+    /// handlers on their next request. The account and addresses are fixed
+    /// for the life of the process: what's held in memory belongs to them.
+    api_key: Arc<RwLock<String>>,
+    /// Bumped on each key change; the price stream reconnects on it.
+    key_changed: Arc<watch::Sender<u64>>,
     account_id: String,
+}
+
+impl std::fmt::Debug for OandaClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OandaClient")
+            .field("base_url", &self.base_url)
+            .field("stream_url", &self.stream_url)
+            .field("account_id", &self.account_id)
+            .finish_non_exhaustive()
+    }
 }
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -43,13 +60,59 @@ impl OandaClient {
             next_slot: Arc::new(Mutex::new(Instant::now())),
             base_url: base_url.trim_end_matches('/').to_string(),
             stream_url: stream_url.trim_end_matches('/').to_string(),
-            api_key: api_key.to_string(),
+            api_key: Arc::new(RwLock::new(api_key.to_string())),
+            key_changed: Arc::new(watch::channel(0).0),
             account_id: account_id.to_string(),
         }
     }
 
     pub fn account_id(&self) -> &str {
         &self.account_id
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn stream_url(&self) -> &str {
+        &self.stream_url
+    }
+
+    /// The key in use now.
+    fn key(&self) -> String {
+        self.api_key
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Ask OANDA for this account with `key`, without touching the key in
+    /// use: a check before `set_key`.
+    pub async fn try_key(&self, key: &str) -> AppResult<Account> {
+        Self::new(&self.base_url, &self.stream_url, key, &self.account_id)
+            .get_account()
+            .await
+    }
+
+    /// Use `key` from the next request on, in every clone. Returns whether
+    /// it differs from the key in use; only then does the stream reconnect.
+    pub fn set_key(&self, key: &str) -> bool {
+        let mut current = self
+            .api_key
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *current == key {
+            return false;
+        }
+        *current = key.to_string();
+        drop(current);
+        self.key_changed.send_modify(|generation| *generation += 1);
+        true
+    }
+
+    /// Notified on each key change (`set_key`).
+    pub fn key_changes(&self) -> watch::Receiver<u64> {
+        self.key_changed.subscribe()
     }
 
     /// Wait for this request's slot in the shared pacing budget, then send.
@@ -66,6 +129,17 @@ impl OandaClient {
         request.send().await
     }
 
+    /// Send an order now, ahead of whatever is queued: a fill must not wait
+    /// behind the candle feed's polls. It still takes a slot in the budget
+    /// (the queue moves back by one), so the overall rate holds.
+    async fn send_priority(&self, request: RequestBuilder) -> reqwest::Result<Response> {
+        {
+            let mut next = self.next_slot.lock().await;
+            *next = (*next).max(Instant::now()) + REQUEST_SPACING;
+        }
+        request.send().await
+    }
+
     // --- Account ---
 
     pub async fn get_account(&self) -> AppResult<Account> {
@@ -75,7 +149,7 @@ impl OandaClient {
             .send(
                 self.http_client
                     .get(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.key())
                     .timeout(REQUEST_TIMEOUT),
             )
             .await
@@ -115,7 +189,7 @@ impl OandaClient {
             .send(
                 self.http_client
                     .get(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.key())
                     .timeout(REQUEST_TIMEOUT),
             )
             .await
@@ -146,7 +220,7 @@ impl OandaClient {
             .send(
                 self.http_client
                     .get(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.key())
                     .query(&[("instruments", &instruments_param)])
                     .timeout(REQUEST_TIMEOUT),
             )
@@ -185,7 +259,7 @@ impl OandaClient {
             .send(
                 self.http_client
                     .get(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.key())
                     .query(&query)
                     .timeout(REQUEST_TIMEOUT),
             )
@@ -222,7 +296,7 @@ impl OandaClient {
         let resp = self
             .http_client
             .get(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.key())
             .query(&[("instruments", &instruments_param)])
             .send()
             .await
@@ -266,10 +340,10 @@ impl OandaClient {
         });
 
         let resp = self
-            .send(
+            .send_priority(
                 self.http_client
                     .post(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.key())
                     .json(&body)
                     .timeout(REQUEST_TIMEOUT),
             )
@@ -305,7 +379,7 @@ impl OandaClient {
             .send(
                 self.http_client
                     .get(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.key())
                     .timeout(REQUEST_TIMEOUT),
             )
             .await
@@ -341,10 +415,10 @@ impl OandaClient {
         };
 
         let resp = self
-            .send(
+            .send_priority(
                 self.http_client
                     .put(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.key())
                     .json(&body)
                     .timeout(REQUEST_TIMEOUT),
             )
@@ -382,7 +456,7 @@ impl OandaClient {
             .send(
                 self.http_client
                     .get(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.key())
                     .timeout(REQUEST_TIMEOUT),
             )
             .await
@@ -413,7 +487,7 @@ impl OandaClient {
             .send(
                 self.http_client
                     .get(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.key())
                     .timeout(REQUEST_TIMEOUT),
             )
             .await
@@ -444,7 +518,7 @@ impl OandaClient {
             .send(
                 self.http_client
                     .get(&url)
-                    .bearer_auth(&self.api_key)
+                    .bearer_auth(self.key())
                     .query(&[("id", since_id), ("type", "ORDER_FILL")])
                     .timeout(REQUEST_TIMEOUT),
             )
@@ -592,5 +666,27 @@ mod environment_tests {
         assert!(practice.is_practice());
         assert!(!live.is_practice());
         assert_eq!(live.environment(), "Live");
+    }
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_order_goes_ahead_of_a_backed_up_queue_and_takes_its_slot() {
+        let client = OandaClient::new("http://127.0.0.1:1", "http://127.0.0.1:1", "k", "a");
+        // As if the candle feed had queued five seconds of polls.
+        let backlog = Instant::now() + Duration::from_secs(5);
+        *client.next_slot.lock().await = backlog;
+
+        let started = Instant::now();
+        // Nothing listens on port 1: the send fails at once, unqueued.
+        let _ = client
+            .send_priority(client.http_client.get("http://127.0.0.1:1/"))
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // The queue moved back one slot for it.
+        assert_eq!(*client.next_slot.lock().await, backlog + REQUEST_SPACING);
     }
 }

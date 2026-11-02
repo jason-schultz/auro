@@ -7,6 +7,9 @@ Releases start once Auro runs locally as a service; until then everything is in 
 
 ## Version 0.1.0 (TBD)
 
+- Live stock bar feed: the engine stores Questrade 1- and 5-minute bars as they close during the US session (every `feed_questrade_bars` listing, plus any enabled non-OANDA strategy's timeframe first), paced at 10 requests a second and holding back when Questrade's remaining-request count runs low; the nightly fetch becomes reconciliation; OANDA orders and closes now go ahead of queued bar polls (commit pending)
+- Settings rebuilt as Integrations (tiles by group, Needs attention, a panel per integration at its own address) and Appearance (the theme, out of the top bar); saved OANDA and Massive keys are checked by the engine and put in use without a restart (`POST /api/settings/apply`, `GET /api/settings/status`); the price stream reconnects on a new key; only switching the OANDA account waits for a restart; Wealthsimple is no longer an integration (commit pending)
+- Questrade has its own card on the Settings page (connected or not, Test, paste a new token); the Accounts page links there when Questrade is offline (commit pending)
 - Settings page: OANDA, Massive and Discord keys saved in the database, secrets encrypted (AES-256-GCM, `AURO_SECRETS_KEY`), each with a read-only Test; both apps read a saved value ahead of `.env`; Questrade tokens encrypted at rest (commit pending)
 - Run as launchd services from a built release (`scripts/install_services.sh`, `scripts/deploy.sh` with health checks and rollback); dev Opus moves to port 4322 and runs no jobs or account workers; nightly database backup (`scripts/backup_db.sh`); Opus release reads the OANDA URL at run time (commit pending)
 - Regime detector deleted (step 2, after the restart) ([6fcbb21](https://github.com/jason-schultz/auro/commit/6fcbb21688698b15ec35d7626cf4ae44211b3ce3))

@@ -101,9 +101,11 @@ config :opus, Oban,
 # Which instruments each feed stores is a flag on the `instruments` table
 # (the Instruments page); config keeps only the feed parameters.
 
-# Questrade intraday bars persisted daily via Rust for the listings flagged
+# Questrade bars re-pulled nightly via Rust for the listings flagged
 # `feed_questrade_bars` and the Wealthsimple holdings (daily bars too for
-# holdings no other feed covers).
+# holdings no other feed covers). Reconciliation: the engine's live stock
+# feed stores the 1- and 5-minute bars as they close; this fills what it
+# missed and adds the daily bars, final only after the close.
 config :opus, Opus.MarketData.QuestradeBarsWorker,
   days: 5,
   granularities: ["M1", "M5"],

@@ -2,6 +2,7 @@ pub mod http;
 
 use std::sync::Arc;
 
+use auro::brokers::connections::Connections;
 use auro::brokers::oanda::client::OandaClient;
 use auro::brokers::questrade::link::QuestradeLink;
 use auro::brokers::wealthsimple::client::WealthsimpleClient;
@@ -50,6 +51,6 @@ pub fn test_state() -> AppState {
         price_tx,
         questrade: Arc::new(QuestradeLink::default()),
         wealthsimple,
-        massive: None,
+        connections: Arc::new(Connections::default()),
     }
 }

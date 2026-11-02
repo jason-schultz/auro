@@ -7,6 +7,7 @@ pub mod prefill;
 pub mod pricing;
 pub mod quotes;
 pub mod sizing;
+pub mod stock_feed;
 pub mod trade_management;
 
 use std::future::Future;

@@ -13,8 +13,9 @@ defmodule Opus.Oanda.Client do
   @base_url "https://api-fxpractice.oanda.com"
 
   # Saved on the Settings page first (`Opus.Settings`), else .env.
-  def base_url,
-    do: Settings.get("OANDA_BASE_URL") || Application.get_env(:opus, :oanda_base_url, @base_url)
+  # The address comes with the kind of account (practice here), not from
+  # the Settings page.
+  def base_url, do: Application.get_env(:opus, :oanda_base_url, @base_url)
 
   def account_id,
     do: Settings.get("OANDA_ACCOUNT_ID") || Application.get_env(:opus, :oanda_account_id)
